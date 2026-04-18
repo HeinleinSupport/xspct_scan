@@ -1,0 +1,2 @@
+# Sphinx build output - exclude from REUSE scanning
+docs/_build

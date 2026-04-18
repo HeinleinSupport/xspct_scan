@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: EUPL-1.2
+# Copyright (C) 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
+
+version = 1
+
+# ── Binary test fixtures (from oletools, BSD 2-Clause) ──────────────────────
+[[annotations]]
+path = [
+    "tests/fixtures/autostart-encrypt-standardpassword.xls",
+    "tests/fixtures/RTF-Spec-1.7.rtf",
+]
+SPDX-FileCopyrightText = "2012-2022 Philippe Lagadec (http://www.decalage.info)"
+SPDX-License-Identifier = "BSD-2-Clause"
+
+# ── Password wordlist ────────────────────────────────────────────────────────
+[[annotations]]
+path = "tests/fixtures/passwords.txt"
+SPDX-FileCopyrightText = "2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>"
+SPDX-License-Identifier = "EUPL-1.2"
+
+# ── Agent / documentation files ─────────────────────────────────────────────
+[[annotations]]
+path = [
+    ".github/agents/olefy-feature.agent.md",
+    ".gitignore",
+    ".reuseignore",
+    "docs/**",
+]
+SPDX-FileCopyrightText = "2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>"
+SPDX-License-Identifier = "EUPL-1.2"
+
+# ── Generated build and cache artifacts ─────────────────────────────────────
+[[annotations]]
+path = [
+    ".pytest_cache/**",
+    "src/olefy_v2.egg-info/**",
+    "src/olefy_v2/__pycache__/**",
+    "tests/__pycache__/**",
+    "docs/_build/**",
+    "docs/_build/**/**",
+    "docs/_build/**/**/**",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>"
+SPDX-License-Identifier = "EUPL-1.2"

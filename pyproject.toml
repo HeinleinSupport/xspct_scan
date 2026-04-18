@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: EUPL-1.2
+# Copyright (C) 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "olefy_v2"
+version = "2.0.0"
+description = "Async HTTP daemon for scanning Office/PDF/HTML documents for malware indicators"
+requires-python = ">=3.10"
+dependencies = [
+    "aiohttp>=3.9",
+    "oletools>=0.60",
+    "msoffcrypto-tool>=6.0",
+    "python-magic>=0.4",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+uvloop = ["uvloop>=0.19"]
+redis  = ["redis[asyncio]>=5.0"]
+dev    = [
+    "pytest>=9",
+    "pytest-asyncio>=1.0",
+    "pytest-aiohttp>=1.0",
+]
+docs   = [
+    "sphinx>=7",
+    "furo>=2024",
+    "sphinx-autodoc-typehints>=2",
+    "myst-parser>=3",
+]
+
+[project.scripts]
+olefy_v2 = "olefy_v2.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths   = ["tests"]
