@@ -616,8 +616,9 @@ class InspectorDaemon:
         """Analyse an HTML document for phishing and malware indicators.
 
         Detects suspicious JavaScript functions, HTML forms, iframes,
-        meta-refresh redirects, and large Base64-encoded blobs that may
-        indicate HTML smuggling.
+        meta-refresh redirects, large Base64-encoded blobs that may
+        indicate HTML smuggling, and injected tracker/affiliate redirect
+        scripts (``<script src="…?u=…">`` pattern used in spam campaigns).
 
         Args:
             data: Raw HTML bytes.
@@ -685,6 +686,22 @@ class InspectorDaemon:
             report['analyses'].append({
                 'type': 'HTMLSmuggling', 'keyword': 'base64-blob',
                 'description': f'Large Base64-like blob found ({len(blobs)} blobs > 1000 chars)',
+            })
+        # Spam/malware: <script src="https://evil.com/?u=<base62token>">
+        # A short alphanumeric tracker token after ?u= is the canonical pattern
+        # used to inject remote affiliate/redirect loaders into HTML mail.
+        tracker_scripts = re.findall(
+            r'<script[^>]+src=["\']([^"\']*\?u=[a-zA-Z0-9]{8,}[^"\']*)["\']',
+            text, re.I,
+        )
+        if tracker_scripts:
+            report['analyses'].append({
+                'type': 'SpamRedirect',
+                'keyword': 'script-tracker-url',
+                'description': (
+                    f'Injected tracker/affiliate redirect script found '
+                    f'({len(tracker_scripts)} URL(s) with ?u= parameter)'
+                ),
             })
         report['iocs'] = self.extract_iocs(data)
         report['text_preview'] = self.extract_text_preview(data, 'text/html')
@@ -1100,7 +1117,7 @@ class InspectorDaemon:
                            types_to_run: 'list | None' = None) -> dict:
         """Run :meth:`sync_analyze` in a thread-pool and cache the result.
 
-        Wraps :meth:`sync_analyze` with :func:`asyncio.get_running_loop`\ ``.run_in_executor`` so CPU-bound oletools work does not block the
+        Wraps :meth:`sync_analyze` with :func:`asyncio.get_running_loop` (``.run_in_executor``) so CPU-bound oletools work does not block the
         event loop, then persists the finished report via
         :meth:`cache_report`.
 
