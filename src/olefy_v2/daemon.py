@@ -31,6 +31,7 @@ import contextvars
 import zipfile
 from collections import OrderedDict
 
+import olefile as _olefile
 import magic
 import msoffcrypto
 import yaml
@@ -47,6 +48,37 @@ except ImportError:
         HAS_REDIS = True
     except ImportError:
         HAS_REDIS = False
+
+try:
+    import fitz  # PyMuPDF
+    HAS_PYMUPDF = True
+except ImportError:
+    HAS_PYMUPDF = False
+
+try:
+    import jsbeautifier as _jsbeautifier
+    HAS_JSBEAUTIFIER = True
+except ImportError:
+    HAS_JSBEAUTIFIER = False
+
+try:
+    import quickjs as _quickjs
+    HAS_QUICKJS = True
+except ImportError:
+    HAS_QUICKJS = False
+
+try:
+    from PIL import Image as _PILImage
+    import pytesseract as _pytesseract
+    HAS_OCR = True
+except ImportError:
+    HAS_OCR = False
+
+try:
+    from pyzbar import pyzbar as _pyzbar
+    HAS_PYZBAR = True
+except ImportError:
+    HAS_PYZBAR = False
 
 # ---------------------------------------------------------------------------
 # Per-request timer (ContextVar — isolated per async task)
@@ -540,14 +572,313 @@ class InspectorDaemon:
         return {'urls': urls, 'ips': ips, 'domains': domains}
 
     # ------------------------------------------------------------------
+    # JavaScript static analysis + sandbox
+    # ------------------------------------------------------------------
+
+    # Patterns that indicate a script is worth looking at more closely
+    _JS_SUSPICIOUS = [
+        (r'\beval\s*\(',               'SuspiciousJS', 'eval()',               'Use of eval() for dynamic code execution'),
+        (r'\bunescape\s*\(',           'SuspiciousJS', 'unescape()',           'Use of unescape() — common obfuscation'),
+        (r'\batob\s*\(',               'SuspiciousJS', 'atob()',               'Use of atob() for Base64 decoding'),
+        (r'String\.fromCharCode\s*\(', 'SuspiciousJS', 'String.fromCharCode','Character-code obfuscation'),
+        (r'document\.write\s*\(',      'SuspiciousJS', 'document.write()',    'Dynamic content injection'),
+        (r'this\.exportDataObject\b',  'SuspiciousJS', 'exportDataObject()',  'PDF exportDataObject — can write files to disk'),
+        (r'app\.launchURL\b',          'SuspiciousJS', 'app.launchURL()',     'Launches external URLs from PDF'),
+        (r'app\.openDoc\b',            'SuspiciousJS', 'app.openDoc()',       'Opens external documents from PDF'),
+        (r'util\.printf\b',            'SuspiciousJS', 'util.printf()',       'Used in heap-spray exploits'),
+        (r'ActiveXObject\b',           'SuspiciousJS', 'ActiveXObject',       'ActiveX object instantiation'),
+        (r'WScript\b',                 'SuspiciousJS', 'WScript',             'Windows Script Host reference'),
+        (r'ShellExecute\b',            'SuspiciousJS', 'ShellExecute',        'Shell execution attempt'),
+    ]
+
+    def analyze_javascript(self, js_src: str, source_label: str = '') -> list[dict]:
+        """Analyse a JavaScript snippet for suspicious patterns and optionally emulate it.
+
+        First beautifies the source with ``jsbeautifier`` (if available) and
+        input ≤ 512 KB to defeat trivial minification.  Then runs static regex
+        checks for known dangerous patterns.  Finally, when ``quickjs`` is
+        available and the input is ≤ 512 KB, executes the snippet in a
+        sandboxed QuickJS engine with a 32 MB heap cap, 256 KB stack cap, and
+        a 2-second CPU time limit.  Output collected via ``print()`` /
+        ``console.log()`` is further limited to 500 calls / 64 KB to prevent
+        Python-side memory exhaustion.
+
+        ``source_label`` is sanitised (control characters stripped, capped at
+        80 chars) before being embedded in any report string.
+
+        Args:
+            js_src: JavaScript source code as a string.
+            source_label: Human-readable label for log / analysis entries
+                (e.g. ``'PDF /OpenAction'`` or ``'HTML <script>'``).
+
+        Returns:
+            List of analysis dicts with keys ``type``, ``keyword``,
+            ``description``, and (for ``DynamicJS`` hits) ``confidence``.
+
+            Notable ``type`` values:
+
+            - **SuspiciousJS**: Static match against a known-dangerous pattern.
+            - **DynamicJS**: Finding from QuickJS emulation output
+              (``confidence: 'low'`` — attacker controls the printed text).
+            - **DynamicJSError**: Host-level exception during emulation setup
+              or eval (unexpected; may indicate an engine issue).
+        """
+        if not js_src or not js_src.strip():
+            return []
+
+        # Sanitise the caller-supplied label before it is embedded in any
+        # report description string: strip control characters and cap length
+        # so a crafted filename/object-label cannot inject newlines, JSON
+        # special characters, or log-injection sequences.
+        if source_label:
+            source_label = re.sub(r'[\x00-\x1f\x7f]', '', source_label)[:80]
+
+        hits: list[dict] = []
+
+        # -- 1. Beautify -------------------------------------------------------
+        _JS_BEAUTIFY_LIMIT = 512 * 1024  # 512 KB — pure-Python parser; no time guard
+        if HAS_JSBEAUTIFIER and len(js_src) <= _JS_BEAUTIFY_LIMIT:
+            try:
+                opts = _jsbeautifier.default_options()
+                opts.unescape_strings = True
+                js_src = _jsbeautifier.beautify(js_src, opts)
+            except Exception as exc:
+                logger.debug('jsbeautifier failed (%s): %s', source_label, exc)
+        elif HAS_JSBEAUTIFIER:
+            logger.debug(
+                'jsbeautifier skipped for %s: input too large (%d bytes > %d)',
+                source_label, len(js_src), _JS_BEAUTIFY_LIMIT,
+            )
+
+        # -- 2. Static pattern scan -------------------------------------------
+        for pattern, a_type, keyword, desc in self._JS_SUSPICIOUS:
+            if re.search(pattern, js_src):
+                entry = {
+                    'type': a_type,
+                    'keyword': keyword,
+                    'description': f'{desc} [in {source_label}]' if source_label else desc,
+                }
+                if entry not in hits:
+                    hits.append(entry)
+
+        # -- 3. QuickJS sandbox emulation --------------------------------------
+        _JS_EMULATE_LIMIT = 512 * 1024  # 512 KB — parse/compile overhead guard
+        if HAS_QUICKJS and len(js_src) <= _JS_EMULATE_LIMIT:
+            try:
+                ctx = _quickjs.Context()
+                output: list[str] = []
+
+                # Stub out browser/PDF globals that the sandbox doesn't have
+                ctx.eval('''
+                    var document = {write: function(s){ print(s); }, cookie: '', location: {href:''}};
+                    var window = {location: {href:''}, navigator: {}};
+                    var app = {launchURL: print, openDoc: print};
+                    var console = {log: print, warn: print, error: print};
+                ''')
+
+                # Capture print() output
+                ctx.set_memory_limit(32 * 1024 * 1024)  # 32 MB heap cap
+                ctx.set_max_stack_size(256 * 1024)       # 256 KB stack — limits deep recursion
+                ctx.set_time_limit(2)  # 2-second CPU hard limit
+                # Replace print with a collector
+                # Caps: max 500 individual calls and 64 KB of total text so that a
+                # tight print-loop cannot grow the Python-side list unboundedly
+                # (QuickJS heap is capped separately via set_memory_limit/set_time_limit,
+                # but that does not constrain the host-Python memory used here).
+                _COLLECT_MAX_CALLS = 500
+                _COLLECT_MAX_BYTES = 64 * 1024
+                collected: list[str] = []
+                _collect_bytes = 0
+                _collect_truncated = False
+
+                def _collect(s=''):
+                    nonlocal _collect_bytes, _collect_truncated
+                    if _collect_truncated:
+                        return
+                    chunk = str(s)
+                    _collect_bytes += len(chunk)
+                    if len(collected) >= _COLLECT_MAX_CALLS or _collect_bytes > _COLLECT_MAX_BYTES:
+                        _collect_truncated = True
+                        return
+                    collected.append(chunk)
+
+                ctx.add_callable('print', _collect)
+                _js_runtime_error = False
+                try:
+                    ctx.eval(js_src)
+                except _quickjs.JSException as exc:
+                    _js_runtime_error = True
+                    logger.debug('QuickJS JSException (%s): %s', source_label, exc)
+                    # JSException is expected when stubs are incomplete; suppress the hit
+                    # to avoid false positives on clean scripts that reference browser APIs.
+                except Exception:
+                    pass
+
+                if collected:
+                    combined_output = ' '.join(collected)
+                    logger.debug('QuickJS output from %s (%s): %r',
+                                 source_label,
+                                 'truncated' if _collect_truncated else 'complete',
+                                 combined_output[:200])
+                    # Sanitise attacker-controlled output before embedding in the report:
+                    # replace control characters (including newlines) with a space so that
+                    # log-injection and JSON-breaking sequences cannot pass through.
+                    _safe_output = re.sub(r'[\x00-\x1f\x7f]', ' ', combined_output)[:120]
+                    # Scan emulated output for IOCs / suspicious strings
+                    if re.search(r'https?://', combined_output):
+                        hits.append({
+                            'type': 'DynamicJS',
+                            'keyword': 'emulated-url',
+                            # confidence:low because the script itself controls what is
+                            # printed — decoy URLs can be injected to pollute the report.
+                            'confidence': 'low',
+                            'description': (
+                                f'Dynamic JS emulation produced URL(s) '
+                                f'[{source_label}]: {_safe_output}'
+                            ),
+                        })
+                    if re.search(r'eval\(|unescape\(|atob\(', combined_output):
+                        hits.append({
+                            'type': 'DynamicJS',
+                            'keyword': 'emulated-obfuscation',
+                            # confidence:low for the same reason as emulated-url.
+                            'confidence': 'low',
+                            'description': (
+                                f'Emulated JS output contains obfuscation calls '
+                                f'[{source_label}]'
+                            ),
+                        })
+            except _quickjs.JSException as exc:
+                # JSException from the setup phase (e.g. stubs referencing undefined
+                # globals) — expected, same policy as the inner handler.
+                logger.debug('QuickJS setup JSException (%s): %s', source_label, exc)
+            except Exception as exc:
+                # A host-level (non-JS) exception during emulation setup or eval is
+                # genuinely unexpected and may mask errors in a malicious payload.
+                logger.debug('QuickJS emulation failed (%s): %s', source_label, exc)
+                hits.append({
+                    'type': 'DynamicJSError',
+                    'keyword': 'js-emulation-error',
+                    'description': (
+                        f'JS emulation raised a host-level error [{source_label}]: '
+                        f'{type(exc).__name__}'
+                    ),
+                })
+        elif HAS_QUICKJS:
+            logger.debug(
+                'QuickJS emulation skipped for %s: input too large (%d bytes > %d)',
+                source_label, len(js_src), _JS_EMULATE_LIMIT,
+            )
+
+        return hits
+
+    # ------------------------------------------------------------------
+    # Image analysis — OCR + QR/barcode
+    # ------------------------------------------------------------------
+
+    def analyze_image(self, image_data: bytes, label: str = '') -> dict:
+        """Run OCR and QR/barcode decoding on raw image bytes.
+
+        Uses ``pytesseract`` for OCR (English + German) and ``pyzbar`` for
+        QR codes and barcodes.  Falls back gracefully when either library is
+        unavailable.
+
+        Args:
+            image_data: Raw image bytes (PNG, JPEG, BMP, TIFF, …).
+            label: Human-readable source label for log messages.
+
+        Returns:
+            A dict with keys:
+
+            - **ocr_text** (str): Extracted text (empty when OCR unavailable).
+            - **qr_codes** (list[str]): Decoded QR/barcode values.
+            - **analyses** (list[dict]): Suspicious findings from OCR text.
+            - **iocs** (dict): URLs/IPs/domains extracted from OCR text.
+        """
+        result: dict = {
+            'ocr_text': '',
+            'qr_codes': [],
+            'analyses': [],
+            'iocs': {'urls': [], 'ips': [], 'domains': []},
+        }
+        if not image_data:
+            return result
+
+        img = None
+        if HAS_OCR or HAS_PYZBAR:
+            try:
+                img = _PILImage.open(io.BytesIO(image_data))
+            except Exception as exc:
+                logger.debug('PIL cannot open image (%s): %s', label, exc)
+                return result
+
+        # -- QR / barcode decoding -------------------------------------------
+        if HAS_PYZBAR and img is not None:
+            try:
+                decoded = _pyzbar.decode(img)
+                for sym in decoded:
+                    try:
+                        value = sym.data.decode('utf-8', 'ignore').strip()
+                    except Exception:
+                        value = repr(sym.data)
+                    if value:
+                        result['qr_codes'].append(value)
+                        result['analyses'].append({
+                            'type': 'QRCode',
+                            'keyword': sym.type,
+                            'description': f'{sym.type} decoded: {value[:120]}',
+                        })
+                        # Extract IOCs from QR content
+                        qr_iocs = self.extract_iocs(sym.data)
+                        for k in ('urls', 'ips', 'domains'):
+                            result['iocs'][k] = sorted(
+                                set(result['iocs'][k] + qr_iocs[k])
+                            )
+            except Exception as exc:
+                logger.debug('pyzbar decoding failed (%s): %s', label, exc)
+
+        # -- OCR -------------------------------------------------------------
+        if HAS_OCR and img is not None:
+            try:
+                ocr_text = _pytesseract.image_to_string(
+                    img, lang='eng+deu',
+                    config='--psm 3',
+                )
+                result['ocr_text'] = ocr_text.strip()
+                if ocr_text.strip():
+                    ocr_iocs = self.extract_iocs(ocr_text.encode('utf-8', 'ignore'))
+                    for k in ('urls', 'ips', 'domains'):
+                        result['iocs'][k] = sorted(
+                            set(result['iocs'][k] + ocr_iocs[k])
+                        )
+                    # Detect URL-only images (common in phishing PDFs)
+                    if ocr_iocs['urls']:
+                        result['analyses'].append({
+                            'type': 'OCRUrl',
+                            'keyword': 'ocr-url',
+                            'description': (
+                                f'URL found in image via OCR ({label}): '
+                                + ', '.join(ocr_iocs['urls'][:3])
+                            ),
+                        })
+            except Exception as exc:
+                logger.debug('pytesseract OCR failed (%s): %s', label, exc)
+
+        return result
+
+    # ------------------------------------------------------------------
     # PDF analysis
     # ------------------------------------------------------------------
 
     def analyze_pdf(self, data: bytes) -> 'dict | None':
         """Analyse a PDF document for malware indicators.
 
-        Searches for dangerous PDF markers (JavaScript, OpenAction, Launch,
-        EmbeddedFiles, XFA, Encrypt) and extracts ``/URI`` IOCs.
+        When PyMuPDF (``fitz``) is available the PDF object graph is walked
+        directly: JavaScript actions, URI/Launch/GoToR/SubmitForm link
+        annotations, embedded files, OpenAction, AcroForm/XFA fields, and
+        document-level JavaScript are all inspected via the parsed object
+        model rather than raw byte scanning.  A plain byte-scan fallback is
+        used when PyMuPDF is not installed.
 
         Args:
             data: Raw PDF bytes. Must start with ``%PDF``.
@@ -560,19 +891,254 @@ class InspectorDaemon:
                 - **has_openaction** (bool)
                 - **has_embedded_files** (bool)
                 - **has_launch** (bool)
+                - **has_forms** (bool)
                 - **is_encrypted** (bool)
                 - **analyses** (list[dict]): Detected indicators.
                 - **iocs** (dict): Extracted URLs, IPs, and domains.
                 - **text_preview** (str)
+                - **meta_document** (dict | None): Document properties
+                  extracted via PyMuPDF (``title``, ``author``, ``subject``,
+                  ``keywords``, ``creator``, ``producer``, ``creation_date``,
+                  ``mod_date``, ``encryption``).  ``None`` when PyMuPDF is
+                  unavailable or the PDF carries no metadata.
         """
         if not data.startswith(b'%PDF'):
             return None
         report: dict = {
             'has_javascript': False, 'has_openaction': False,
             'has_embedded_files': False, 'has_launch': False,
-            'is_encrypted': False, 'analyses': [],
-            'iocs': {'urls': [], 'ips': [], 'domains': []},
+            'has_forms': False, 'is_encrypted': False,
+            'analyses': [], 'iocs': {'urls': [], 'ips': [], 'domains': []},
         }
+
+        if HAS_PYMUPDF:
+            self._analyze_pdf_pymupdf(data, report)
+        else:
+            logger.debug('PyMuPDF not available — falling back to byte-scan PDF analysis')
+            self._analyze_pdf_bytescan(data, report)
+
+        body_iocs = self.extract_iocs(data)
+        for k in ('urls', 'ips', 'domains'):
+            report['iocs'][k] = sorted(set(report['iocs'][k] + body_iocs[k]))
+        report['text_preview'] = self.extract_text_preview(data, 'application/pdf')
+        return report
+
+    def _analyze_pdf_pymupdf(self, data: bytes, report: dict) -> None:
+        """Deep PDF inspection using the PyMuPDF object graph.
+
+        Populates *report* in-place.  Called by :meth:`analyze_pdf` when
+        ``fitz`` is available.
+
+        Args:
+            data: Raw PDF bytes.
+            report: Accumulator dict to populate.
+        """
+        def _add(a_type: str, keyword: str, desc: str) -> None:
+            entry = {'type': a_type, 'keyword': keyword, 'description': desc}
+            if entry not in report['analyses']:
+                report['analyses'].append(entry)
+
+        def _add_url(url: str) -> None:
+            url = url.strip()
+            if url and url not in report['iocs']['urls']:
+                report['iocs']['urls'].append(url)
+
+        try:
+            doc = fitz.open(stream=data, filetype='pdf')
+        except Exception as exc:
+            logger.warning('PyMuPDF could not open PDF: %s', exc)
+            self._analyze_pdf_bytescan(data, report)
+            return
+
+        try:
+            # -- Encryption / permissions ----------------------------------
+            if doc.is_encrypted:
+                report['is_encrypted'] = True
+                _add('Encryption', '/Encrypt', 'PDF is encrypted')
+
+            # -- Document-level metadata / trailer -------------------------
+            trailer = doc.pdf_trailer()
+            if isinstance(trailer, dict):
+                if 'Encrypt' in trailer:
+                    report['is_encrypted'] = True
+                    _add('Encryption', '/Encrypt', 'PDF is encrypted')
+
+            # -- Document-level JavaScript (doc.get_js_code) ---------------
+            js_blocks = []
+            try:
+                js_blocks = doc.get_js_code()  # list of JS strings
+            except AttributeError:
+                pass
+            if js_blocks:
+                report['has_javascript'] = True
+                _add('JavaScript', '/JavaScript',
+                     f'Document-level JavaScript found ({len(js_blocks)} block(s))')
+                for i, js_src in enumerate(js_blocks):
+                    for hit in self.analyze_javascript(js_src, f'PDF /JavaScript block {i+1}'):
+                        if hit not in report['analyses']:
+                            report['analyses'].append(hit)
+
+            # -- OpenAction / AA (auto-execute) ----------------------------
+            try:
+                root = doc.pdf_catalog()
+                if isinstance(root, dict):
+                    if 'OpenAction' in root:
+                        report['has_openaction'] = True
+                        action = root['OpenAction']
+                        action_type = action.get('S', '') if isinstance(action, dict) else ''
+                        _add('AutoExecute', '/OpenAction',
+                             f'OpenAction found (type: {action_type or "unknown"})')
+                        if action_type == 'JavaScript':
+                            report['has_javascript'] = True
+                            js_src_oa = action.get('JS', '')
+                            if js_src_oa:
+                                _add('JavaScript', '/OpenAction/JS',
+                                     'JavaScript in OpenAction')
+                                for hit in self.analyze_javascript(js_src_oa, 'PDF /OpenAction'):
+                                    if hit not in report['analyses']:
+                                        report['analyses'].append(hit)
+                    if 'AA' in root:
+                        _add('AutoExecute', '/AA',
+                             'Additional Actions (AA) on document level found')
+                    # AcroForm / XFA
+                    if 'AcroForm' in root:
+                        acro = root['AcroForm']
+                        if isinstance(acro, dict) and 'XFA' in acro:
+                            report['has_forms'] = True
+                            _add('XFA', '/XFA',
+                                 'XML Forms Architecture (XFA) found — can contain scripts')
+                        else:
+                            report['has_forms'] = True
+                            _add('AcroForm', '/AcroForm', 'PDF AcroForm found')
+            except Exception as exc:
+                logger.debug('PDF catalog inspection failed: %s', exc)
+
+            # -- Embedded files --------------------------------------------
+            try:
+                ef_count = doc.embfile_count()
+                if ef_count > 0:
+                    report['has_embedded_files'] = True
+                    names = []
+                    for i in range(ef_count):
+                        info = doc.embfile_info(i)
+                        names.append(info.get('filename', f'file{i}'))
+                    _add('EmbeddedFile', '/EmbeddedFiles',
+                         f'{ef_count} embedded file(s): {', '.join(names[:5])}')
+            except Exception as exc:
+                logger.debug('PDF embedded file check failed: %s', exc)
+
+            # -- Page-level: links, annotations, actions -------------------
+            for page in doc:
+                try:
+                    for link in page.get_links():
+                        uri  = link.get('uri', '')
+                        kind = link.get('kind', 0)
+                        # kind 2 = external URI
+                        if uri:
+                            _add_url(uri)
+                        # kind 4 = launch action
+                        if kind == fitz.LINK_LAUNCH:
+                            report['has_launch'] = True
+                            _add('Execution', '/Launch',
+                                 f'Launch action found: {uri or "(no URI)"}')
+                        # kind 5 = named action  (e.g. GoToR)
+                        if kind == fitz.LINK_NAMED:
+                            _add('AutoExecute', '/Named',
+                                 f'Named action on page {page.number}: {uri}')
+
+                    for annot in page.annots():
+                        adict = annot.info
+                        # URI annotations
+                        uri = adict.get('uri') or ''
+                        if uri:
+                            _add_url(uri)
+                        # Subtype-level checks
+                        subtype = annot.type[1] if annot.type else ''
+                        if subtype == 'FileAttachment':
+                            report['has_embedded_files'] = True
+                            fname = adict.get('file', 'unknown')
+                            _add('EmbeddedFile', '/FileAttachment',
+                                 f'File attachment annotation: {fname}')
+                        if subtype == 'Screen':
+                            _add('Execution', '/Screen',
+                                 'Screen annotation found (can trigger media/scripts)')
+
+                    # Widget annotations (form fields with JS)
+                    for widget in page.widgets() or []:
+                        widget_js_found = False
+                        for attr in ('script', 'script_stroke', 'script_format',
+                                     'script_change', 'script_calc'):
+                            js = getattr(widget, attr, None)
+                            if js:
+                                report['has_javascript'] = True
+                                if not widget_js_found:
+                                    _add('JavaScript', '/Widget/JS',
+                                         f'JavaScript in form widget ({attr})')
+                                    widget_js_found = True
+                                for hit in self.analyze_javascript(
+                                    js, f'PDF widget/{attr} page {page.number}'
+                                ):
+                                    if hit not in report['analyses']:
+                                        report['analyses'].append(hit)
+
+                except Exception as exc:
+                    logger.debug('PDF page %d inspection failed: %s', page.number, exc)
+
+            # -- Image extraction + OCR / QR scan -------------------------
+            if HAS_OCR or HAS_PYZBAR:
+                try:
+                    for page in doc:
+                        for img_info in page.get_images():
+                            xref = img_info[0]
+                            base_image = doc.extract_image(xref)
+                            img_bytes = base_image.get('image', b'')
+                            if img_bytes:
+                                img_result = self.analyze_image(
+                                    img_bytes,
+                                    label=f'PDF page {page.number} xref {xref}',
+                                )
+                                for hit in img_result.get('analyses', []):
+                                    if hit not in report['analyses']:
+                                        report['analyses'].append(hit)
+                                for k in ('urls', 'ips', 'domains'):
+                                    report['iocs'][k] = sorted(
+                                        set(report['iocs'][k] + img_result['iocs'][k])
+                                    )
+                except Exception as exc:
+                    logger.debug('PDF image extraction failed: %s', exc)
+
+            # -- Document metadata ------------------------------------------
+            try:
+                raw_meta = doc.metadata or {}
+                def _clean(v: str) -> str:
+                    return re.sub(r'[\x00-\x1f\x7f]', '', str(v or ''))[:256]
+                report['meta_document'] = {
+                    'title':         _clean(raw_meta.get('title')),
+                    'author':        _clean(raw_meta.get('author')),
+                    'subject':       _clean(raw_meta.get('subject')),
+                    'keywords':      _clean(raw_meta.get('keywords')),
+                    'creator':       _clean(raw_meta.get('creator')),
+                    'producer':      _clean(raw_meta.get('producer')),
+                    'creation_date': _clean(raw_meta.get('creationDate')),
+                    'mod_date':      _clean(raw_meta.get('modDate')),
+                    'encryption':    _clean(raw_meta.get('encryption')),
+                }
+            except Exception as exc:
+                logger.debug('PDF metadata extraction failed: %s', exc)
+
+        finally:
+            doc.close()
+
+    def _analyze_pdf_bytescan(self, data: bytes, report: dict) -> None:
+        """Byte-scan PDF fallback used when PyMuPDF is unavailable.
+
+        Searches for dangerous keyword markers directly in the raw byte
+        stream and extracts ``/URI`` values with a regex.
+
+        Args:
+            data: Raw PDF bytes.
+            report: Accumulator dict to populate.
+        """
         markers = {
             b'/JS':            ('JavaScript',   'Embedded JavaScript code found'),
             b'/JavaScript':    ('JavaScript',   'Embedded JavaScript code found'),
@@ -585,11 +1151,9 @@ class InspectorDaemon:
         }
         for marker, (m_type, desc) in markers.items():
             if marker in data:
-                report['analyses'].append({
-                    'type': m_type,
-                    'keyword': marker.decode('ascii'),
-                    'description': desc,
-                })
+                entry = {'type': m_type, 'keyword': marker.decode('ascii'), 'description': desc}
+                if entry not in report['analyses']:
+                    report['analyses'].append(entry)
                 if m_type == 'JavaScript':   report['has_javascript']     = True
                 if m_type == 'AutoExecute':  report['has_openaction']     = True
                 if m_type == 'EmbeddedFile': report['has_embedded_files'] = True
@@ -597,20 +1161,144 @@ class InspectorDaemon:
                 if m_type == 'Encryption':   report['is_encrypted']       = True
         for uri in re.findall(rb'/URI\s*\((https?://[^\)]+)\)', data):
             try:
-                url = uri.decode('utf-8', 'ignore')
-                if url not in report['iocs']['urls']:
+                url = uri.decode('utf-8', 'ignore').strip()
+                if url and url not in report['iocs']['urls']:
                     report['iocs']['urls'].append(url)
             except Exception:
                 pass
-        body_iocs = self.extract_iocs(data)
-        for k in ('urls', 'ips', 'domains'):
-            report['iocs'][k] = sorted(set(report['iocs'][k] + body_iocs[k]))
-        report['text_preview'] = self.extract_text_preview(data, 'application/pdf')
-        return report
 
     # ------------------------------------------------------------------
     # HTML analysis
     # ------------------------------------------------------------------
+
+    def _analyze_css_hiding(self, text: str) -> list[dict]:
+        """Detect CSS-based techniques used to hide content from human readers.
+
+        Inspects all ``<style>`` block content and ``style=""`` attribute
+        values for patterns that make elements invisible or move them off
+        screen, and flags remote stylesheet loading that prevents static
+        inspection of the final rendered appearance.
+
+        Args:
+            text: The full decoded HTML document as a string.
+
+        Returns:
+            A (possibly empty) list of analysis-hit dicts, each with
+            ``type``, ``keyword``, and ``description`` keys.
+        """
+        hits: list[dict] = []
+
+        # Collect CSS text from <style> blocks and inline style= attributes.
+        style_blocks = re.findall(r'<style[^>]*>(.*?)</style>', text, re.I | re.S)
+        inline_styles = re.findall(r'style=["\']([^"\']{1,2000})["\']', text, re.I)
+        all_css = '\n'.join(style_blocks + inline_styles)
+
+        # --- Invisible/collapsed element patterns ---
+        _HIDING: list[tuple[str, str, str]] = [
+            (
+                r'display\s*:\s*none',
+                'display:none',
+                'CSS display:none hides element from view',
+            ),
+            (
+                r'visibility\s*:\s*hidden',
+                'visibility:hidden',
+                'CSS visibility:hidden hides element without collapsing it',
+            ),
+            (
+                r'opacity\s*:\s*0(?:[^.]|$)',
+                'opacity:0',
+                'CSS opacity:0 makes element fully transparent',
+            ),
+            (
+                r'font-size\s*:\s*0',
+                'font-size:0',
+                'CSS font-size:0 collapses text to zero height',
+            ),
+            (
+                r'(?:width|height)\s*:\s*0\s*(?:px\b|;|$)',
+                'width/height:0',
+                'CSS zero-dimension collapses element to invisible sliver',
+            ),
+            (
+                r'(?:max-width|max-height)\s*:\s*0\s*(?:px\b|;|$)',
+                'max-width/height:0',
+                'CSS max-dimension:0 collapses element',
+            ),
+            (
+                r'overflow\s*:\s*hidden',
+                'overflow:hidden',
+                'CSS overflow:hidden (possible clipping of phishing content)',
+            ),
+            (
+                # position:absolute|fixed with a large negative top or left offset
+                r'position\s*:\s*(?:absolute|fixed)',
+                'position:absolute/fixed',
+                'CSS absolute/fixed positioning (check for off-screen placement)',
+            ),
+            (
+                r'(?:top|left)\s*:\s*-\d{3,}',
+                'top/left negative offset',
+                'CSS off-screen negative offset (content moved far outside viewport)',
+            ),
+            (
+                r'color\s*:\s*(?:#(?:fff(?:fff)?|ffffff)|white\b|rgba?\(\s*255\s*,\s*255\s*,\s*255)',
+                'color:white',
+                'CSS white text colour (possible white-on-white steganographic hiding)',
+            ),
+            (
+                r'background(?:-color)?\s*:\s*(?:#(?:000(?:000)?|ffffff|fff\b)|black\b|white\b)',
+                'background:black/white',
+                'CSS solid black or white background (combined with matching text = invisible)',
+            ),
+            (
+                r'clip(?:-path)?\s*:\s*rect\(\s*0',
+                'clip:rect(0)',
+                'CSS clip:rect(0,0,0,0) collapses visible area to nothing',
+            ),
+        ]
+        for pattern, keyword, desc in _HIDING:
+            if re.search(pattern, all_css, re.I):
+                hits.append({
+                    'type': 'CSSHiding',
+                    'keyword': keyword,
+                    'description': desc,
+                })
+
+        # --- Remote CSS loading (hides effective styles from static analysis) ---
+        # <link rel="stylesheet" href="https://...">  (attribute order may vary)
+        external_links = re.findall(
+            r'<link\b[^>]*\brel=["\']stylesheet["\'][^>]*\bhref=["\'](\s*https?://[^"\']+)["\']'
+            r'|<link\b[^>]*\bhref=["\'](\s*https?://[^"\']+)["\'][^>]*\brel=["\']stylesheet["\']',
+            text, re.I,
+        )
+        n_links = sum(1 for pair in external_links if any(pair))
+        if n_links:
+            hits.append({
+                'type': 'ExternalCSS',
+                'keyword': '<link rel=stylesheet>',
+                'description': (
+                    f'Remote CSS stylesheet loaded via <link> ({n_links} URL(s)) — '
+                    'rendered appearance cannot be determined without fetching the URL'
+                ),
+            })
+
+        # @import url("https://...") or @import "https://..." inside <style> blocks
+        css_imports = re.findall(
+            r'@import\s+(?:url\s*\(\s*)?["\']?(https?://[^"\')\s]+)',
+            all_css, re.I,
+        )
+        if css_imports:
+            hits.append({
+                'type': 'ExternalCSS',
+                'keyword': '@import',
+                'description': (
+                    f'CSS @import of remote stylesheet ({len(css_imports)} URL(s)) — '
+                    'allows server-side injection of hiding rules at render time'
+                ),
+            })
+
+        return hits
 
     def analyze_html(self, data: bytes) -> 'dict | None':
         """Analyse an HTML document for phishing and malware indicators.
@@ -703,7 +1391,39 @@ class InspectorDaemon:
                     f'({len(tracker_scripts)} URL(s) with ?u= parameter)'
                 ),
             })
+        # Detect CSS-based content-hiding techniques
+        for hit in self._analyze_css_hiding(text):
+            if hit not in report['analyses']:
+                report['analyses'].append(hit)
         report['iocs'] = self.extract_iocs(data)
+        # Analyse inline JavaScript blocks
+        for script_body in re.findall(r'<script[^>]*>(.*?)</script>', text, re.I | re.S):
+            if script_body.strip():
+                for hit in self.analyze_javascript(script_body, 'HTML <script>'):
+                    if hit not in report['analyses']:
+                        report['analyses'].append(hit)
+        # Analyse inline base64-encoded images (data URIs)
+        if HAS_OCR or HAS_PYZBAR:
+            for i, (mime_hint, b64data) in enumerate(re.findall(
+                r'<img[^>]+src=["\']data:(image/[^;]+);base64,([A-Za-z0-9+/=\s]{100,})["\']',
+                text, re.I,
+            )):
+                try:
+                    img_bytes = __import__('base64').b64decode(
+                        b64data.replace(' ', '').replace('\n', '').replace('\r', '')
+                    )
+                    img_result = self.analyze_image(
+                        img_bytes, label=f'HTML data-URI image {i+1} ({mime_hint})'
+                    )
+                    for hit in img_result.get('analyses', []):
+                        if hit not in report['analyses']:
+                            report['analyses'].append(hit)
+                    for k in ('urls', 'ips', 'domains'):
+                        report['iocs'][k] = sorted(
+                            set(report['iocs'].get(k, []) + img_result['iocs'][k])
+                        )
+                except Exception as exc:
+                    logger.debug('HTML inline image %d decode failed: %s', i + 1, exc)
         report['text_preview'] = self.extract_text_preview(data, 'text/html')
         return report
 
@@ -743,6 +1463,19 @@ class InspectorDaemon:
                 return re.sub(r'\s+', ' ', te.get_text())[:limit].strip()
             except Exception as exc:
                 logger.warning('RTF text extraction failed: %s', exc)
+        if 'pdf' in mime_lower or data.startswith(b'%PDF'):
+            if HAS_PYMUPDF:
+                try:
+                    doc = fitz.open(stream=data, filetype='pdf')
+                    parts = []
+                    for page in doc:
+                        parts.append(page.get_text())
+                        if sum(len(p) for p in parts) >= limit * 2:
+                            break
+                    doc.close()
+                    return re.sub(r'\s+', ' ', ' '.join(parts))[:limit].strip()
+                except Exception as exc:
+                    logger.debug('PyMuPDF text extraction failed: %s', exc)
         if 'openxmlformats' in mime_lower:
             try:
                 with zipfile.ZipFile(io.BytesIO(data)) as z:
@@ -804,6 +1537,8 @@ class InspectorDaemon:
             - Boolean indicator flags are OR-ed together.
             - String fields (``decryption_password``, ``text_preview``) keep
               the longest non-empty value.
+            - ``meta_document``: the first non-``None`` value wins (PDF and
+              OLE never both produce metadata for the same file).
             - The ``meta`` key is never overwritten.
 
         Args:
@@ -841,6 +1576,11 @@ class InspectorDaemon:
                     target[key] = value
             elif key == 'meta':
                 continue
+            elif key == 'meta_document':
+                # Keep the first non-None metadata block; PDF and OLE each
+                # produce at most one, and they are never both present.
+                if value and not target.get('meta_document'):
+                    target['meta_document'] = value
             elif key not in target:
                 target[key] = value
 
@@ -856,7 +1596,9 @@ class InspectorDaemon:
         Uses :mod:`oletools.olevba` to detect and analyse VBA/XLM macros.
         Encrypted files are decrypted automatically via
         :mod:`msoffcrypto` and the oletools decryption helpers using the
-        password list from :attr:`passwords`.
+        password list from :attr:`passwords`.  For OLE2 files, document
+        properties are extracted from the SummaryInformation stream via
+        :mod:`olefile` and stored as ``meta_document``.
 
         Args:
             s: Session tag for log messages.
@@ -880,6 +1622,11 @@ class InspectorDaemon:
                 - **decryption_password** (str | None)
                 - **iocs** (dict): Extracted URLs, IPs, and domains.
                 - **text_preview** (str)
+                - **meta_document** (dict | None): OLE2 document properties
+                  (``title``, ``author``, ``subject``, ``keywords``,
+                  ``last_saved_by``, ``company``, ``app_name``,
+                  ``revision_num``, ``creation_date``, ``mod_date``).
+                  ``None`` for non-OLE2 formats (OOXML, RTF).
         """
         office_report: dict = {
             'has_macro': False, 'analyses': [], 'rtf_objects': [],
@@ -987,6 +1734,32 @@ class InspectorDaemon:
                 )
             office_report['text_preview'] = self.extract_text_preview(effective, file_mime)
 
+            # -- OLE2 document properties (SummaryInformation stream) -------
+            if _olefile.isOleFile(io.BytesIO(effective)):
+                try:
+                    ole = _olefile.OleFileIO(io.BytesIO(effective))
+                    m = ole.get_metadata()
+                    def _oclean(v) -> str:
+                        if v is None:
+                            return ''
+                        s_val = v.decode('utf-8', 'ignore') if isinstance(v, bytes) else str(v)
+                        return re.sub(r'[\x00-\x1f\x7f]', '', s_val)[:256]
+                    office_report['meta_document'] = {
+                        'title':          _oclean(m.title),
+                        'author':         _oclean(m.author),
+                        'subject':        _oclean(m.subject),
+                        'keywords':       _oclean(m.keywords),
+                        'last_saved_by':  _oclean(m.last_saved_by),
+                        'company':        _oclean(m.company),
+                        'app_name':       _oclean(m.app_name),
+                        'revision_num':   str(m.revision_num or ''),
+                        'creation_date':  str(m.create_time or ''),
+                        'mod_date':       str(m.last_saved or ''),
+                    }
+                    ole.close()
+                except Exception as exc:
+                    logger.debug('%s - OLE metadata extraction failed: %s', s, exc)
+
         except Exception as exc:
             logger.error('%s - OLE analysis error for %s: %s', s, filename, exc)
             effective = working_data if working_data is not None else data
@@ -1064,7 +1837,7 @@ class InspectorDaemon:
             ``file_type``, ``file_description``, ``detected_type``,
             ``has_macro``, ``analyses``, ``iocs``, ``rtf_objects``,
             ``decrypted``, ``decryption_password``, ``text_preview``,
-            and ``meta``.
+            ``meta``, and ``meta_document``.
         """
         file_hash = hashlib.sha256(data).hexdigest()
         if not types_to_run:
@@ -1087,6 +1860,7 @@ class InspectorDaemon:
             'decryption_password': None,
             'iocs':                {'urls': [], 'ips': [], 'domains': []},
             'text_preview':        '',
+            'meta_document':       None,
         }
         successful_types = []
         for t in types_to_run:
@@ -1107,6 +1881,24 @@ class InspectorDaemon:
         )
         if not report['text_preview']:
             report['text_preview'] = self.extract_text_preview(data, file_mime)
+        # Image OCR / QR analysis for OOXML (contains media/ entries in ZIP)
+        if (HAS_OCR or HAS_PYZBAR) and file_mime and 'openxmlformats' in file_mime.lower():
+            try:
+                import zipfile
+                with zipfile.ZipFile(io.BytesIO(data)) as z:
+                    for name in z.namelist():
+                        if re.match(r'(?:word|xl|ppt)/media/', name, re.I):
+                            img_bytes = z.read(name)
+                            img_result = self.analyze_image(img_bytes, label=f'OOXML {name}')
+                            for hit in img_result.get('analyses', []):
+                                if hit not in report['analyses']:
+                                    report['analyses'].append(hit)
+                            for k in ('urls', 'ips', 'domains'):
+                                report['iocs'][k] = sorted(
+                                    set(report['iocs'].get(k, []) + img_result['iocs'][k])
+                                )
+            except Exception as exc:
+                logger.debug('OOXML image extraction failed: %s', exc)
         return report
 
     async def analyze_task(self, s: str, file_hash: str, filename: str,
@@ -1215,6 +2007,11 @@ class InspectorDaemon:
             magic_mime = file_magic_mime.from_buffer(filedata[:2048])
             file_magic_desc = magic.Magic()
             magic_desc = file_magic_desc.from_buffer(filedata[:2048])
+            # Sanitise libmagic output before storing in the report: strip control
+            # characters and cap length so a crafted file cannot inject misleading
+            # content into file_type / file_description response fields.
+            magic_mime = re.sub(r'[\x00-\x1f\x7f]', '', magic_mime or '')[:256]
+            magic_desc = re.sub(r'[\x00-\x1f\x7f]', '', magic_desc or '')[:256]
             types_to_run: set = set()
             types_to_run.add(
                 self.get_detected_type(magic_mime, magic_desc, None, filedata)

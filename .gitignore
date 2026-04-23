@@ -20,6 +20,9 @@ env/
 .coverage
 htmlcov/
 
+# test files
+test_files/
+
 # Sphinx build output
 docs/_build/
 
