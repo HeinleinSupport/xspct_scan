@@ -16,6 +16,7 @@ Public API
 """
 
 import asyncio
+import contextvars
 import hashlib
 import hmac
 import io
@@ -27,17 +28,43 @@ import secrets
 import sys
 import time
 import timeit
-import contextvars
+import yaml
 import zipfile
 from collections import OrderedDict
-
-import olefile as _olefile
-import magic
-import msoffcrypto
-import yaml
 from aiohttp import web
-from oletools.olevba import VBA_Parser
-from oletools.rtfobj import RtfObjParser, RtfParser
+
+
+
+try:
+    import olefile as _olefile
+    HAS_OLEFILE = True
+except ImportError:
+    _olefile = None  # type: ignore[assignment]
+    HAS_OLEFILE = False
+
+try:
+    import magic as _magic
+    HAS_MAGIC = True
+except ImportError:
+    _magic = None  # type: ignore[assignment]
+    HAS_MAGIC = False
+
+try:
+    import msoffcrypto as _msoffcrypto
+    HAS_MSOFFCRYPTO = True
+except ImportError:
+    _msoffcrypto = None  # type: ignore[assignment]
+    HAS_MSOFFCRYPTO = False
+
+try:
+    from oletools.olevba import VBA_Parser as _VBA_Parser
+    from oletools.rtfobj import RtfObjParser as _RtfObjParser, RtfParser as _RtfParser
+    HAS_OLETOOLS = True
+except ImportError:
+    _VBA_Parser = None      # type: ignore[assignment,misc]
+    _RtfObjParser = None    # type: ignore[assignment]
+    _RtfParser = object     # fallback base so TextExtractorRtf can still be defined
+    HAS_OLETOOLS = False
 
 try:
     import redis.asyncio as redis
@@ -333,6 +360,35 @@ logger = logging.getLogger('xspct-scan')
 logger.addHandler(logging.NullHandler())
 
 
+def _is_analyzer_hit(name: str, result: 'dict | None') -> bool:
+    """Return True when *result* contains at least one actionable finding."""
+    if not result:
+        return False
+    if result.get('analyses'):
+        return True
+    if result.get('yara_matches'):
+        return True
+    if name == 'clamav' and result.get('clamav', {}).get('status') == 'infected':
+        return True
+    return False
+
+
+def _record_analyzer_stats(name: str, elapsed_ms: int, result: 'dict | None') -> None:
+    """Update the per-analyzer timing/hit counters in :data:`stats`."""
+    entry = stats['analyzer_stats'].setdefault(name, {
+        'calls': 0, 'hits': 0,
+        'ms_total': 0, 'ms_min': None, 'ms_max': 0,
+    })
+    entry['calls'] += 1
+    entry['ms_total'] += elapsed_ms
+    entry['ms_min'] = (
+        elapsed_ms if entry['ms_min'] is None else min(entry['ms_min'], elapsed_ms)
+    )
+    entry['ms_max'] = max(entry['ms_max'], elapsed_ms)
+    if _is_analyzer_hit(name, result):
+        entry['hits'] += 1
+
+
 # ---------------------------------------------------------------------------
 # Public init helpers
 # ---------------------------------------------------------------------------
@@ -515,7 +571,7 @@ def verify_admin_key(s: str, request: web.Request) -> bool:
 # RTF text extractor
 # ---------------------------------------------------------------------------
 
-class TextExtractorRtf(RtfParser):
+class TextExtractorRtf(_RtfParser):
     """Extract plain text from an RTF document.
 
     Subclasses :class:`oletools.thirdparty.rtfparse.rtfparse.RtfParser`
@@ -1030,6 +1086,43 @@ class InspectorDaemon:
         ``on_startup`` signal.
         """
         self._read_passwords()
+
+        # Log availability of every optional engine at startup so operators
+        # can see at a glance what is installed and what is active.
+        _az = config.get('xspct_analyzers', {})
+        _cv = config.get('xspct_clamav', {})
+        _engines = sorted([
+            # (category, display-name, available, enabled, pip-hint)
+            ('archive',    'sflock2',        HAS_SFLOCK,       _az.get('archive',    {}).get('enabled', True),   'pip install "xspct-scan[advanced]"'),
+            ('cache',      'redis',          HAS_REDIS,        config.get('xspct_redis_cache', {}).get('enabled', False), 'pip install "xspct-scan[redis]"'),
+            ('clamav',     'clamav',         HAS_CLAMD,        _cv.get('enabled', False),                        'pip install "xspct-scan[enrichment]"'),
+            ('core',       'python-magic',   HAS_MAGIC,        True,                                             'pip install python-magic'),
+            ('office',     'msoffcrypto',    HAS_MSOFFCRYPTO,  _az.get('office',     {}).get('enabled', True),   'pip install msoffcrypto-tool'),
+            ('office',     'olefile',        HAS_OLEFILE,      _az.get('office',     {}).get('enabled', True),   'pip install olefile'),
+            ('office',     'oletools',       HAS_OLETOOLS,     _az.get('office',     {}).get('enabled', True),   'pip install oletools'),
+            ('iocs',       'iocsearcher',    HAS_IOCSEARCHER,  _az.get('iocs',       {}).get('enabled', True),   'pip install "xspct-scan[advanced]"'),
+            ('image',      'pyzbar',         HAS_PYZBAR,       _az.get('image',      {}).get('enabled', True),   'pip install "xspct-scan[enrichment]"  # also: apt install libzbar0'),
+            ('image',      'tesseract-ocr',  HAS_OCR,          _az.get('image',      {}).get('enabled', True),   'pip install "xspct-scan[enrichment]"  # also: apt install tesseract-ocr'),
+            ('javascript', 'jsbeautifier',   HAS_JSBEAUTIFIER, _az.get('javascript', {}).get('enabled', True),   'pip install "xspct-scan[enrichment]"'),
+            ('javascript', 'quickjs',        HAS_QUICKJS,      _az.get('javascript', {}).get('enabled', True),   'pip install "xspct-scan[enrichment]"'),
+            ('javascript', 'tree-sitter-js', HAS_TREESITTER,   _az.get('javascript', {}).get('enabled', True),   'pip install "xspct-scan[enrichment]"'),
+            ('pdf',        'pymupdf',        HAS_PYMUPDF,      _az.get('pdf',        {}).get('enabled', True),   'pip install pymupdf'),
+            ('yara',       'yara-python',    HAS_YARA,         _az.get('yara',       {}).get('enabled', False),  'pip install "xspct-scan[advanced]"'),
+            ('yara',       'yara-x',         HAS_YARA_X,       _az.get('yara_x',     {}).get('enabled', False),  'pip install "xspct-scan[advanced]"'),
+        ])  # sorted by (category, name) — tuples compare lexicographically
+        for _cat, _name, _avail, _enabled, _pip in _engines:
+            if _avail and _enabled:
+                _status = 'available + enabled'
+            elif _avail and not _enabled:
+                _status = 'available, disabled in config'
+            elif not _avail and _enabled:
+                _status = 'NOT INSTALLED — enabled in config but will not run'
+            else:
+                _status = 'not installed'
+            logger.info('engine - %-10s - %-16s  %s', _cat, _name, _status)
+            if not _avail:
+                logger.info('engine - %-10s - %-16s    install: %s', _cat, _name, _pip)
+
         self._compile_yara_rules()
         # Semaphores must be created inside the running event loop.
         self._fg_sem = asyncio.Semaphore(int(config.get('xspct_foreground_slots', 16)))
@@ -1172,48 +1265,54 @@ class InspectorDaemon:
 
         # --- classic yara-python ---
         yara_cfg = config['xspct_analyzers'].get('yara', {})
-        if HAS_YARA and yara_cfg.get('enabled', False):
-            rules_path = yara_cfg.get('rules_path', '')
-            if not rules_path:
-                logger.debug('YARA (classic) rules_path not set — disabled')
+        if yara_cfg.get('enabled', False):
+            if not HAS_YARA:
+                logger.warning('YARA (classic) enabled in config but yara-python is not installed — no rules loaded')
             else:
-                files = self._collect_yara_files(rules_path)
-                if not files:
-                    logger.warning('YARA (classic): no *.yar files at %s', rules_path)
+                rules_path = yara_cfg.get('rules_path', '')
+                if not rules_path:
+                    logger.warning('YARA (classic) enabled but rules_path is not set — no rules loaded')
                 else:
-                    try:
-                        if len(files) == 1:
-                            self._yara_rules = _yara.compile(filepath=files[0])
-                        else:
-                            filepaths = {os.path.basename(f): f for f in files}
-                            self._yara_rules = _yara.compile(filepaths=filepaths)
-                        logger.info('YARA (classic): compiled %d file(s) from %s'
-                                    '%s', len(files), rules_path,
-                                    ' [Hyperscan]' if HAS_YARA_HYPERSCAN else '')
-                    except Exception as exc:
-                        logger.error('YARA (classic) compilation failed: %s', exc)
+                    files = self._collect_yara_files(rules_path)
+                    if not files:
+                        logger.warning('YARA (classic): no *.yar/*.yara files found at %s', rules_path)
+                    else:
+                        try:
+                            if len(files) == 1:
+                                self._yara_rules = _yara.compile(filepath=files[0])
+                            else:
+                                filepaths = {os.path.basename(f): f for f in files}
+                                self._yara_rules = _yara.compile(filepaths=filepaths)
+                            logger.info('YARA (classic): compiled %d file(s) from %s%s',
+                                        len(files), rules_path,
+                                        ' [Hyperscan]' if HAS_YARA_HYPERSCAN else '')
+                        except Exception as exc:
+                            logger.error('YARA (classic) compilation failed: %s', exc)
 
         # --- yara-x ---
         yara_x_cfg = config['xspct_analyzers'].get('yara_x', {})
-        if HAS_YARA_X and yara_x_cfg.get('enabled', False):
-            rules_path = yara_x_cfg.get('rules_path', '')
-            if not rules_path:
-                logger.debug('YARA-X rules_path not set — disabled')
+        if yara_x_cfg.get('enabled', False):
+            if not HAS_YARA_X:
+                logger.warning('YARA-X enabled in config but yara-x is not installed — no rules loaded')
             else:
-                files = self._collect_yara_files(rules_path)
-                if not files:
-                    logger.warning('YARA-X: no *.yar files at %s', rules_path)
+                rules_path = yara_x_cfg.get('rules_path', '')
+                if not rules_path:
+                    logger.warning('YARA-X enabled but rules_path is not set — no rules loaded')
                 else:
-                    try:
-                        compiler = _yara_x.Compiler()
-                        for fpath in files:
-                            with open(fpath, 'r', encoding='utf-8', errors='replace') as fh:
-                                compiler.add_source(fh.read())
-                        self._yara_x_rules = compiler.build()
-                        logger.info('YARA-X: compiled %d file(s) from %s',
-                                    len(files), rules_path)
-                    except Exception as exc:
-                        logger.error('YARA-X compilation failed: %s', exc)
+                    files = self._collect_yara_files(rules_path)
+                    if not files:
+                        logger.warning('YARA-X: no *.yar/*.yara files found at %s', rules_path)
+                    else:
+                        try:
+                            compiler = _yara_x.Compiler()
+                            for fpath in files:
+                                with open(fpath, 'r', encoding='utf-8', errors='replace') as fh:
+                                    compiler.add_source(fh.read())
+                            self._yara_x_rules = compiler.build()
+                            logger.info('YARA-X: compiled %d file(s) from %s',
+                                        len(files), rules_path)
+                        except Exception as exc:
+                            logger.error('YARA-X compilation failed: %s', exc)
 
     def analyze_yara(self, data: bytes) -> 'dict | None':
         """Run compiled YARA rules against *data* using any loaded engine(s).
@@ -1381,8 +1480,30 @@ class InspectorDaemon:
         except Exception as exc:
             logger.debug('iocsearcher failed (%s): %s', label, exc)
             return None
+
+        exclude_suffixes = tuple(
+            s.lower()
+            for s in (config.get('xspct_ioc_url_exclude_domains') or [])
+            if s
+        )
+
+        # IOC types whose value is a hostname or URL — apply the exclude list.
+        _HOST_TYPES = frozenset({'fqdn', 'domain', 'url', 'ip', 'ipv6'})
+
         result: dict = {}
         for ioc_type, normalized, _pos, _raw in hits:
+            if exclude_suffixes and ioc_type in _HOST_TYPES:
+                # For URL-type values extract the host first; for host-type
+                # values use the value directly.
+                if '://' in normalized:
+                    try:
+                        host = normalized.split('://', 1)[1].split('/')[0].split('?')[0].lower()
+                    except Exception:
+                        host = normalized.lower()
+                else:
+                    host = normalized.lower()
+                if self._ioc_excluded(host, exclude_suffixes):
+                    continue
             result.setdefault(ioc_type, set()).add(normalized)
         if not result:
             return None
@@ -1952,10 +2073,6 @@ class InspectorDaemon:
         def _analyse_member(name: str, member_data: bytes) -> None:
             nonlocal total_extracted
             total_extracted += len(member_data)
-            report['archive_files'].append({
-                'name': name,
-                'size': len(member_data),
-            })
             _yara_ok = (
                 ('yara'   in enabled and getattr(self, '_yara_rules',   None) is not None) or
                 ('yara_x' in enabled and getattr(self, '_yara_x_rules', None) is not None)
@@ -3008,10 +3125,15 @@ class InspectorDaemon:
         if any(filename.endswith(e) for e in _OFFICE_EXTS):
             return 'office'
 
-        # Raster / vector images
+        # SVG is XML-based and can contain <script>, event handlers, and external
+        # references — treat it like HTML rather than a binary image.
+        if mime == 'image/svg+xml' or filename.endswith('.svg'):
+            return 'html'
+
+        # Raster images
         _IMAGE_EXTS = (
             '.jpg', '.jpeg', '.png', '.gif', '.bmp',
-            '.tiff', '.tif', '.webp', '.ico', '.svg',
+            '.tiff', '.tif', '.webp', '.ico',
         )
         if mime.startswith('image/') or any(filename.endswith(e) for e in _IMAGE_EXTS):
             return 'image'
@@ -3129,6 +3251,10 @@ class InspectorDaemon:
             elif key == 'clamav':
                 if value is not None:
                     target['clamav'] = value
+            elif key == 'analyzer_errors':
+                target.setdefault('analyzer_errors', {}).update(value)
+            elif key == 'analyzer_timings':
+                target.setdefault('analyzer_timings', {}).update(value)
             elif key == 'text_full':
                 # Keep the longest full-text across merged reports
                 if value:
@@ -3206,11 +3332,11 @@ class InspectorDaemon:
             'iocs': {'urls': [], 'ips': [], 'domains': []},
             'text_preview': '',
         }
-        if rtf_eval and (
+        if HAS_OLETOOLS and rtf_eval and (
             file_mime in ('text/rtf', 'application/rtf') or data.startswith(b'{\\rt')
         ):
             try:
-                rtfp = RtfObjParser(data)
+                rtfp = _RtfObjParser(data)
                 rtfp.parse()
                 for rtfobj in rtfp.objects:
                     office_report['rtf_objects'].append({
@@ -3225,8 +3351,11 @@ class InspectorDaemon:
         passwords = (custom_passwords or []) + self.passwords
         working_data = data
         vba_parser = None
+        if not HAS_OLETOOLS:
+            logger.warning('%s - oletools not installed, skipping macro/VBA analysis', s)
+            return office_report if office_report['rtf_objects'] else None
         try:
-            vba_parser = VBA_Parser(filename, data=data)
+            vba_parser = _VBA_Parser(filename, data=data)
             if vba_parser.type is None:
                 vba_parser.close()
                 vba_parser = None
@@ -3238,43 +3367,49 @@ class InspectorDaemon:
             if vba_parser.detect_is_encrypted():
                 logger.info('%s - %s is encrypted. Trying msoffcrypto...', s, filename)
                 ms_file_io = io.BytesIO(data)
-                try:
-                    ms_file = msoffcrypto.OfficeFile(ms_file_io)
-                    decrypted_data = None
-                    for password in passwords:
-                        try:
-                            ms_file.load_key(password=password)
-                            dec_io = io.BytesIO()
-                            ms_file.decrypt(dec_io)
-                            decrypted_data = dec_io.getvalue()
-                            office_report['decryption_password'] = password
-                            logger.info('%s - decrypted with msoffcrypto', s)
-                            break
-                        except Exception:
-                            continue
-                    if decrypted_data:
-                        vba_parser.close()
-                        working_data = decrypted_data
-                        vba_parser = VBA_Parser(filename, data=working_data)
-                        vba_parser.no_xlm = False
-                        office_report['has_macro'] = vba_parser.detect_vba_macros()
-                        office_report['decrypted'] = True
-                    else:
-                        logger.warning('%s - msoffcrypto failed, trying oletools...', s)
+                if not HAS_MSOFFCRYPTO:
+                    logger.warning('%s - msoffcrypto not installed, falling back to oletools decrypt', s)
+                    working_data, vba_parser, office_report = self._try_oletools_decrypt(
+                        s, filename, passwords, vba_parser, office_report
+                    )
+                else:
+                    try:
+                        ms_file = _msoffcrypto.OfficeFile(ms_file_io)
+                        decrypted_data = None
+                        for password in passwords:
+                            try:
+                                ms_file.load_key(password=password)
+                                dec_io = io.BytesIO()
+                                ms_file.decrypt(dec_io)
+                                decrypted_data = dec_io.getvalue()
+                                office_report['decryption_password'] = password
+                                logger.info('%s - decrypted with msoffcrypto', s)
+                                break
+                            except Exception:
+                                continue
+                        if decrypted_data:
+                            vba_parser.close()
+                            working_data = decrypted_data
+                            vba_parser = _VBA_Parser(filename, data=working_data)
+                            vba_parser.no_xlm = False
+                            office_report['has_macro'] = vba_parser.detect_vba_macros()
+                            office_report['decrypted'] = True
+                        else:
+                            logger.warning('%s - msoffcrypto failed, trying oletools...', s)
+                            working_data, vba_parser, office_report = (
+                                self._try_oletools_decrypt(
+                                    s, filename, passwords, vba_parser, office_report
+                                )
+                            )
+                    except Exception as exc:
+                        logger.error(
+                            '%s - msoffcrypto setup error: %s, falling back to oletools', s, exc
+                        )
                         working_data, vba_parser, office_report = (
                             self._try_oletools_decrypt(
                                 s, filename, passwords, vba_parser, office_report
                             )
                         )
-                except Exception as exc:
-                    logger.error(
-                        '%s - msoffcrypto setup error: %s, falling back to oletools', s, exc
-                    )
-                    working_data, vba_parser, office_report = (
-                        self._try_oletools_decrypt(
-                            s, filename, passwords, vba_parser, office_report
-                        )
-                    )
 
             results = vba_parser.analyze_macros(False, True)
             if results:
@@ -3307,7 +3442,7 @@ class InspectorDaemon:
             office_report['text_preview'] = self.extract_text_preview(effective, file_mime)
 
             # -- OLE2 document properties (SummaryInformation stream) -------
-            if _olefile.isOleFile(io.BytesIO(effective)):
+            if HAS_OLEFILE and _olefile.isOleFile(io.BytesIO(effective)):
                 try:
                     ole = _olefile.OleFileIO(io.BytesIO(effective))
                     m = ole.get_metadata()
@@ -3368,7 +3503,7 @@ class InspectorDaemon:
                     os.unlink(decrypted_file)
                 except OSError:
                     pass
-            vba_parser = VBA_Parser(filename, data=working_data)
+            vba_parser = _VBA_Parser(filename, data=working_data)
             vba_parser.no_xlm = False
             office_report['has_macro'] = vba_parser.detect_vba_macros()
             office_report['decrypted'] = True
@@ -3451,6 +3586,29 @@ class InspectorDaemon:
             yara_res = self.analyze_yara(data)
             if yara_res:
                 self.merge_reports(report, yara_res)
+        # iocsearcher — extended IOC extraction on full text
+        if HAS_IOCSEARCHER and 'iocs' in enabled:
+            _text_max = int(config.get('xspct_text_max_length', 50000))
+            # For HTML, use raw decoded source so href/src/action attributes are visible
+            if 'html' in report.get('detected_type', ''):
+                try:
+                    _ios_text = data.decode('utf-8', 'ignore')[:_text_max]
+                except Exception:
+                    _ios_text = report.get('text_preview', '')
+            else:
+                _ios_text = self.extract_text_preview(data, file_mime, _text_max)
+            if _ios_text:
+                iocs_res = self.analyze_iocsearcher(_ios_text, filename)
+                if iocs_res:
+                    self.merge_reports(report, iocs_res)
+        # ClamAV — scan raw bytes when engine is connected.
+        # Skip when called for archive members and scan_members is False
+        # (the parent archive scan already passes the whole archive to clamd).
+        _cv_cfg = config['xspct_clamav']
+        if HAS_CLAMD and _cv_cfg['enabled'] and _cv_cfg.get('scan_members', True):
+            cv_res = self.analyze_clamav(data, filename)
+            if cv_res:
+                self.merge_reports(report, cv_res)
         # Image OCR / QR analysis for OOXML (contains media/ entries in ZIP)
         if (HAS_OCR or HAS_PYZBAR) and file_mime and 'openxmlformats' in file_mime.lower():
             self._extract_ooxml_images(s, data, report)
@@ -3489,6 +3647,8 @@ class InspectorDaemon:
             'pdfid_meta':          None,
             'archive_files':       [],
             'exif':                {},
+            'analyzer_errors':     {},
+            'analyzer_timings':    {},
         }
 
     async def analyze_pipeline(self, s: str, filename: str, data: bytes,
@@ -3563,13 +3723,22 @@ class InspectorDaemon:
         loop = asyncio.get_running_loop()
 
         async def _run(name: str, sync_fn, *args) -> None:
-            """Run *sync_fn* in the thread pool and merge the result."""
+            """Run *sync_fn* in the thread pool, record timing, and merge."""
+            t0 = time.monotonic()
             try:
                 result = await loop.run_in_executor(None, sync_fn, *args)
             except Exception as exc:
                 logger.error('%s - analyzer %s raised: %s', s, name, exc)
-                result = None
-            await partial.merge(name, result, self)
+                result = {'analyzer_errors': {name: type(exc).__name__}}
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
+            _record_analyzer_stats(name, elapsed_ms, result)
+            logger.debug('%s [%s] analyzer=%s time=%dms hit=%s',
+                         s, filename, name, elapsed_ms,
+                         _is_analyzer_hit(name, result))
+            # Inject timing without mutating the analyzer's result dict
+            merge_payload = dict(result) if result else {}
+            merge_payload['analyzer_timings'] = {name: elapsed_ms}
+            await partial.merge(name, merge_payload, self)
 
         tasks: list = []
         for t in types_to_run:
@@ -3602,6 +3771,8 @@ class InspectorDaemon:
             # still run via the pre-Group-2 block and the yara task.
         if yara_enabled:
             tasks.append(asyncio.create_task(_run('yara', self.analyze_yara, data)))
+        if clamav_enabled:
+            tasks.append(asyncio.create_task(_run('clamav', self.analyze_clamav, data, filename)))
 
         if tasks:
             await asyncio.gather(*tasks)
@@ -3627,11 +3798,25 @@ class InspectorDaemon:
             _full_text_for_analysis = partial.report['text_preview']
 
         # --- Group 2: iocsearcher (uses full extracted text) ---
+        # For HTML files we pass the raw decoded source rather than the
+        # tag-stripped preview so that URLs/FQDNs in href/src/action
+        # attributes are visible to iocsearcher.
         iocs_enabled = (HAS_IOCSEARCHER and 'iocs' in enabled)
         if iocs_enabled and _full_text_for_analysis:
-            iocs_result = await loop.run_in_executor(
-                None, self.analyze_iocsearcher, _full_text_for_analysis, filename
-            )
+            if file_mime and 'html' in file_mime.lower():
+                try:
+                    _iocsearcher_text = data.decode('utf-8', 'ignore')[:_text_max]
+                except Exception:
+                    _iocsearcher_text = _full_text_for_analysis
+            else:
+                _iocsearcher_text = _full_text_for_analysis
+            try:
+                iocs_result = await loop.run_in_executor(
+                    None, self.analyze_iocsearcher, _iocsearcher_text, filename
+                )
+            except Exception as exc:
+                logger.error('%s - analyzer iocs raised: %s', s, exc)
+                iocs_result = {'analyzer_errors': {'iocs': type(exc).__name__}}
             if iocs_result:
                 await partial.merge('iocs', iocs_result, self)
 
@@ -3639,7 +3824,7 @@ class InspectorDaemon:
         report = partial.report
         # detected_type reflects only primary content-type analyzers (pdf/html/office/image/archive).
         # Supplementary analyzers (iocs, yara, javascript) are excluded.
-        _SUPPLEMENTARY = frozenset({'iocs', 'yara', 'javascript'})
+        _SUPPLEMENTARY = frozenset({'iocs', 'yara', 'javascript', 'clamav'})
         successful = [a for a in partial.successful if a not in _SUPPLEMENTARY]
         report['detected_type'] = (
             ','.join(sorted(successful)) if successful else 'unknown'
@@ -3709,11 +3894,17 @@ class InspectorDaemon:
             The finished report dict.
         """
         logger.info('%s - starting analysis for %s (%s)', s, filename, file_hash)
+        _t0 = time.monotonic()
         partial = await self.analyze_pipeline(
             s, filename, data, file_mime,
             file_desc, rtf_eval, custom_passwords, types_to_run,
         )
         report = partial.report
+        _elapsed = time.monotonic() - _t0
+        report['time_taken'] = round(_elapsed, 4)
+        logger.info('%s - analysis done for %s in %.3fs analyzers=%s',
+                    s, filename, _elapsed,
+                    dict(report.get('analyzer_timings', {})))
         await self.cache_report(s, file_hash, report)
         return report
 
@@ -3853,10 +4044,14 @@ class InspectorDaemon:
                     cached['cache_hit'] = True
                     return web.json_response(cached)
                 logger.info('%s - cache hit but re-analyzing (custom passwords)', s)
-            file_magic_mime = magic.Magic(mime=True)
-            magic_mime = file_magic_mime.from_buffer(filedata[:2048])
-            file_magic_desc = magic.Magic()
-            magic_desc = file_magic_desc.from_buffer(filedata[:2048])
+            if HAS_MAGIC:
+                file_magic_mime = _magic.Magic(mime=True)
+                magic_mime = file_magic_mime.from_buffer(filedata[:2048])
+                file_magic_desc = _magic.Magic()
+                magic_desc = file_magic_desc.from_buffer(filedata[:2048])
+            else:
+                magic_mime = ''
+                magic_desc = ''
             # Sanitise libmagic output before storing in the report: strip control
             # characters and cap length so a crafted file cannot inject misleading
             # content into file_type / file_description response fields.
@@ -4121,6 +4316,53 @@ class InspectorDaemon:
             '# HELP xspct_clamav_timeouts ClamAV scans that exceeded the per-scan timeout',
             '# TYPE xspct_clamav_timeouts counter',
             f'xspct_clamav_timeouts {stats["clamav_timeouts"]}',
+        ]
+        # Per-analyzer timing/hit metrics (labeled)
+        if stats['analyzer_stats']:
+            lines += [
+                '# HELP xspct_analyzer_calls_total Analyzer invocations',
+                '# TYPE xspct_analyzer_calls_total counter',
+            ]
+            for name, e in sorted(stats['analyzer_stats'].items()):
+                lines.append(f'xspct_analyzer_calls_total{{analyzer="{name}"}} {e["calls"]}')
+            lines += [
+                '# HELP xspct_analyzer_hits_total Analyzer invocations that produced at least one finding',
+                '# TYPE xspct_analyzer_hits_total counter',
+            ]
+            for name, e in sorted(stats['analyzer_stats'].items()):
+                lines.append(f'xspct_analyzer_hits_total{{analyzer="{name}"}} {e["hits"]}')
+            lines += [
+                '# HELP xspct_analyzer_hit_rate Fraction of calls that produced a finding (0–1)',
+                '# TYPE xspct_analyzer_hit_rate gauge',
+            ]
+            for name, e in sorted(stats['analyzer_stats'].items()):
+                rate = e['hits'] / e['calls'] if e['calls'] else 0.0
+                lines.append(f'xspct_analyzer_hit_rate{{analyzer="{name}"}} {rate:.4f}')
+            lines += [
+                '# HELP xspct_analyzer_time_ms_total Cumulative analyzer wall-time in milliseconds',
+                '# TYPE xspct_analyzer_time_ms_total counter',
+            ]
+            for name, e in sorted(stats['analyzer_stats'].items()):
+                lines.append(f'xspct_analyzer_time_ms_total{{analyzer="{name}"}} {e["ms_total"]}')
+            lines += [
+                '# HELP xspct_analyzer_time_ms_avg Average analyzer wall-time in milliseconds',
+                '# TYPE xspct_analyzer_time_ms_avg gauge',
+            ]
+            for name, e in sorted(stats['analyzer_stats'].items()):
+                avg = e['ms_total'] / e['calls'] if e['calls'] else 0.0
+                lines.append(f'xspct_analyzer_time_ms_avg{{analyzer="{name}"}} {avg:.1f}')
+            lines += [
+                '# HELP xspct_analyzer_time_ms_min Minimum analyzer wall-time in milliseconds',
+                '# TYPE xspct_analyzer_time_ms_min gauge',
+            ]
+            for name, e in sorted(stats['analyzer_stats'].items()):
+                lines.append(f'xspct_analyzer_time_ms_min{{analyzer="{name}"}} {e["ms_min"] or 0}')
+            lines += [
+                '# HELP xspct_analyzer_time_ms_max Maximum analyzer wall-time in milliseconds',
+                '# TYPE xspct_analyzer_time_ms_max gauge',
+            ]
+            for name, e in sorted(stats['analyzer_stats'].items()):
+                lines.append(f'xspct_analyzer_time_ms_max{{analyzer="{name}"}} {e["ms_max"]}')
         return web.Response(text='\n'.join(lines) + '\n', content_type='text/plain')
 
     async def handle_admin_reload(self, request: web.Request) -> web.Response:
@@ -4222,18 +4464,30 @@ async def _log_stats_periodically(daemon: InspectorDaemon) -> None:
     interval = int(config['xspct_stats_interval'])
     while True:
         await asyncio.sleep(interval)
-        total   = stats['requests_total']
-        finished = stats['requests_finished']
-        timeout  = stats['requests_timeout']
-        hits     = stats['redis_hits']
-        misses   = stats['redis_misses']
-        total_lookups = hits + misses
-        hit_rate = (hits / total_lookups * 100) if total_lookups > 0 else 0.0
+        total         = stats['requests_total']
+        finished      = stats['requests_finished']
+        timeout       = stats['requests_timeout']
+        redis_hits    = stats['redis_hits']
+        redis_misses  = stats['redis_misses']
+        total_lookups = redis_hits + redis_misses
+        hit_rate      = (redis_hits / total_lookups * 100) if total_lookups > 0 else 0.0
         logger.info(
             'STATS requests_total=%d finished=%d timeout=%d '
             'redis_hits=%d redis_misses=%d hit_rate=%.1f%% tasks_in_memory=%d',
-            total, finished, timeout, hits, misses, hit_rate, len(daemon.tasks),
+            total, finished, timeout,
+            redis_hits, redis_misses, hit_rate, len(daemon.tasks),
         )
+        for name, e in sorted(stats['analyzer_stats'].items()):
+            calls = e['calls']
+            hits  = e['hits']
+            avg   = e['ms_total'] / calls if calls else 0.0
+            pct   = hits / calls * 100 if calls else 0.0
+            logger.info(
+                'ANALYZER %-12s calls=%d hits=%d(%.0f%%) '
+                'time avg=%.0fms min=%dms max=%dms',
+                name, calls, hits, pct,
+                avg, e['ms_min'] or 0, e['ms_max'],
+            )
 
 
 # ---------------------------------------------------------------------------
