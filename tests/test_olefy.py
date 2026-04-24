@@ -59,6 +59,7 @@ Run:
     python3 -m pytest tests/ -v
 """
 
+import asyncio
 import hashlib
 import io
 import logging
@@ -1817,10 +1818,135 @@ class TestScanOctetStream:
 # INTEGRATION TESTS — admin /admin/reload
 # ===========================================================================
 
+# ===========================================================================
+# UNIT / INTEGRATION TESTS — Two-tier concurrency
+# ===========================================================================
+
+class TestTwoTierConcurrency:
+    """Verify foreground/background semaphore lifecycle in handle_scan."""
+
+    # --- Config defaults -------------------------------------------------
+
+    def test_default_foreground_slots(self):
+        assert xspct.config['xspct_foreground_slots'] == 16
+
+    def test_default_background_slots(self):
+        assert xspct.config['xspct_background_slots'] == 4
+
+    def test_stats_keys_exist(self):
+        for key in ('foreground_overloaded', 'background_rejected',
+                    'background_completed', 'background_errors'):
+            assert key in xspct.stats
+
+    # --- Semaphore initialisation ----------------------------------------
+
+    def test_daemon_semaphores_none_before_setup(self):
+        d = xspct.InspectorDaemon()
+        assert d._fg_sem is None
+        assert d._bg_sem is None
+
+    async def test_semaphores_initialised_after_setup(self, client):
+        # client fixture creates a full app via make_app() → setup()
+        # The daemon attached to the app must have non-None semaphores.
+        app_daemon = client.server.app.get('daemon')
+        if app_daemon is None:
+            pytest.skip('app does not expose daemon via app["daemon"]')
+        assert app_daemon._fg_sem is not None
+        assert app_daemon._bg_sem is not None
+
+    # --- Normal scan finishes within timeout (foreground slot released) ---
+
+    async def test_normal_scan_releases_fg_slot(self, client):
+        r = await client.post('/scan', data=_form(PDF_CLEAN, 'test.pdf'))
+        assert r.status == 200
+        body = await r.json()
+        assert body['status'] == 'finished'
+
+    # --- Overload: all foreground slots taken → 503 ----------------------
+
+    async def test_overloaded_returns_503(self, aiohttp_client):
+        """Simulate all foreground slots occupied; next request gets 503."""
+        xspct.config['xspct_foreground_slots'] = 2
+        xspct.config['xspct_background_slots'] = 1
+        app = await xspct.make_app()
+        client = await aiohttp_client(app)
+        daemon = app['daemon']
+        # Occupy every foreground slot
+        n = daemon._fg_sem._value
+        for _ in range(n):
+            await daemon._fg_sem.acquire()
+        before = xspct.stats['foreground_overloaded']
+        try:
+            r = await client.post(
+                '/scan?timeout=0.05',
+                data=_form(PDF_CLEAN, 'test.pdf'),
+            )
+            assert r.status == 503
+            body = await r.json()
+            assert 'overloaded' in body.get('error', '').lower()
+        finally:
+            for _ in range(n):
+                daemon._fg_sem.release()
+            xspct.config['xspct_foreground_slots'] = 16
+            xspct.config['xspct_background_slots'] = 4
+        assert xspct.stats['foreground_overloaded'] > before
+
+    # --- Background slot full → scan dropped → 202 with status=dropped --
+
+    async def test_background_full_drops_scan(self, aiohttp_client, monkeypatch):
+        """When bg slots are all taken, a timed-out scan is cancelled (dropped)."""
+        xspct.config['xspct_foreground_slots'] = 2
+        xspct.config['xspct_background_slots'] = 1
+        app = await xspct.make_app()
+        client = await aiohttp_client(app)
+        daemon = app['daemon']
+
+        # Hold all background slots
+        n_bg = daemon._bg_sem._value
+        for _ in range(n_bg):
+            await daemon._bg_sem.acquire()
+
+        # Make analyze_task hang so the scan always times out
+        async def _slow(*args, **kwargs):
+            await asyncio.sleep(60)
+            return {}
+
+        monkeypatch.setattr(daemon, 'analyze_task', _slow)
+        before = xspct.stats['background_rejected']
+        try:
+            r = await client.post(
+                '/scan?timeout=0.1',
+                data=_form(PDF_CLEAN, 'slow.pdf'),
+            )
+            assert r.status == 202
+            body = await r.json()
+            assert body.get('status') == 'dropped'
+        finally:
+            for _ in range(n_bg):
+                daemon._bg_sem.release()
+            xspct.config['xspct_foreground_slots'] = 16
+            xspct.config['xspct_background_slots'] = 4
+        assert xspct.stats['background_rejected'] > before
+
+    # --- /metrics exposes new counters -----------------------------------
+
+    async def test_metrics_contains_concurrency_lines(self, client):
+        r = await client.get('/metrics')
+        assert r.status == 200
+        text = await r.text()
+        for key in ('xspct_foreground_overloaded', 'xspct_background_rejected',
+                    'xspct_background_completed', 'xspct_background_errors',
+                    'xspct_foreground_slots_free', 'xspct_background_slots_free'):
+            assert key in text, f'metric {key!r} missing from /metrics'
+
+
+# ===========================================================================
+# INTEGRATION TESTS — admin /admin/reload
+# ===========================================================================
+
 class TestAdminReload:
 
     async def test_no_admin_key_configured_returns_403(self, client):
-        """When xspct_admin_api_key is empty, /admin/reload must return 403."""
         xspct.config['xspct_admin_api_key'] = []
         r = await client.post('/admin/reload')
         assert r.status == 403

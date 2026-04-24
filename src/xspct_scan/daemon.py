@@ -229,6 +229,12 @@ config: dict = {
     'xspct_archive_max_size': 52428800,
     # When True, partial (timeout) reports are also stored in the cache.
     'xspct_cache_partial': False,
+    # Concurrency limits for the two-tier scan lifecycle.
+    # Foreground slots: requests actively waiting for a Rspamd/client response.
+    # Background slots: scans that have already returned 202 and continue running.
+    # Total concurrent analyses = foreground + background.
+    'xspct_foreground_slots': 16,
+    'xspct_background_slots': 4,
 }
 """Module-level configuration dictionary.
 
@@ -246,6 +252,11 @@ stats: dict = {
     'redis_hits': 0,
     'redis_misses': 0,
     'redis_errors': 0,
+    # Two-tier concurrency stats
+    'foreground_overloaded': 0,    # requests rejected because fg slots were full
+    'background_rejected': 0,      # timed-out scans dropped (no bg slot available)
+    'background_completed': 0,     # background scans that finished successfully
+    'background_errors': 0,        # background scans that raised an exception
 }
 """Module-level runtime counters.
 
@@ -852,6 +863,10 @@ class InspectorDaemon:
         # In-flight PartialReport objects keyed by file_hash.
         # Populated by analyze_pipeline(); removed when the scan finishes.
         self._partials: dict = {}
+        # Two-tier concurrency semaphores.
+        # Initialised in setup() so they are bound to the running event loop.
+        self._fg_sem: 'asyncio.Semaphore | None' = None
+        self._bg_sem: 'asyncio.Semaphore | None' = None
         # Compiled YARA rules (None when YARA is unavailable or not configured).
         self._yara_rules   = None   # yara-python compiled rules
         self._yara_x_rules = None   # yara-x compiled rules
@@ -952,6 +967,14 @@ class InspectorDaemon:
         """
         self._read_passwords()
         self._compile_yara_rules()
+        # Semaphores must be created inside the running event loop.
+        self._fg_sem = asyncio.Semaphore(int(config.get('xspct_foreground_slots', 16)))
+        self._bg_sem = asyncio.Semaphore(int(config.get('xspct_background_slots', 4)))
+        logger.info(
+            'Concurrency: %d foreground + %d background slots',
+            config.get('xspct_foreground_slots', 16),
+            config.get('xspct_background_slots', 4),
+        )
         if HAS_REDIS and config['xspct_redis_cache']['enabled']:
             rc = config['xspct_redis_cache']
             url = f"redis://{rc['host']}:{rc['port']}"
@@ -3203,6 +3226,37 @@ class InspectorDaemon:
     # HTTP request handlers
     # ------------------------------------------------------------------
 
+    async def _finalize_background(self, s: str, file_hash: str,
+                                   scan_task: asyncio.Task) -> None:
+        """Await a timed-out scan task in the background and cache the result.
+
+        Called as a fire-and-forget ``asyncio.create_task`` by
+        :meth:`handle_scan` after transferring ownership of the background
+        semaphore slot.  Always releases ``_bg_sem`` in the ``finally``
+        block so the slot is guaranteed to be returned regardless of outcome.
+
+        Args:
+            s: Session tag for log messages.
+            file_hash: SHA-256 hex digest (cache key).
+            scan_task: The still-running analysis task created by
+                :meth:`handle_scan`.
+        """
+        try:
+            report = await scan_task
+            report['status'] = 'finished'
+            await self.cache_report(s, file_hash, report)
+            stats['background_completed'] += 1
+            logger.info('%s - background scan finished for %s', s, file_hash)
+        except asyncio.CancelledError:
+            logger.debug('%s - background scan cancelled for %s', s, file_hash)
+        except Exception as exc:
+            stats['background_errors'] += 1
+            logger.exception(
+                '%s - background scan raised for %s: %s', s, file_hash, exc
+            )
+        finally:
+            self._bg_sem.release()
+
     async def handle_scan(self, request: web.Request) -> web.Response:
         """Handle ``POST /scan`` — accept a file and return an analysis report.
 
@@ -3331,40 +3385,114 @@ class InspectorDaemon:
             file_desc = file_type_provided or magic_desc
             logger.info('%s (%s) - file=%s mime=%s types=%s',
                         s, timer(), filename, file_mime, types_to_run)
-            task = asyncio.create_task(
-                self.analyze_task(
-                    s, file_hash, filename, filedata, file_mime,
-                    file_desc, rtf_eval, custom_passwords, list(types_to_run),
-                )
-            )
-            self.tasks[file_hash] = task
-            self.tasks.move_to_end(file_hash)
-            self._evict_tasks()
+
+            # ----------------------------------------------------------
+            # Two-tier concurrency lifecycle
+            # ----------------------------------------------------------
+            # 1. Acquire a foreground slot (with per-request timeout).
+            #    If the slot queue is full for the entire deadline the
+            #    daemon is overloaded — return 503 immediately so
+            #    Rspamd/clients aren't left hanging.
+            fg_acquired = False
             try:
-                report = await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
-                report['status']     = 'finished'
-                report['time_taken'] = round(time.monotonic() - start_time, 4)
-                stats['requests_finished'] += 1
-                return web.json_response(report)
+                await asyncio.wait_for(self._fg_sem.acquire(), timeout=timeout)
+                fg_acquired = True
             except asyncio.TimeoutError:
-                logger.info('%s (%s) - timeout for %s, continuing in background',
-                            s, timer(), filename)
-                stats['requests_timeout'] += 1
-                # Return whatever has been completed so far from the partial report.
-                partial = self._partials.get(file_hash)
-                if partial:
-                    snap = partial.snapshot()
-                    snap['status']     = 'processing'
-                    snap['file_hash']  = file_hash
-                    snap['message']    = 'Analysis is continuing in background'
-                    snap['time_taken'] = round(time.monotonic() - start_time, 4)
-                    return web.json_response(snap, status=202)
-                return web.json_response({
-                    'status':     'processing',
-                    'file_hash':  file_hash,
-                    'message':    'Analysis is continuing in background',
-                    'time_taken': round(time.monotonic() - start_time, 4),
-                }, status=202)
+                stats['foreground_overloaded'] += 1
+                logger.warning('%s - overloaded: no foreground slot within %.1fs', s, timeout)
+                return web.json_response(
+                    {'error': 'Service overloaded, retry later'}, status=503
+                )
+
+            bg_acquired = False
+            try:
+                # 2. Launch analysis task while holding the foreground slot.
+                task = asyncio.create_task(
+                    self.analyze_task(
+                        s, file_hash, filename, filedata, file_mime,
+                        file_desc, rtf_eval, custom_passwords, list(types_to_run),
+                    )
+                )
+                self.tasks[file_hash] = task
+                self.tasks.move_to_end(file_hash)
+                self._evict_tasks()
+
+                try:
+                    report = await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+                    # Finished within deadline — release fg slot, return result.
+                    self._fg_sem.release()
+                    fg_acquired = False
+                    report['status']     = 'finished'
+                    report['time_taken'] = round(time.monotonic() - start_time, 4)
+                    stats['requests_finished'] += 1
+                    return web.json_response(report)
+
+                except asyncio.TimeoutError:
+                    # Deadline exceeded — attempt non-blocking transition to background.
+                    stats['requests_timeout'] += 1
+                    logger.info('%s (%s) - timeout for %s, attempting background promotion',
+                                s, timer(), filename)
+
+                    # Try to grab a background slot immediately (no await).
+                    # If none are free we drop the scan to protect foreground capacity.
+                    # asyncio.wait_for(acquire(), timeout=0) succeeds instantly when
+                    # a slot is available (no event-loop yield needed); raises
+                    # TimeoutError when the semaphore is at zero.
+                    try:
+                        await asyncio.wait_for(self._bg_sem.acquire(), timeout=0)
+                        bg_acquired = True
+                    except asyncio.TimeoutError:
+                        bg_acquired = False
+
+                    if not bg_acquired:
+                        # No background capacity — cancel and report dropped.
+                        task.cancel()
+                        stats['background_rejected'] += 1
+                        logger.warning('%s - background slots full, scan dropped for %s',
+                                       s, filename)
+                        partial = self._partials.get(file_hash)
+                        resp: dict = {
+                            'status':     'dropped',
+                            'file_hash':  file_hash,
+                            'message':    'Analysis dropped: background queue full',
+                            'time_taken': round(time.monotonic() - start_time, 4),
+                        }
+                        if partial:
+                            snap = partial.snapshot()
+                            snap.update(resp)
+                            return web.json_response(snap, status=202)
+                        return web.json_response(resp, status=202)
+
+                    # Background slot acquired — release foreground slot now.
+                    self._fg_sem.release()
+                    fg_acquired = False
+
+                    # Kick off background finalization; ownership of bg_sem
+                    # transfers to _finalize_background — do NOT release it here.
+                    asyncio.create_task(
+                        self._finalize_background(s, file_hash, task)
+                    )
+                    bg_acquired = False   # ownership transferred
+
+                    partial = self._partials.get(file_hash)
+                    snap_resp: dict = {
+                        'status':     'processing',
+                        'file_hash':  file_hash,
+                        'message':    'Analysis is continuing in background',
+                        'time_taken': round(time.monotonic() - start_time, 4),
+                    }
+                    if partial:
+                        snap = partial.snapshot()
+                        snap.update(snap_resp)
+                        return web.json_response(snap, status=202)
+                    return web.json_response(snap_resp, status=202)
+
+            finally:
+                if fg_acquired:
+                    self._fg_sem.release()
+                if bg_acquired:
+                    self._bg_sem.release()
+
         except Exception as exc:
             logger.exception(
                 '%s - error handling scan for %s: %s', s, filename or 'unknown', exc
@@ -3466,6 +3594,25 @@ class InspectorDaemon:
             '# HELP xspct_tasks_in_memory Current in-memory task/report entries',
             '# TYPE xspct_tasks_in_memory gauge',
             f'xspct_tasks_in_memory {len(self.tasks)}',
+            # --- Two-tier concurrency ---
+            '# HELP xspct_foreground_overloaded Requests rejected: no foreground slot within deadline',
+            '# TYPE xspct_foreground_overloaded counter',
+            f'xspct_foreground_overloaded {stats["foreground_overloaded"]}',
+            '# HELP xspct_background_rejected Timed-out scans dropped: no background slot available',
+            '# TYPE xspct_background_rejected counter',
+            f'xspct_background_rejected {stats["background_rejected"]}',
+            '# HELP xspct_background_completed Background scans that finished successfully',
+            '# TYPE xspct_background_completed counter',
+            f'xspct_background_completed {stats["background_completed"]}',
+            '# HELP xspct_background_errors Background scans that raised an exception',
+            '# TYPE xspct_background_errors counter',
+            f'xspct_background_errors {stats["background_errors"]}',
+            '# HELP xspct_foreground_slots_free Current free foreground semaphore slots',
+            '# TYPE xspct_foreground_slots_free gauge',
+            f'xspct_foreground_slots_free {self._fg_sem._value if self._fg_sem else 0}',
+            '# HELP xspct_background_slots_free Current free background semaphore slots',
+            '# TYPE xspct_background_slots_free gauge',
+            f'xspct_background_slots_free {self._bg_sem._value if self._bg_sem else 0}',
         ]
         return web.Response(text='\n'.join(lines) + '\n', content_type='text/plain')
 
@@ -3621,6 +3768,7 @@ async def make_app() -> web.Application:
         logger.info('xspct-scan stopped')
 
     app = web.Application()
+    app['daemon'] = daemon
     app.on_startup.append(_on_startup)
     app.on_shutdown.append(_on_shutdown)
     app.router.add_post('/scan',          daemon.handle_scan)

@@ -86,3 +86,22 @@ xspct_archive_max_size: 52428800
 
 # When true, partial reports (from timed-out requests) are also cached.
 xspct_cache_partial: false
+
+# ---------------------------------------------------------------------------
+# Two-tier concurrency
+# ---------------------------------------------------------------------------
+# Foreground slots: maximum concurrent scans that are actively holding a
+# client/Rspamd connection open. When all slots are taken and a new request
+# arrives, it waits up to its 'timeout' seconds; if still no slot it receives
+# 503.
+#
+# Background slots: maximum concurrent scans that already returned 202 and
+# continue in the background. When a scan times out and no background slot
+# is free the scan is cancelled immediately so foreground capacity is preserved.
+#
+# Rule of thumb: total (foreground + background) ≤ downstream worker threads
+# (e.g. clamd MaxThreads).  Start with 80/20 split and adjust via metrics:
+#   xspct_foreground_overloaded — raise foreground_slots or reduce load
+#   xspct_background_rejected   — raise background_slots or reduce scan time
+xspct_foreground_slots: 16
+xspct_background_slots: 4

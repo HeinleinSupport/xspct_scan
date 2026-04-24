@@ -156,6 +156,28 @@ top-level archive report via `yara_matches`, `iocs`, `iocs_extended`, and
 |-----|---------|-------------|
 | `xspct_cache_partial` | `false` | When `true`, partial (in-progress) reports are written to the Redis cache so that polling clients see incremental results. |
 
+### Two-tier concurrency
+
+xspct_scan separates concurrent capacity into two pools to prevent a
+feedback loop where slow background scans starve new foreground requests.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `xspct_foreground_slots` | `16` | Maximum scans that may run while a client connection is open. When all slots are taken a new request waits up to its `timeout` seconds; if still no slot it receives `503 Service Unavailable`. |
+| `xspct_background_slots` | `4` | Maximum scans that continue after returning `202`. When a scan times out and no background slot is immediately available the scan is cancelled and the response carries `"status": "dropped"`. |
+
+**Sizing rule:** `foreground_slots + background_slots` should not exceed the
+thread capacity of downstream workers (e.g. `clamd MaxThreads`).  Start with
+an 80/20 split and tune using these metrics:
+
+| Metric | High value means |
+|--------|-----------------|
+| `xspct_foreground_overloaded` | Increase `foreground_slots` or reduce per-scan latency |
+| `xspct_background_rejected` | Increase `background_slots` or investigate which file types are slow |
+| `xspct_background_completed` | Background scans finishing — useful baseline for business case |
+| `xspct_background_errors` | Background scan exceptions — check logs |
+| `xspct_foreground_slots_free` | Should be close to `foreground_slots` under normal load |
+
 ### Admin API
 
 | Key | Default | Description |
