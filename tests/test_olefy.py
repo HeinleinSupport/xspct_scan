@@ -1711,6 +1711,154 @@ class TestAnalyzeArchive:
 
 
 # ===========================================================================
+# UNIT TESTS — sflock2 archive extraction path
+# ===========================================================================
+
+class _SflockFile:
+    """Minimal stub mimicking sflock2's File object."""
+
+    def __init__(self, filename='', contents=b'', children=None, error=None, password=None):
+        self.filename = filename
+        self.contents = contents
+        self.children = children or []
+        self.error    = error
+        self.password = password
+
+
+class TestAnalyzeArchiveSflock:
+    """Tests for the sflock2-backed extraction path in analyze_archive."""
+
+    def _make_sflock_result(self, members: list):
+        """Build a fake sflock File tree from a list of (name, bytes) tuples."""
+        children = [_SflockFile(filename=name, contents=data) for name, data in members]
+        return _SflockFile(filename='archive.zip', children=children)
+
+    def test_sflock_path_extracts_text_member(self, daemon, monkeypatch):
+        monkeypatch.setattr(xspct, 'HAS_SFLOCK', True)
+        fake_result = self._make_sflock_result([('readme.txt', b'hello from sflock')])
+        monkeypatch.setattr(xspct, '_sflock',
+                            type('M', (), {'unpack': staticmethod(lambda **kw: fake_result)})())
+        result = daemon.analyze_archive('s', 'archive.zip', b'FAKEARCHIVEBYTES', 0)
+        assert result is not None
+        names = [f['name'] for f in result['archive_files']]
+        assert 'readme.txt' in names
+
+    def test_sflock_path_extracts_pdf_member(self, daemon, monkeypatch):
+        monkeypatch.setattr(xspct, 'HAS_SFLOCK', True)
+        fake_result = self._make_sflock_result([('doc.pdf', PDF_CLEAN)])
+        monkeypatch.setattr(xspct, '_sflock',
+                            type('M', (), {'unpack': staticmethod(lambda **kw: fake_result)})())
+        result = daemon.analyze_archive('s', 'test.zip', b'FAKEARCHIVEBYTES', 0)
+        assert result is not None
+        assert any(f['name'] == 'doc.pdf' for f in result['archive_files'])
+
+    def test_sflock_empty_children_returns_none(self, daemon, monkeypatch):
+        monkeypatch.setattr(xspct, 'HAS_SFLOCK', True)
+        fake_result = _SflockFile(filename='bad.zip', children=[])
+        monkeypatch.setattr(xspct, '_sflock',
+                            type('M', (), {'unpack': staticmethod(lambda **kw: fake_result)})())
+        result = daemon.analyze_archive('s', 'bad.zip', b'FAKEARCHIVEBYTES', 0)
+        assert result is None
+
+    def test_sflock_password_retry_stops_on_success(self, daemon, monkeypatch):
+        monkeypatch.setattr(xspct, 'HAS_SFLOCK', True)
+        calls = []
+
+        def _unpack(**kw):
+            calls.append(kw.get('password'))
+            if kw.get('password') == 'secret':
+                return self._make_sflock_result([('protected.txt', b'unlocked')])
+            return _SflockFile(filename='enc.zip', children=[], error='Decryption failed')
+
+        daemon.passwords = ['wrong', 'secret', 'notneeded']
+        monkeypatch.setattr(xspct, '_sflock',
+                            type('M', (), {'unpack': staticmethod(_unpack)})())
+        result = daemon.analyze_archive('s', 'enc.zip', b'FAKEARCHIVEBYTES', 0)
+        assert result is not None
+        assert 'secret' in calls
+        assert 'notneeded' not in calls  # stopped after success
+
+    def test_sflock_size_limit_precheck_returns_none(self, daemon, monkeypatch):
+        monkeypatch.setattr(xspct, 'HAS_SFLOCK', True)
+        saved = xspct.config['xspct_archive_max_size']
+        xspct.config['xspct_archive_max_size'] = 10  # tiny limit
+        try:
+            result = daemon.analyze_archive('s', 'huge.zip', b'X' * 100, 0)
+        finally:
+            xspct.config['xspct_archive_max_size'] = saved
+        assert result is None
+
+    def test_sflock_nested_container_walked(self, daemon, monkeypatch):
+        monkeypatch.setattr(xspct, 'HAS_SFLOCK', True)
+        # Simulate a ZIP-inside-ZIP already unpacked by sflock
+        inner_leaf  = _SflockFile(filename='inner.txt', contents=b'nested content')
+        outer_child = _SflockFile(filename='inner.zip', children=[inner_leaf])
+        root        = _SflockFile(filename='outer.zip', children=[outer_child])
+        monkeypatch.setattr(xspct, '_sflock',
+                            type('M', (), {'unpack': staticmethod(lambda **kw: root)})())
+        result = daemon.analyze_archive('s', 'outer.zip', b'FAKEARCHIVEBYTES', 0)
+        assert result is not None
+        names = [f['name'] for f in result['archive_files']]
+        assert 'inner.txt' in names
+
+    def test_sflock_decryption_password_stored_in_report(self, daemon, monkeypatch):
+        monkeypatch.setattr(xspct, 'HAS_SFLOCK', True)
+        fake_result = self._make_sflock_result([('secret.txt', b'payload')])
+        fake_result.password = 'infected'
+        monkeypatch.setattr(xspct, '_sflock',
+                            type('M', (), {'unpack': staticmethod(lambda **kw: fake_result)})())
+        result = daemon.analyze_archive('s', 'enc.zip', b'FAKEARCHIVEBYTES', 0)
+        assert result is not None
+        assert result.get('decryption_password') == 'infected'
+
+    def test_sflock_exception_falls_back_gracefully(self, daemon, monkeypatch):
+        monkeypatch.setattr(xspct, 'HAS_SFLOCK', True)
+
+        def _boom(**kw):
+            raise RuntimeError('sflock internal error')
+
+        monkeypatch.setattr(xspct, '_sflock',
+                            type('M', (), {'unpack': staticmethod(_boom)})())
+        # Should return None (not raise)
+        result = daemon.analyze_archive('s', 'corrupt.zip', b'FAKEARCHIVEBYTES', 0)
+        assert result is None
+
+
+class TestGetDetectedTypeSflockFormats:
+    """Ensure new archive formats are recognised after sflock support was added."""
+
+    def test_rar_by_extension(self, daemon):
+        assert daemon.get_detected_type(None, None, 'archive.rar', None) == 'archive'
+
+    def test_eml_by_extension(self, daemon):
+        assert daemon.get_detected_type(None, None, 'email.eml', None) == 'archive'
+
+    def test_msg_mime_returns_archive(self, daemon):
+        assert daemon.get_detected_type('application/vnd.ms-outlook', None, None, None) == 'archive'
+
+    def test_eml_mime_returns_archive(self, daemon):
+        assert daemon.get_detected_type('message/rfc822', None, None, None) == 'archive'
+
+    def test_cab_by_extension(self, daemon):
+        assert daemon.get_detected_type(None, None, 'setup.cab', None) == 'archive'
+
+    def test_ace_by_extension(self, daemon):
+        assert daemon.get_detected_type(None, None, 'archive.ace', None) == 'archive'
+
+    def test_iso_by_extension(self, daemon):
+        assert daemon.get_detected_type(None, None, 'disc.iso', None) == 'archive'
+
+    def test_tar_gz_by_extension_tgz(self, daemon):
+        assert daemon.get_detected_type(None, None, 'pkg.tgz', None) == 'archive'
+
+    def test_tar_bz2_by_extension_tbz2(self, daemon):
+        assert daemon.get_detected_type(None, None, 'src.tbz2', None) == 'archive'
+
+    def test_rar_desc_returns_archive(self, daemon):
+        assert daemon.get_detected_type(None, 'rar archive data', None, None) == 'archive'
+
+
+# ===========================================================================
 # UNIT TESTS — PartialReport
 # ===========================================================================
 

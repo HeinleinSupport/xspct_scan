@@ -111,8 +111,7 @@ Several tests are skipped when optional libraries are not installed:
 | `Pillow` not installed | `TestAnalyzeImage::test_blank_png_does_not_raise` |
 | `iocsearcher` not installed | `TestAnalyzeIocsearcher::test_returns_dict_when_installed` |
 | `pydantic` not installed | `TestOpenApiEndpoints::test_openapi_json_*`, `test_redoc_*` |
-| `yara-python` / `yara-x` not installed | `TestAnalyzeYaraNoEngine` is always active; `TestSyncAnalyzeYara::test_yara_called_when_rules_loaded` uses `monkeypatch` and runs unconditionally |
-
+| `yara-python` / `yara-x` not installed | `TestAnalyzeYaraNoEngine` is always active; `TestSyncAnalyzeYara::test_yara_called_when_rules_loaded` uses `monkeypatch` and runs unconditionally || `SFlock2` not installed | `TestAnalyzeArchiveSflock` uses `monkeypatch` to stub `_sflock` and runs unconditionally — no skip needed |
 Install all extras to minimise skips:
 
 ```bash
@@ -150,6 +149,8 @@ tests/
 | `TestSyncAnalyzeYara` | unit | YARA called from `sync_analyze` when rules are loaded |
 | `TestAnalyzeIocsearcher` | unit | iocsearcher integration |
 | `TestAnalyzeArchive` | unit | ZIP extraction, depth/size guards, YARA on members |
+| `TestAnalyzeArchiveSflock` | unit | sflock2 extraction path: success, empty result, password retry, size pre-check, nested tree walk, decryption password in report, exception recovery |
+| `TestGetDetectedTypeSflockFormats` | unit | New archive format detection: RAR, EML, MSG, CAB, ACE, ISO, TGZ, TBZ2 |
 | `TestAnalyzeText` | unit | `analyze_text()` — decode, preview, IOCs, limits |
 | `TestExtractTextPreview` | unit | Text extraction strategies |
 | `TestGetDetectedType` | unit | MIME / extension / magic-byte detection |

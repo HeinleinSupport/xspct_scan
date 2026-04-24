@@ -41,6 +41,7 @@ advanced = [
     "yara-x>=0.9",
     "iocsearcher>=0.5",
     "py7zr>=0.20",
+    "SFlock2>=0.3",
 ]
 docs   = [
     "sphinx>=7",

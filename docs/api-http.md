@@ -112,7 +112,7 @@ New report fields (v2.0.0+):
 | `iocs_extended` | dict | Extended IOC types from [iocsearcher](https://github.com/malicialab/iocsearcher) keyed by IOC type (`url`, `email`, `md5`, …). Requires `[advanced]`. |
 | `pdfid_keywords` | dict/null | Raw pdfid keyword counts for PDF files. |
 | `pdfid_meta` | dict/null | pdfid metadata record for PDF files. |
-| `archive_files` | list | Files extracted from ZIP/7z archives (`{name, size}`). All member types — PDF, HTML, Office, text, image, unknown — are individually analysed and their results merged into the top-level report. |
+| `archive_files` | list | Files extracted from archives (`{name, size}`). When `SFlock2` is installed extraction runs in-sandbox and covers ZIP, 7z, RAR, TAR, CAB, ACE, ISO, EML, MSG, and more. Without sflock2 only ZIP and 7z are supported. EML and MSG attachments are included when sflock2 is available. All member types — PDF, HTML, Office, text, image, unknown — are individually analysed and their results merged into the top-level report. |
 | `exif` | dict | EXIF metadata extracted from image files. |
 | `text_full` | str/null | Full text extraction up to `xspct_text_max_length`. Only populated when `xspct_include_text: true`. |
 | `analyzers_completed` | list | Analyzer names that finished. |

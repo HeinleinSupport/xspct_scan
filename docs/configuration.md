@@ -143,6 +143,27 @@ and unknown blobs.
 | `xspct_archive_max_depth` | `2` | Maximum recursion depth when extracting nested archives. Set to `0` to disable. |
 | `xspct_archive_max_size` | `52428800` | Maximum total bytes to extract from a single archive (default 50 MiB). |
 
+**Extraction backend** — when `SFlock2` is installed (included in the
+`advanced` extra), all archive extraction runs inside the **zipjail** usermode
+sandbox.  Supported formats include ZIP, 7z, RAR, TAR/TAR.GZ/TBZ2, CAB, ACE,
+ISO, EML, MSG, MSO, lzip, and ZPAQ.  Without SFlock2 the fallback uses
+stdlib `zipfile` (ZIP) and optional `py7zr` (7z).
+
+Installing sflock2 and enabling full format support:
+
+```bash
+# Python package (included in the advanced extra)
+pip install "xspct_scan[advanced]"
+
+# System packages for native-format support on Debian / Ubuntu
+apt-get install p7zip-full rar unace-nonfree cabextract lzip zpaq
+```
+
+**EML and MSG files** are routed through the archive pipeline (not the
+office pipeline) so that sflock2 can extract their attachments in-sandbox.
+Each extracted attachment is analysed individually with the normal type
+detection logic.
+
 Each extracted member is routed through the same type-detection logic as a
 top-level file.  All member types — PDF, HTML, Office, text, image, and
 unknown — are individually analysed.  When YARA rules are loaded every

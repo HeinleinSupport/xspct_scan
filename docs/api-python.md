@@ -20,6 +20,7 @@ optional dependencies are installed:
 | `HAS_YARA_X` | `yara-x` is installed |
 | `HAS_IOCSEARCHER` | `iocsearcher` is installed |
 | `HAS_PDFID` | Vendored `pdfid.py` loaded successfully |
+| `HAS_SFLOCK` | `SFlock2` is installed (sandboxed archive extraction) |
 
 ## Module-level objects
 

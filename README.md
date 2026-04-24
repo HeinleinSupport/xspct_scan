@@ -35,8 +35,12 @@ a simple HTTP API for on-demand scanning.
 - **Image analysis** — OCR via [pytesseract](https://github.com/madmaze/pytesseract),
   QR/barcode decode via [pyzbar](https://github.com/NaturalHistoryMuseum/pyzbar),
   EXIF metadata extraction with GPS flagging (optional)
-- **Archive extraction** — ZIP and 7z with configurable depth/size limits,
-  password loop for encrypted archives, recursive sub-file analysis
+- **Archive extraction** — sandboxed extraction via
+  [SFlock2](https://github.com/doomedraven/sflock2) (zipjail usermode sandbox)
+  covering ZIP, 7z, RAR, TAR/TGZ/TBZ2, CAB, ACE, ISO, EML, MSG, MSO, lzip,
+  and ZPAQ; configurable depth/size limits, password loop for encrypted
+  archives, recursive sub-file analysis.  Falls back to stdlib
+  `zipfile`/`py7zr` without SFlock2.
 
 ### Infrastructure
 - **Parallel pipeline** — analyzers run as concurrent asyncio tasks; partial
@@ -100,7 +104,7 @@ pip install xspct_scan
 | `redis` | `redis[asyncio]` | Persistent result cache across restarts |
 | `enrichment` | `Pillow`, `pytesseract`, `pyzbar`, `jsbeautifier`, `quickjs` | Image OCR/barcode/EXIF, dynamic JS analysis |
 | `openapi` | `pydantic>=2.0` | OpenAPI 3.0 spec + ReDoc UI |
-| `advanced` | `yara-python`, `yara-x`, `iocsearcher`, `py7zr` | YARA scanning, extended IOCs, 7z archives |
+| `advanced` | `yara-python`, `yara-x`, `iocsearcher`, `py7zr`, `SFlock2` | YARA scanning, extended IOCs, sandboxed archive extraction (ZIP/RAR/7z/EML/MSG/…) |
 
 ```bash
 pip install "xspct_scan[uvloop,redis,enrichment,openapi,advanced]"
@@ -136,6 +140,8 @@ Key settings:
 | `xspct_analyzers` | _(all enabled)_ | Per-analyzer enable/disable + options |
 | `xspct_include_text` | `false` | Include full extracted text in reports |
 | `xspct_archive_max_depth` | `2` | Recursion limit for archive extraction |
+| `xspct_foreground_slots` | `16` | Max concurrent scans holding a client connection open |
+| `xspct_background_slots` | `4` | Max concurrent scans continuing after `202` timeout |
 
 See [docs/configuration.md](docs/configuration.md) for the full reference.
 
@@ -237,7 +243,9 @@ When decryption succeeds the response includes `"decrypted": true` and
 
 ## YARA scanning
 
-Two YARA engines can run in parallel for comparison or redundancy:
+When YARA rules are loaded, YARA runs on **every** file — PDFs, HTML,
+Office documents, images, plain text, archive members, and unknown blobs.
+Two engines can run in parallel for comparison or redundancy:
 
 ```yaml
 xspct_analyzers:
@@ -251,6 +259,24 @@ xspct_analyzers:
 
 Each match in `yara_matches` carries an `"engine"` field (`"classic"` or
 `"yara-x"`). Reload rules without restart with `POST /admin/reload`.
+
+## Sandboxed archive extraction
+
+Install `SFlock2` (included in `[advanced]`) to enable sandboxed extraction
+via **zipjail**:
+
+```bash
+# Python package
+pip install "xspct_scan[advanced]"
+
+# System packages for full native-format support (Debian / Ubuntu)
+sudo apt-get install p7zip-full rar unace-nonfree cabextract lzip zpaq
+```
+
+With SFlock2 installed, the following formats are extracted in-sandbox:
+ZIP, 7z, RAR, TAR, TAR.GZ, TBZ2, CAB, ACE, ISO, EML, MSG, MSO, lzip, ZPAQ.
+**EML and MSG** files are routed through the archive pipeline automatically
+so that email attachments are extracted and analysed.
 
 ## Systemd unit
 

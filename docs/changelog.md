@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **sflock2 archive backend**: when `SFlock2` is installed (`pip install "xspct_scan[advanced]"`)
+  archive extraction runs inside the zipjail usermode sandbox, covering RAR,
+  TAR/TGZ/TBZ2, CAB, ACE, ISO, EML, MSG, MSO, lzip, and ZPAQ in addition to
+  the existing ZIP and 7z support.  The stdlib `zipfile`/`py7zr` fallback is
+  retained for environments without sflock2.
+- **EML and MSG routed through archive pipeline**: `get_detected_type` now returns
+  `'archive'` for `message/rfc822`, `application/vnd.ms-outlook`, `.eml`, `.msg`,
+  and `.mso` files so attachments are extracted in-sandbox.
+- **`HAS_SFLOCK` feature flag** visible in the Python API (same pattern as
+  `HAS_YARA`, `HAS_IOCSEARCHER`, etc.).
+
 ## 2.0.0 — 2026-04-24
 
 Initial public release of xspct_scan (renamed from olefy_v2).

@@ -126,6 +126,13 @@ except Exception:
     _vendored_pdfid = None
     HAS_PDFID = False
 
+try:
+    import sflock as _sflock
+    HAS_SFLOCK = True
+except ImportError:
+    _sflock = None  # type: ignore[assignment]
+    HAS_SFLOCK = False
+
 # ---------------------------------------------------------------------------
 # Per-request timer (ContextVar — isolated per async task)
 # ---------------------------------------------------------------------------
@@ -1587,16 +1594,21 @@ class InspectorDaemon:
 
     def analyze_archive(self, s: str, filename: str, data: bytes,
                          depth: int = 0) -> 'dict | None':
-        """Recursively extract and analyse files inside a ZIP or 7z archive.
+        """Recursively extract and analyse files inside an archive.
 
-        Supports:
-            - ZIP (``zipfile`` stdlib)
-            - 7z (``py7zr``, optional)
+        When sflock2 is installed (``HAS_SFLOCK=True``) extraction runs inside
+        the zipjail usermode sandbox, giving coverage for ZIP, 7z, RAR, TAR,
+        TAR.GZ, CAB, ACE, ISO, EML, MSG, MSO, and more.  Without sflock2 the
+        fallback uses :mod:`zipfile` (stdlib) and :mod:`py7zr` (optional).
 
-        Protected archives are tried with the daemon password list.  Extraction
-        stops when the configured ``xspct_archive_max_depth`` or
-        ``xspct_archive_max_size`` limits are reached.  Each extracted file is
-        passed through the normal type-detection + analysis pipeline.
+        Password-protected archives are tried with the daemon password list;
+        sflock is called once per candidate password until ``children`` is
+        non-empty.  The fallback loop mirrors the same behaviour.
+
+        Each extracted member is passed through
+        :meth:`get_detected_type` → :meth:`sync_analyze` (documents) /
+        :meth:`analyze_image` / :meth:`analyze_yara` so that YARA, iocsearcher,
+        and type-specific analysers run on every member.
 
         Args:
             s: Session tag for log messages.
@@ -1605,11 +1617,8 @@ class InspectorDaemon:
             depth: Current recursion depth (callers should pass 0).
 
         Returns:
-            A merged report dict with ``archive_files`` (list of
-            ``{"name": str, "size": int, "detected_type": str}`` entries)
-            and the aggregated ``analyses``, ``iocs`` from contained files.
-            Returns ``None`` when archives are disabled, depth exceeded, or
-            the data is not a recognized archive.
+            A merged report dict or ``None`` when the archive cannot be opened,
+            depth/size limits are exceeded, or the analyzer is disabled.
         """
         max_depth = int(config['xspct_archive_max_depth'])
         max_size  = int(config['xspct_archive_max_size'])
@@ -1618,13 +1627,6 @@ class InspectorDaemon:
 
         enabled = self._resolve_enabled_analyzers()
         if 'archive' not in enabled:
-            return None
-
-        # Try to detect archive type
-        is_zip = zipfile.is_zipfile(io.BytesIO(data))
-        is_7z  = data[:6] == b'7z\xbc\xaf\x27\x1c'
-
-        if not is_zip and not is_7z:
             return None
 
         report: dict = {
@@ -1648,19 +1650,16 @@ class InspectorDaemon:
                 ('yara'   in enabled and getattr(self, '_yara_rules',   None) is not None) or
                 ('yara_x' in enabled and getattr(self, '_yara_x_rules', None) is not None)
             )
-            # Recursively analyse (nested archives + documents)
             detected = self.get_detected_type(None, None, name, member_data[:4096])
             if detected == 'archive' and depth + 1 < max_depth:
                 sub = self.analyze_archive(s, name, member_data, depth + 1)
                 if sub:
                     self.merge_reports(report, sub)
             elif detected in ('pdf', 'html', 'office', 'text'):
-                # sync_analyze internally calls YARA when rules are loaded
                 sub = self.sync_analyze(s, name, member_data, None)
                 if sub:
                     self.merge_reports(report, sub)
             elif detected == 'image':
-                # analyze_image handles OCR/QR/EXIF; YARA scans raw bytes separately
                 sub = self.analyze_image(member_data, label=name)
                 if sub:
                     self.merge_reports(report, sub)
@@ -1669,51 +1668,122 @@ class InspectorDaemon:
                     if yr:
                         self.merge_reports(report, yr)
             else:
-                # 'unknown' — YARA on raw bytes only
                 if _yara_ok:
                     yr = self.analyze_yara(member_data)
                     if yr:
                         self.merge_reports(report, yr)
 
-        try:
-            if is_zip:
-                with zipfile.ZipFile(io.BytesIO(data)) as zf:
-                    for info in zf.infolist():
-                        if info.is_dir():
-                            continue
-                        if total_extracted + info.file_size > max_size:
-                            logger.warning('%s - archive %s: size limit reached', s, filename)
-                            break
-                        for pwd in [None] + [p.encode() for p in self.passwords[:50]]:
-                            try:
-                                member_data = zf.read(info, pwd=pwd)
-                                _analyse_member(info.filename, member_data)
-                                break
-                            except RuntimeError:
-                                # Wrong password or unencrypted — try next
-                                continue
-                            except Exception as exc:
-                                logger.debug('%s - zip member %s failed: %s',
-                                             s, info.filename, exc)
-                                break
-            elif is_7z:
+        if HAS_SFLOCK:
+            # ---- sflock path: sandboxed extraction via zipjail ----------------
+            if len(data) > max_size:
+                logger.warning('%s - archive %s exceeds max_size (%d), skipping',
+                               s, filename, max_size)
+                return None
+
+            # Try without password first, then the daemon wordlist.
+            # sflock accepts one password per call; we iterate until children
+            # is non-empty or we exhaust the list.
+            passwords_to_try: list = [None] + list(self.passwords[:50])
+            f = None
+            for pwd in passwords_to_try:
                 try:
-                    import py7zr as _py7zr
-                    with _py7zr.SevenZipFile(io.BytesIO(data), mode='r') as zf:
-                        members = zf.readall()
-                        for name, bio in (members or {}).items():
-                            if bio is None:
+                    f = _sflock.unpack(
+                        contents=data,
+                        filename=filename,
+                        password=pwd,
+                    )
+                    if getattr(f, 'children', None):
+                        break
+                    # No children: check whether error hints at wrong password
+                    err = str(getattr(f, 'error', '') or '').lower()
+                    if not err or ('decrypt' not in err and 'password' not in err
+                                   and 'wrong' not in err and 'bad' not in err):
+                        break   # error is not password-related — stop retrying
+                except Exception as exc:
+                    logger.debug('%s - sflock unpack error for %s: %s', s, filename, exc)
+                    f = None
+                    break
+
+            if f is None or not getattr(f, 'children', None):
+                return None
+
+            if getattr(f, 'password', None):
+                report['decryption_password'] = str(f.password)
+
+            def _walk_sflock(file_obj: object, current_depth: int) -> None:
+                nonlocal total_extracted
+                for child in (getattr(file_obj, 'children', None) or []):
+                    child_name = str(
+                        getattr(child, 'filename', None) or
+                        getattr(child, 'relapath',  None) or
+                        'unknown'
+                    )
+                    child_contents = getattr(child, 'contents', None) or b''
+                    if getattr(child, 'children', None):
+                        # Container node (nested archive sflock already opened)
+                        if current_depth + 1 < max_depth:
+                            _walk_sflock(child, current_depth + 1)
+                        else:
+                            logger.debug('%s - sflock depth limit at %s/%s',
+                                         s, filename, child_name)
+                    else:
+                        # Leaf file — respect size budget
+                        if total_extracted + len(child_contents) > max_size:
+                            logger.warning('%s - archive %s: size limit reached',
+                                           s, filename)
+                            return
+                        _analyse_member(child_name, child_contents)
+
+            _walk_sflock(f, depth)
+
+        else:
+            # ---- Fallback: stdlib zipfile + optional py7zr ------------------
+            is_zip = zipfile.is_zipfile(io.BytesIO(data))
+            is_7z  = data[:6] == b'7z\xbc\xaf\x27\x1c'
+
+            if not is_zip and not is_7z:
+                return None
+
+            try:
+                if is_zip:
+                    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                        for info in zf.infolist():
+                            if info.is_dir():
                                 continue
-                            member_data = bio.read()
-                            if total_extracted + len(member_data) > max_size:
-                                logger.warning('%s - 7z %s: size limit reached', s, filename)
+                            if total_extracted + info.file_size > max_size:
+                                logger.warning('%s - archive %s: size limit reached',
+                                               s, filename)
                                 break
-                            _analyse_member(name, member_data)
-                except ImportError:
-                    logger.debug('py7zr not installed — 7z archive not extracted')
-                    return None
-        except Exception as exc:
-            logger.error('%s - archive analysis error for %s: %s', s, filename, exc)
+                            for pwd in [None] + [p.encode() for p in self.passwords[:50]]:
+                                try:
+                                    member_data = zf.read(info, pwd=pwd)
+                                    _analyse_member(info.filename, member_data)
+                                    break
+                                except RuntimeError:
+                                    continue
+                                except Exception as exc:
+                                    logger.debug('%s - zip member %s failed: %s',
+                                                 s, info.filename, exc)
+                                    break
+                elif is_7z:
+                    try:
+                        import py7zr as _py7zr
+                        with _py7zr.SevenZipFile(io.BytesIO(data), mode='r') as zf:
+                            members = zf.readall()
+                            for name, bio in (members or {}).items():
+                                if bio is None:
+                                    continue
+                                member_data = bio.read()
+                                if total_extracted + len(member_data) > max_size:
+                                    logger.warning('%s - 7z %s: size limit reached',
+                                                   s, filename)
+                                    break
+                                _analyse_member(name, member_data)
+                    except ImportError:
+                        logger.debug('py7zr not installed — 7z archive not extracted')
+                        return None
+            except Exception as exc:
+                logger.error('%s - archive analysis error for %s: %s', s, filename, exc)
 
         return report if report['archive_files'] else None
 
@@ -2523,6 +2593,14 @@ class InspectorDaemon:
         if 'rtf' in mime or 'rtf' in desc or (data and data.startswith(b'{\\rt')):
             return 'office'
 
+        # EML / MSG: treat as archive so sflock2 can extract attachments in-sandbox.
+        # These checks must come before the broad vnd.ms-* office MIME fragment so
+        # that application/vnd.ms-outlook is not mistakenly classified as office.
+        _MAIL_MIMES = ('message/rfc822', 'application/vnd.ms-outlook')
+        _MAIL_EXTS  = ('.eml', '.mso')
+        if mime in _MAIL_MIMES or any(filename.endswith(e) for e in _MAIL_EXTS):
+            return 'archive'
+
         # OLE2 / Compound Document / generic binary → office
         if any(kw in desc for kw in ('composite document', 'ole', 'compound', 'cdfv2')):
             return 'office'
@@ -2540,7 +2618,7 @@ class InspectorDaemon:
         # Office filename extensions → office
         _OFFICE_EXTS = (
             '.doc', '.docx', '.xls', '.xlsx', '.xlsm', '.xlsb',
-            '.ppt', '.pptx', '.odt', '.ods', '.odp', '.msg',
+            '.ppt', '.pptx', '.odt', '.ods', '.odp',
         )
         if any(filename.endswith(e) for e in _OFFICE_EXTS):
             return 'office'
@@ -2559,16 +2637,31 @@ class InspectorDaemon:
             'application/x-7z-compressed',
             'application/x-tar',
             'application/gzip',
+            'application/x-gzip',
             'application/x-bzip2',
             'application/x-xz',
             'application/x-rar-compressed',
             'application/vnd.rar',
+            'application/x-rar',
+            'application/x-cab',
+            'application/vnd.ms-cab-compressed',
+            'application/x-ace',
+            'application/x-lzh',
+            'application/x-lzh-compressed',
+            'application/x-iso9660-image',
+            'application/x-lzip',
         )
-        _ARCHIVE_EXTS = ('.zip', '.7z', '.tar', '.gz', '.bz2', '.xz', '.rar', '.tgz')
+        _ARCHIVE_EXTS = (
+            '.zip', '.7z', '.tar', '.gz', '.bz2', '.xz', '.rar',
+            '.tgz', '.tbz2', '.cab', '.ace', '.lzh', '.lha', '.iso',
+            '.lz', '.zpaq', '.msg', '.eml', '.mso',
+        )
         if (mime in _ARCHIVE_MIMES
                 or any(filename.endswith(e) for e in _ARCHIVE_EXTS)
                 or 'zip archive' in desc
-                or '7-zip' in desc):
+                or '7-zip' in desc
+                or 'rar archive' in desc
+                or 'tar archive' in desc):
             return 'archive'
 
         # Plain text / scripts

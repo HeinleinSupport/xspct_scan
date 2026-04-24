@@ -105,3 +105,14 @@ xspct_cache_partial: false
 #   xspct_background_rejected   — raise background_slots or reduce scan time
 xspct_foreground_slots: 16
 xspct_background_slots: 4
+
+# ---------------------------------------------------------------------------
+# Archive extraction backend
+# ---------------------------------------------------------------------------
+# When SFlock2 is installed (pip install "xspct_scan[advanced]") it is used
+# automatically for all archive types (ZIP, 7z, RAR, TAR, CAB, ACE, ISO,
+# EML, MSG, …).  Extraction runs inside the zipjail usermode sandbox.
+# Without SFlock2 the fallback uses stdlib zipfile (ZIP only) + py7zr (7z).
+#
+# System packages required for full sflock2 support on Debian/Ubuntu:
+#   apt-get install p7zip-full rar unace-nonfree cabextract lzip zpaq
