@@ -218,6 +218,15 @@ config: dict = {
         'expire': 3600,
         'max_errors': 3,
     },
+    'xspct_clamav': {
+        'enabled': False,
+        'socket': '/var/run/clamav/clamd.ctl',  # non-empty → Unix socket; else TCP
+        'host': '127.0.0.1',
+        'port': 3310,
+        'timeout': 60,            # per-scan timeout in seconds
+        'max_size': 26214400,     # 25 MB — skip larger files
+        'scan_members': True,     # also scan archive members individually
+    },
     'xspct_stats_enabled': True,
     'xspct_stats_interval': 60,
     'xspct_password_file': '10k-most-common.txt',
@@ -295,6 +304,14 @@ stats: dict = {
     'background_rejected': 0,      # timed-out scans dropped (no bg slot available)
     'background_completed': 0,     # background scans that finished successfully
     'background_errors': 0,        # background scans that raised an exception
+    # ClamAV engine stats
+    'clamav_clean': 0,
+    'clamav_infected': 0,
+    'clamav_errors': 0,
+    'clamav_timeouts': 0,
+    # Per-analyzer timing/hit stats — populated lazily on first call.
+    # Each entry: {calls, hits, ms_total, ms_min, ms_max}
+    'analyzer_stats': {},
 }
 """Module-level runtime counters.
 
@@ -333,7 +350,7 @@ def load_config(path: 'str | None' = None) -> None:
         with open(path) as fh:
             extra = yaml.safe_load(fh)
         if extra:
-            for sub in ('xspct_tls', 'xspct_redis_cache'):
+            for sub in ('xspct_tls', 'xspct_redis_cache', 'xspct_clamav'):
                 if sub in extra:
                     merged = config[sub].copy()
                     merged.update(extra.pop(sub))
@@ -908,6 +925,9 @@ class InspectorDaemon:
         # Compiled YARA rules (None when YARA is unavailable or not configured).
         self._yara_rules   = None   # yara-python compiled rules
         self._yara_x_rules = None   # yara-x compiled rules
+        # ClamAV client (None when disabled or library unavailable).
+        self._clamd = None
+        self._clamav_version: str = ''  # cached VERSION response
 
     # ------------------------------------------------------------------
     # Redis helpers
@@ -1341,6 +1361,102 @@ class InspectorDaemon:
         if not result:
             return None
         return {'iocs_extended': {k: sorted(v) for k, v in result.items()}}
+
+    # ------------------------------------------------------------------
+    # ClamAV engine
+    # ------------------------------------------------------------------
+
+    _CLAMAV_VERSION_RE = re.compile(
+        r'ClamAV\s+([^\s/]+)(?:/(\d+)/([^\n]+))?'
+    )
+
+    def _parse_clamav_version(self) -> 'tuple[str, str, str]':
+        """Parse the cached VERSION string into (engine, db_version, db_date)."""
+        m = self._CLAMAV_VERSION_RE.search(self._clamav_version)
+        if m:
+            return m.group(1) or '', m.group(2) or '', (m.group(3) or '').strip()
+        return self._clamav_version, '', ''
+
+    def analyze_clamav(self, data: bytes, filename: str = '') -> dict:
+        """Scan *data* with ClamAV via the clamd INSTREAM protocol.
+
+        Always returns a dict with a ``clamav`` key so the field is present
+        in the report whenever the engine is enabled — even on errors or
+        when the file is skipped.  Possible ``clamav.status`` values:
+
+        - ``clean``       — scan completed, no threat found
+        - ``infected``    — one or more detections; names in ``viruses``
+        - ``skipped``     — file exceeds ``xspct_clamav.max_size``
+        - ``unavailable`` — client not connected (startup connection failed)
+        - ``error``       — scan-time exception
+
+        Runs synchronously (intended for
+        :meth:`~asyncio.loop.run_in_executor`).
+        """
+        engine_ver, db_ver, db_date = self._parse_clamav_version()
+
+        def _meta(status: str, **extra) -> dict:
+            return {'clamav': {
+                'status': status, 'viruses': [],
+                'engine_version': engine_ver, 'db_version': db_ver, 'db_date': db_date,
+                'scan_time_ms': 0,
+                **extra,
+            }}
+
+        if self._clamd is None:
+            stats['clamav_errors'] += 1
+            return _meta('unavailable')
+
+        max_size = int(config['xspct_clamav'].get('max_size', 26214400))
+        if len(data) > max_size:
+            logger.debug(
+                'ClamAV scan skipped for %s: %d bytes > %d', filename, len(data), max_size
+            )
+            return _meta('skipped')
+
+        t0 = time.monotonic()
+        try:
+            result = self._clamd.instream(io.BytesIO(data))
+        except (_clamd.ConnectionError, _clamd.ClamdError) as exc:
+            logger.error('ClamAV unreachable: %s', exc)
+            stats['clamav_errors'] += 1
+            return _meta('error', scan_time_ms=int((time.monotonic() - t0) * 1000))
+        except Exception as exc:
+            logger.error('ClamAV scan error for %s: %s', filename, exc)
+            stats['clamav_errors'] += 1
+            return _meta('error', scan_time_ms=int((time.monotonic() - t0) * 1000))
+
+        scan_time_ms = int((time.monotonic() - t0) * 1000)
+        # result: {'stream': ('OK', None)} or {'stream': ('FOUND', 'Virus.Name')}
+        status_str, virus_name = result.get('stream', ('ERROR', None))
+
+        if status_str == 'ERROR':
+            stats['clamav_errors'] += 1
+            return _meta('error', scan_time_ms=scan_time_ms)
+
+        viruses = [virus_name] if status_str == 'FOUND' and virus_name else []
+        if viruses:
+            stats['clamav_infected'] += 1
+            logger.info('ClamAV FOUND in %s: %s (%d ms)', filename, viruses, scan_time_ms)
+        else:
+            stats['clamav_clean'] += 1
+            logger.debug('ClamAV clean: %s (%d ms)', filename, scan_time_ms)
+
+        partial: dict = {'clamav': {
+            'status': 'infected' if viruses else 'clean',
+            'viruses': viruses,
+            'engine_version': engine_ver,
+            'db_version': db_ver,
+            'db_date': db_date,
+            'scan_time_ms': scan_time_ms,
+        }}
+        if viruses:
+            partial['analyses'] = [{
+                'type': 'ClamAV',
+                'keyword': v,
+                'description': f'ClamAV detected: {v}' + (f' [in {filename}]' if filename else ''),
+            } for v in viruses]
+        return partial
 
     # ------------------------------------------------------------------
     # JavaScript static analysis + sandbox
@@ -1818,28 +1934,65 @@ class InspectorDaemon:
                 ('yara'   in enabled and getattr(self, '_yara_rules',   None) is not None) or
                 ('yara_x' in enabled and getattr(self, '_yara_x_rules', None) is not None)
             )
+            _clamav_members = (
+                HAS_CLAMD and
+                config['xspct_clamav']['enabled'] and
+                config['xspct_clamav'].get('scan_members', True)
+            )
             detected = self.get_detected_type(None, None, name, member_data[:4096])
+            analyzers_run: list[str] = []
+            findings_before = len(report['analyses'])
+
             if detected == 'archive' and depth + 1 < max_depth:
                 sub = self.analyze_archive(s, name, member_data, depth + 1)
                 if sub:
                     self.merge_reports(report, sub)
+                    analyzers_run.append('archive')
             elif detected in ('pdf', 'html', 'office', 'text'):
                 sub = self.sync_analyze(s, name, member_data, None)
                 if sub:
                     self.merge_reports(report, sub)
+                    analyzers_run.append(detected)
+                    if HAS_IOCSEARCHER and 'iocs' in enabled:
+                        analyzers_run.append('iocs')
+                    if _yara_ok:
+                        analyzers_run.append('yara')
+                    if _clamav_members:
+                        analyzers_run.append('clamav')
             elif detected == 'image':
                 sub = self.analyze_image(member_data, label=name)
                 if sub:
                     self.merge_reports(report, sub)
+                    analyzers_run.append('image')
                 if _yara_ok:
                     yr = self.analyze_yara(member_data)
                     if yr:
                         self.merge_reports(report, yr)
+                    analyzers_run.append('yara')
+                if _clamav_members:
+                    cv_res = self.analyze_clamav(member_data, name)
+                    if cv_res:
+                        self.merge_reports(report, cv_res)
+                    analyzers_run.append('clamav')
             else:
                 if _yara_ok:
                     yr = self.analyze_yara(member_data)
                     if yr:
                         self.merge_reports(report, yr)
+                    analyzers_run.append('yara')
+                if _clamav_members:
+                    cv_res = self.analyze_clamav(member_data, name)
+                    if cv_res:
+                        self.merge_reports(report, cv_res)
+                    analyzers_run.append('clamav')
+
+            report['archive_files'].append({
+                'name':           name,
+                'size':           len(member_data),
+                'detected_type':  detected,
+                'analyzers_run':  analyzers_run,
+                'findings':       len(report['analyses']) - findings_before,
+            })
 
         if HAS_SFLOCK:
             # ---- sflock path: sandboxed extraction via zipjail ----------------
@@ -2947,6 +3100,9 @@ class InspectorDaemon:
             elif key == 'exif':
                 if value and not target.get('exif'):
                     target['exif'] = value
+            elif key == 'clamav':
+                if value is not None:
+                    target['clamav'] = value
             elif key == 'text_full':
                 # Keep the longest full-text across merged reports
                 if value:
@@ -3363,6 +3519,12 @@ class InspectorDaemon:
         )
         if yara_enabled:
             pending.append('yara')
+        # ClamAV runs regardless of file type.
+        # Task always runs when enabled so 'clamav' is always present in the report
+        # (analyze_clamav returns status='unavailable' when the client isn't connected).
+        clamav_enabled = HAS_CLAMD and config['xspct_clamav']['enabled']
+        if clamav_enabled:
+            pending.append('clamav')
 
         base = self._make_base_report(filename, file_hash, file_mime, file_desc)
         base['analyzers_completed'] = []
@@ -3920,7 +4082,19 @@ class InspectorDaemon:
             '# HELP xspct_background_slots_free Current free background semaphore slots',
             '# TYPE xspct_background_slots_free gauge',
             f'xspct_background_slots_free {self._bg_sem._value if self._bg_sem else 0}',
-        ]
+            # --- ClamAV engine ---
+            '# HELP xspct_clamav_clean Files scanned clean by ClamAV',
+            '# TYPE xspct_clamav_clean counter',
+            f'xspct_clamav_clean {stats["clamav_clean"]}',
+            '# HELP xspct_clamav_infected Files detected as infected by ClamAV',
+            '# TYPE xspct_clamav_infected counter',
+            f'xspct_clamav_infected {stats["clamav_infected"]}',
+            '# HELP xspct_clamav_errors ClamAV scan errors',
+            '# TYPE xspct_clamav_errors counter',
+            f'xspct_clamav_errors {stats["clamav_errors"]}',
+            '# HELP xspct_clamav_timeouts ClamAV scans that exceeded the per-scan timeout',
+            '# TYPE xspct_clamav_timeouts counter',
+            f'xspct_clamav_timeouts {stats["clamav_timeouts"]}',
         return web.Response(text='\n'.join(lines) + '\n', content_type='text/plain')
 
     async def handle_admin_reload(self, request: web.Request) -> web.Response:

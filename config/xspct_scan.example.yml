@@ -32,6 +32,26 @@ xspct_tls:
   tls_cert: ''
   tls_key: ''
 
+# ClamAV engine (optional — requires: pip install "xspct_scan[enrichment]" and a running clamd)
+# Scans every file regardless of type. Results are included in the report as 'clamav'
+# and any detections are also added to the 'analyses' list as type 'ClamAV'.
+#
+# Connection: set 'socket' to the clamd Unix socket path (recommended for local setups).
+# Leave 'socket' empty to use TCP (host + port).
+#
+# Rule of thumb: set xspct_foreground_slots + xspct_background_slots ≤ clamd MaxThreads.
+xspct_clamav:
+  enabled: false
+  socket: /var/run/clamav/clamd.ctl   # non-empty → Unix socket; empty → TCP
+  host: 127.0.0.1
+  port: 3310
+  timeout: 60         # per-scan timeout in seconds
+  max_size: 26214400  # 25 MB — files larger than this are skipped
+  # When true (default), each file extracted from an archive is also passed to
+  # ClamAV individually. clamd already unpacks archives internally, so set this
+  # to false to avoid double-scanning and reduce clamd load.
+  scan_members: true
+
 # Redis result cache (optional)
 xspct_redis_cache:
   enabled: false
