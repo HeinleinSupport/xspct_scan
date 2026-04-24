@@ -8,7 +8,7 @@ Coverage:
     - Session ID / session header helpers
     - API key verification (no keys, correct, wrong, multi-key, verify_fail flag)
     - IOC extraction (URLs, IPs, dedup, UTF-16, invalid IPs)
-    - analyze_pdf  (clean, all markers, /URI IOC)
+    - analyze_pdf  (clean, all markers, /URI IOC, password-protected)
     - analyze_html (clean, all suspicious JS keywords, forms, iframes, meta-refresh,
                    SpamRedirect, inline-script → analyze_javascript wiring,
                    data-URI image wiring)
@@ -27,7 +27,7 @@ Coverage:
     - GET /health /ping /
     - GET /metrics (Prometheus text, counter increments after scan)
     - POST /scan: missing doc → 400
-    - POST /scan: clean PDF, malicious PDF, malicious HTML, OOXML, real OLE, real RTF
+    - POST /scan: clean PDF, malicious PDF, password-protected PDF, malicious HTML, OOXML, real OLE, real RTF
     - POST /scan: file_mime override, custom passwords field, rtf=true flag
     - POST /scan: same file twice returns same hash
     - POST /scan: very short timeout may return 202 (background processing)
@@ -56,6 +56,12 @@ from unittest.mock import MagicMock
 import aiohttp
 import pytest
 
+try:
+    import fitz as _fitz
+    _HAS_FITZ = True
+except ImportError:
+    _HAS_FITZ = False
+
 import olefy_v2.daemon as olefy
 from tests.conftest import OLE_FILE, RTF_FILE, PASSWD_FILE
 
@@ -77,6 +83,28 @@ PDF_ALL_MARKERS = (
 )
 
 PDF_WITH_URI = b'%PDF-1.4\n/URI (https://malware.example.com/stage2)\n%%EOF'
+
+# Password used for the synthetically encrypted PDF fixture
+_PDF_ENC_PASSWORD = 'TestPwd42'
+
+
+def _make_encrypted_pdf(user_pw: str) -> bytes:
+    """Return a minimal AES-256-encrypted PDF protected by *user_pw*."""
+    if not _HAS_FITZ:
+        return b''  # tests that need this are skipped via _HAS_FITZ guard
+    doc = _fitz.open()
+    page = doc.new_page()
+    page.insert_text((50, 50), 'Encrypted test document')
+    buf = doc.tobytes(
+        encryption=_fitz.PDF_ENCRYPT_AES_256,
+        owner_pw='owner',
+        user_pw=user_pw,
+    )
+    doc.close()
+    return buf
+
+
+PDF_ENCRYPTED: bytes = _make_encrypted_pdf(_PDF_ENC_PASSWORD) if _HAS_FITZ else b''
 
 HTML_CLEAN = b'<html><body><p>Hello world. Visit https://example.com for more.</p></body></html>'
 
@@ -347,6 +375,73 @@ class TestAnalyzePdf:
     def test_text_preview_present(self, daemon):
         r = daemon.analyze_pdf(PDF_CLEAN)
         assert 'text_preview' in r
+
+
+@pytest.mark.skipif(not _HAS_FITZ, reason='PyMuPDF not installed')
+class TestAnalyzePdfEncrypted:
+    """Tests for password-protected PDF decryption via analyze_pdf / sync_analyze."""
+
+    def test_encrypted_pdf_is_flagged(self, daemon):
+        """An encrypted PDF with the wrong password list is flagged as encrypted."""
+        daemon.passwords = ['wrong1', 'wrong2']
+        r = daemon.analyze_pdf(PDF_ENCRYPTED)
+        assert r is not None
+        assert r['is_encrypted'] is True
+        assert r['decrypted'] is False
+
+    def test_encrypted_pdf_no_hit_when_no_password(self, daemon):
+        """No analysis hits are produced when the PDF cannot be decrypted."""
+        daemon.passwords = ['wrong1', 'wrong2']
+        r = daemon.analyze_pdf(PDF_ENCRYPTED)
+        # Only the Encryption indicator should be present; no JS / launch hits
+        types = {a['type'] for a in r['analyses']}
+        assert types == {'Encryption'}
+
+    def test_correct_daemon_password_decrypts(self, daemon):
+        """Correct password in daemon.passwords unlocks the PDF."""
+        daemon.passwords = ['wrong1', _PDF_ENC_PASSWORD, 'wrong2']
+        r = daemon.analyze_pdf(PDF_ENCRYPTED)
+        assert r['decrypted'] is True
+        assert r['decryption_password'] == _PDF_ENC_PASSWORD
+
+    def test_correct_custom_password_decrypts(self, daemon):
+        """Correct password supplied as custom_passwords is tried first."""
+        daemon.passwords = ['wrong1', 'wrong2']
+        r = daemon.analyze_pdf(PDF_ENCRYPTED, custom_passwords=[_PDF_ENC_PASSWORD])
+        assert r['decrypted'] is True
+        assert r['decryption_password'] == _PDF_ENC_PASSWORD
+
+    def test_custom_password_tried_before_daemon_list(self, daemon):
+        """custom_passwords are exhausted before falling back to daemon.passwords."""
+        # Put the correct password only in daemon.passwords so if custom_passwords
+        # are tried first (and wrong), decryption still succeeds via fallback.
+        daemon.passwords = [_PDF_ENC_PASSWORD]
+        r = daemon.analyze_pdf(PDF_ENCRYPTED, custom_passwords=['bad1', 'bad2'])
+        assert r['decrypted'] is True
+
+    def test_decrypted_pdf_has_report_keys(self, daemon):
+        """After successful decryption the standard report keys are present."""
+        daemon.passwords = [_PDF_ENC_PASSWORD]
+        r = daemon.analyze_pdf(PDF_ENCRYPTED)
+        for key in ('has_javascript', 'has_openaction', 'iocs', 'text_preview', 'analyses'):
+            assert key in r
+
+    def test_sync_analyze_decrypts_encrypted_pdf(self, daemon):
+        """sync_analyze propagates decryption state for a PDF."""
+        daemon.passwords = [_PDF_ENC_PASSWORD]
+        r = daemon.sync_analyze('<t>', 'enc.pdf', PDF_ENCRYPTED, 'application/pdf')
+        assert r['detected_type'] == 'pdf'
+        assert r['decrypted'] is True
+        assert r['decryption_password'] == _PDF_ENC_PASSWORD
+
+    def test_sync_analyze_custom_password_decrypts_pdf(self, daemon):
+        """custom_passwords passed to sync_analyze reach analyze_pdf."""
+        daemon.passwords = ['wrong']
+        r = daemon.sync_analyze(
+            '<t>', 'enc.pdf', PDF_ENCRYPTED, 'application/pdf',
+            custom_passwords=[_PDF_ENC_PASSWORD],
+        )
+        assert r['decrypted'] is True
 
 
 class TestAnalyzeHtml:
@@ -726,6 +821,31 @@ class TestScanEndpoint:
         form.add_field('passwords', 'pw1,pw2,TopSecret')
         r = await client.post('/scan', data=form)
         assert r.status == 200
+
+    @pytest.mark.skipif(not _HAS_FITZ, reason='PyMuPDF not installed')
+    async def test_scan_encrypted_pdf_wrong_password(self, client):
+        """Encrypted PDF with no matching password: report flags is_encrypted, decrypted=False."""
+        form = aiohttp.FormData()
+        form.add_field('doc',       PDF_ENCRYPTED, filename='enc.pdf')
+        form.add_field('passwords', 'wrong1,wrong2')
+        r = await client.post('/scan', data=form)
+        assert r.status == 200
+        body = await r.json()
+        assert body['is_encrypted'] is True
+        assert body['decrypted'] is False
+
+    @pytest.mark.skipif(not _HAS_FITZ, reason='PyMuPDF not installed')
+    async def test_scan_encrypted_pdf_correct_password(self, client):
+        """Encrypted PDF unlocked via the passwords field: decrypted=True."""
+        form = aiohttp.FormData()
+        form.add_field('doc',       PDF_ENCRYPTED, filename='enc.pdf')
+        form.add_field('passwords', f'wrong1,{_PDF_ENC_PASSWORD},wrong2')
+        r = await client.post('/scan', data=form)
+        assert r.status == 200
+        body = await r.json()
+        assert body['detected_type'] == 'pdf'
+        assert body['decrypted'] is True
+        assert body['decryption_password'] == _PDF_ENC_PASSWORD
 
     async def test_scan_time_taken_present(self, client):
         r = await client.post('/scan', data=_form(PDF_CLEAN, 'timed.pdf'))
