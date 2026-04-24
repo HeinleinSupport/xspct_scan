@@ -207,10 +207,12 @@ config: dict = {
         'html':       {'enabled': True},
         'office':     {'enabled': True},
         'yara':       {'enabled': False, 'rules_path': ''},
+        'yara_x':     {'enabled': False, 'rules_path': ''},
         'image':      {'enabled': True},
         'archive':    {'enabled': True},
         'iocs':       {'enabled': True},
         'javascript': {'enabled': True},
+        'text':       {'enabled': True},
     },
     # When True, the full extracted text is included in the report as
     # 'text_full'. When False only 'text_preview' (truncated) is returned.
@@ -1686,6 +1688,45 @@ class InspectorDaemon:
         return report if report['archive_files'] else None
 
     # ------------------------------------------------------------------
+    # Plain-text analysis
+    # ------------------------------------------------------------------
+
+    def analyze_text(self, data: bytes, filename: str,
+                     file_mime: 'str | None' = None) -> 'dict | None':
+        """Analyse a plain-text or script file.
+
+        Decodes the raw bytes (UTF-8 with fallback to latin-1), extracts
+        ``text_preview`` and ``iocs``, and returns a minimal report dict
+        compatible with :meth:`merge_reports`.  YARA and iocsearcher run
+        separately on the same data — this method only handles baseline
+        IOC extraction and text population.
+
+        Args:
+            data: Raw file bytes.
+            filename: Original filename (for log messages).
+            file_mime: MIME type hint (unused currently, reserved for future
+                encoding heuristics).
+
+        Returns:
+            A report dict with ``text_preview``, ``iocs``, and ``analyses``
+            keys, or ``None`` when the data is empty.
+        """
+        if not data:
+            return None
+        preview_limit = int(config.get('xspct_text_preview_length', 2000))
+        try:
+            text = data.decode('utf-8', errors='replace')
+        except Exception:
+            text = data.decode('latin-1', errors='replace')
+        report: dict = {
+            'text_preview': text[:preview_limit],
+            'analyses':     [],
+            'iocs':         self.extract_iocs(data),
+        }
+        logger.debug('analyze_text: %s — %d chars', filename, len(text))
+        return report
+
+    # ------------------------------------------------------------------
     # PDF analysis
     # ------------------------------------------------------------------
 
@@ -2871,7 +2912,9 @@ class InspectorDaemon:
                 res = self.analyze_image(data, label=filename)
             elif t == 'archive' and 'archive' in enabled:
                 res = self.analyze_archive(s, filename, data, 0)
-            # 'text', 'unknown' — not analysed by a dedicated method yet
+            elif t == 'text' and 'text' in enabled:
+                res = self.analyze_text(data, filename, file_mime)
+            # 'unknown' — no dedicated method; YARA/iocsearcher run separately
             if res:
                 successful_types.append(t)
                 self.merge_reports(report, res)
@@ -2964,8 +3007,8 @@ class InspectorDaemon:
             elif t == 'office' and 'office' in enabled: pending.append('office')
             elif t == 'image'   and 'image'   in enabled: pending.append('image')
             elif t == 'archive' and 'archive' in enabled: pending.append('archive')
-            # text/unknown: no dedicated analyzer; text_preview is extracted
-            # in the pre-Group-2 block so iocsearcher always receives full text
+            elif t == 'text'    and 'text'    in enabled: pending.append('text')
+            # 'unknown': no dedicated analyzer; text_preview extracted in pre-Group-2 block
         # YARA runs regardless of file type (always on raw bytes).
         # Either or both engines may be active simultaneously.
         yara_enabled = (
@@ -3017,9 +3060,12 @@ class InspectorDaemon:
                 tasks.append(asyncio.create_task(
                     _run('archive', self.analyze_archive, s, filename, data, 0)
                 ))
-            # 'text' and 'unknown' have no dedicated Group 1 analyzer.
-            # text_preview / _full_text_for_analysis are extracted in the
-            # pre-Group-2 block so iocsearcher still receives the full content.
+            elif t == 'text' and 'text' in enabled:
+                tasks.append(asyncio.create_task(
+                    _run('text', self.analyze_text, data, filename, file_mime)
+                ))
+            # 'unknown': no dedicated Group-1 analyzer; iocsearcher + YARA
+            # still run via the pre-Group-2 block and the yara task.
         if yara_enabled:
             tasks.append(asyncio.create_task(_run('yara', self.analyze_yara, data)))
 

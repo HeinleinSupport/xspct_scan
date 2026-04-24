@@ -63,6 +63,7 @@ xspct_analyzers:
   archive:    {enabled: true}
   iocs:       {enabled: true}
   javascript: {enabled: true}
+  text:       {enabled: true}   # plain-text / script files (feeds YARA + iocsearcher)
 
 # When true, the full extracted document text is returned as 'text_full'.
 # When false (default), only the truncated 'text_preview' is included.

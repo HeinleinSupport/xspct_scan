@@ -103,15 +103,23 @@ xspct_analyzers:
   office:     { enabled: true }
   image:      { enabled: true }
   archive:    { enabled: true }
+  text:       { enabled: true }
   iocs:       { enabled: true }
   javascript: { enabled: true }
   yara:       { enabled: false, rules_path: '' }
+  yara_x:     { enabled: false, rules_path: '' }
 ```
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `xspct_analyzers.<name>.enabled` | `true` | Enable/disable the named analyzer. |
 | `xspct_analyzers.yara.rules_path` | `` | Path to a YARA rules file or directory. Required when `yara.enabled` is `true`. |
+| `xspct_analyzers.yara_x.rules_path` | `` | Same as above for the yara-x engine. |
+
+The **`text`** analyzer handles files detected as `text/plain`, ASCII, UTF-8, or any
+script not matched by the other analyzers.  It decodes the content, populates
+`text_preview`, and extracts baseline IOCs.  YARA and iocsearcher then run on
+the same bytes/text in Group 1 and Group 2 respectively.
 
 ### Text extraction
 

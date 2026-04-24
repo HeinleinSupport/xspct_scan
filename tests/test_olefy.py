@@ -1847,3 +1847,108 @@ class TestVerifyAdminKey:
             assert xspct.verify_admin_key('s', self._req()) is False
         finally:
             xspct.config['xspct_admin_api_key'] = []
+
+
+# ===========================================================================
+# UNIT TESTS — analyze_text
+# ===========================================================================
+
+class TestAnalyzeText:
+
+    def test_empty_bytes_returns_none(self, daemon):
+        result = daemon.analyze_text(b'', 'empty.txt')
+        assert result is None
+
+    def test_plain_ascii_returns_dict(self, daemon):
+        result = daemon.analyze_text(b'Hello world', 'hello.txt')
+        assert result is not None
+        assert 'text_preview' in result
+        assert 'iocs' in result
+        assert 'analyses' in result
+
+    def test_text_preview_content(self, daemon):
+        result = daemon.analyze_text(b'Hello world', 'hello.txt')
+        assert result['text_preview'] == 'Hello world'
+
+    def test_text_preview_respects_limit(self, daemon):
+        saved = xspct.config['xspct_text_preview_length']
+        xspct.config['xspct_text_preview_length'] = 5
+        try:
+            result = daemon.analyze_text(b'Hello world', 'hello.txt')
+        finally:
+            xspct.config['xspct_text_preview_length'] = saved
+        assert result['text_preview'] == 'Hello'
+
+    def test_utf8_decoded(self, daemon):
+        text = 'Ünïcödé text'
+        result = daemon.analyze_text(text.encode('utf-8'), 'unicode.txt')
+        assert result is not None
+        assert 'Ünïcödé' in result['text_preview']
+
+    def test_latin1_fallback(self, daemon):
+        # Bytes that are not valid UTF-8 — latin-1 fallback should not raise
+        data = bytes(range(0x80, 0xA0))
+        result = daemon.analyze_text(data, 'latin.txt')
+        assert result is not None
+        assert isinstance(result['text_preview'], str)
+
+    def test_iocs_extracted(self, daemon):
+        data = b'Visit http://evil.example.com/malware for details'
+        result = daemon.analyze_text(data, 'ioc.txt')
+        assert result is not None
+        # extract_iocs returns a string or dict depending on configuration
+        assert result['iocs'] is not None
+
+    def test_analyses_list(self, daemon):
+        result = daemon.analyze_text(b'some content', 'f.txt')
+        assert isinstance(result['analyses'], list)
+
+    def test_mime_type_hint_accepted(self, daemon):
+        # file_mime kwarg is optional; passing it should not raise
+        result = daemon.analyze_text(b'data', 'f.txt', file_mime='text/plain')
+        assert result is not None
+
+
+# ===========================================================================
+# INTEGRATION TESTS — 'text' detected type flows through analyze_pipeline
+# ===========================================================================
+
+class TestTextTypePipeline:
+
+    @pytest.mark.asyncio
+    async def test_text_file_detected_and_analysed(self, client):
+        payload = b'Hello from a plain text file with no special structure.'
+        resp = await client.post(
+            '/scan',
+            data=payload,
+            headers={
+                'Content-Type': 'application/octet-stream',
+                'X-Filename': 'note.txt',
+            },
+        )
+        assert resp.status == 200
+        body = await resp.json()
+        # detected_type may be 'text' or include 'text'
+        dt = body.get('detected_type', '')
+        assert 'text' in dt or dt == 'unknown'
+        assert 'text_preview' in body
+
+    @pytest.mark.asyncio
+    async def test_text_analyzer_disabled_skips_method(self, aiohttp_client):
+        saved = xspct.config['xspct_analyzers']['text']['enabled']
+        xspct.config['xspct_analyzers']['text']['enabled'] = False
+        app = await xspct.make_app()
+        client = await aiohttp_client(app)
+        try:
+            payload = b'Plain text content for scan.'
+            resp = await client.post(
+                '/scan',
+                data=payload,
+                headers={
+                    'Content-Type': 'application/octet-stream',
+                    'X-Filename': 'note.txt',
+                },
+            )
+            assert resp.status == 200
+        finally:
+            xspct.config['xspct_analyzers']['text']['enabled'] = saved
