@@ -107,6 +107,27 @@ xspct_foreground_slots: 16
 xspct_background_slots: 4
 
 # ---------------------------------------------------------------------------
+# IOC URL / domain exclusion list
+# ---------------------------------------------------------------------------
+# Hostnames (or domain suffixes) to silently drop from the 'urls' and
+# 'domains' fields in every report.  A URL is excluded when its hostname
+# equals an entry OR is a subdomain of it (e.g. 'w3.org' also excludes
+# 'www.w3.org').  Extend this list with any benign boilerplate domains
+# that appear in your document corpus (CDN hosts, schema namespaces, …).
+xspct_ioc_url_exclude_domains:
+  - w3.org
+  - schema.org
+  - schemas.microsoft.com
+  - schemas.openxmlformats.org
+  - purl.org
+  - dublincore.org
+  - xmlsoap.org
+  - ns.adobe.com
+  - creativecommons.org
+  - opengis.net
+  - xhtml1-transitional.dtd
+
+# ---------------------------------------------------------------------------
 # Archive extraction backend
 # ---------------------------------------------------------------------------
 # When SFlock2 is installed (pip install "xspct_scan[advanced]") it is used

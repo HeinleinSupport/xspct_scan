@@ -256,6 +256,23 @@ config: dict = {
     # Total concurrent analyses = foreground + background.
     'xspct_foreground_slots': 16,
     'xspct_background_slots': 4,
+    # Domain suffix exclusion list for IOC URL/domain extraction.
+    # Any URL whose hostname ends with one of these suffixes (or matches exactly)
+    # is silently dropped from 'urls' and 'domains' in every report.
+    # Useful for filtering out W3C schema references, CDN boilerplate, etc.
+    'xspct_ioc_url_exclude_domains': [
+        'w3.org',
+        'schema.org',
+        'schemas.microsoft.com',
+        'schemas.openxmlformats.org',
+        'purl.org',
+        'dublincore.org',
+        'xmlsoap.org',
+        'ns.adobe.com',
+        'creativecommons.org',
+        'opengis.net',
+        'xhtml1-transitional.dtd',
+    ],
 }
 """Module-level configuration dictionary.
 
@@ -1219,11 +1236,23 @@ class InspectorDaemon:
     # IOC extraction
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _ioc_excluded(host: str, exclude_suffixes: tuple) -> bool:
+        """Return True when *host* matches or is a subdomain of any excluded suffix."""
+        host = host.lower().rstrip('.')
+        for suffix in exclude_suffixes:
+            suffix = suffix.lower()
+            if host == suffix or host.endswith('.' + suffix):
+                return True
+        return False
+
     def extract_iocs(self, data: bytes) -> dict:
         """Extract indicators of compromise (IOCs) from raw document bytes.
 
         Decodes the data as both UTF-8 and UTF-16 LE and scans the combined
         text with regular expressions for URLs, IP addresses, and domain names.
+        URLs and domains whose hostname matches ``xspct_ioc_url_exclude_domains``
+        (or is a subdomain thereof) are silently filtered out.
 
         Args:
             data: Raw file bytes to scan.
@@ -1239,13 +1268,47 @@ class InspectorDaemon:
             text_utf8  = data.decode('ascii', 'ignore')
             text_utf16 = ''
         combined = text_utf8 + ' ' + text_utf16
-        urls = sorted(set(self._URL_RE.findall(combined)))
+
+        exclude_suffixes = tuple(
+            s.lower()
+            for s in (config.get('xspct_ioc_url_exclude_domains') or [])
+            if s
+        )
+
+        def _host_from_url(url: str) -> str:
+            """Best-effort hostname extraction without a full URL parser."""
+            try:
+                # strip scheme
+                after_scheme = url.split('://', 1)[1] if '://' in url else url
+                # strip path / query / fragment
+                return after_scheme.split('/')[0].split('?')[0].split('#')[0].lower()
+            except Exception:
+                return ''
+
+        raw_urls = self._URL_RE.findall(combined)
+        if exclude_suffixes:
+            urls = sorted({
+                u for u in raw_urls
+                if not self._ioc_excluded(_host_from_url(u), exclude_suffixes)
+            })
+        else:
+            urls = sorted(set(raw_urls))
+
         raw_ips = set(self._IP_RE.findall(combined))
         ips = sorted(
             ip for ip in raw_ips
             if all(0 <= int(p) <= 255 for p in ip.split('.'))
         )
-        domains = sorted(set(self._DOM_RE.findall(combined)))
+
+        raw_domains = self._DOM_RE.findall(combined)
+        if exclude_suffixes:
+            domains = sorted({
+                d for d in raw_domains
+                if not self._ioc_excluded(d, exclude_suffixes)
+            })
+        else:
+            domains = sorted(set(raw_domains))
+
         return {'urls': urls, 'ips': ips, 'domains': domains}
 
     def analyze_iocsearcher(self, text: str, label: str = '') -> 'dict | None':

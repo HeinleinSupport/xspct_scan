@@ -199,6 +199,60 @@ an 80/20 split and tune using these metrics:
 | `xspct_background_errors` | Background scan exceptions — check logs |
 | `xspct_foreground_slots_free` | Should be close to `foreground_slots` under normal load |
 
+### IOC URL / domain exclusion list
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `xspct_ioc_url_exclude_domains` | *(see below)* | List of domain suffixes to exclude from IOC extraction. Applies to both `iocs` (regex-based) and `iocs_extended` (iocsearcher). |
+
+URLs and domains whose hostname **equals** an excluded entry or is a
+**subdomain** of it are silently dropped from the `urls`, `domains`,
+`fqdn`, and `url` fields in every report.  This prevents schema-namespace
+references (e.g. `http://www.w3.org/1999/xhtml`) and other boilerplate
+from polluting the IOC output.
+
+**Built-in defaults:**
+
+```yaml
+xspct_ioc_url_exclude_domains:
+  - w3.org
+  - schema.org
+  - schemas.microsoft.com
+  - schemas.openxmlformats.org
+  - purl.org
+  - dublincore.org
+  - xmlsoap.org
+  - ns.adobe.com
+  - creativecommons.org
+  - opengis.net
+```
+
+To extend the list, override the key in your config file — the entire list is
+replaced, so include the defaults you want to keep:
+
+```yaml
+xspct_ioc_url_exclude_domains:
+  - w3.org
+  - schema.org
+  - schemas.microsoft.com
+  - schemas.openxmlformats.org
+  - purl.org
+  - dublincore.org
+  - xmlsoap.org
+  - ns.adobe.com
+  - creativecommons.org
+  - opengis.net
+  # site-specific additions:
+  - cdn.example.com
+  - tracking-allowed-domain.internal
+```
+
+To disable filtering entirely, set the list to an empty sequence:
+
+```yaml
+xspct_ioc_url_exclude_domains: []
+```
+
 ### Admin API
 
 | Key | Default | Description |
