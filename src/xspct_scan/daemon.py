@@ -2941,9 +2941,11 @@ class InspectorDaemon:
                 'type': 'HTMLSmuggling', 'keyword': 'base64-blob',
                 'description': f'Large Base64-like blob found ({len(blobs)} blobs > 1000 chars)',
             })
-        # Spam/malware: <script src="https://evil.com/?u=<base62token>">
-        # A short alphanumeric tracker token after ?u= is the canonical pattern
-        # used to inject remote affiliate/redirect loaders into HTML mail.
+        # External script injection: <script src="https://...">
+        # Two sub-patterns:
+        #   1. Tracker/affiliate URLs with a ?u= token (original narrow pattern)
+        #   2. Any external HTTP(S) script src — remote script injection is
+        #      inherently suspicious regardless of query parameter name.
         tracker_scripts = re.findall(
             r'<script[^>]+src=["\']([^"\']*\?u=[a-zA-Z0-9]{8,}[^"\']*)["\']',
             text, re.I,
@@ -2955,6 +2957,21 @@ class InspectorDaemon:
                 'description': (
                     f'Injected tracker/affiliate redirect script found '
                     f'({len(tracker_scripts)} URL(s) with ?u= parameter)'
+                ),
+            })
+        # Any external <script src="http(s)://..."> not already caught above
+        all_external_scripts = re.findall(
+            r'<script[^>]+src=["\'](\s*https?://[^"\']+)["\']',
+            text, re.I,
+        )
+        extra_external = [u for u in all_external_scripts if u not in tracker_scripts]
+        if extra_external:
+            report['analyses'].append({
+                'type': 'ExternalScript',
+                'keyword': 'external-script-src',
+                'description': (
+                    f'External <script src="http…"> found '
+                    f'({len(extra_external)} URL(s)) — remote code execution risk'
                 ),
             })
         # Detect CSS-based content-hiding techniques
