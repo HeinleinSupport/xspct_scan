@@ -80,6 +80,52 @@ try:
 except ImportError:
     HAS_PYZBAR = False
 
+try:
+    import pydantic as _pydantic
+    HAS_PYDANTIC = True
+except ImportError:
+    HAS_PYDANTIC = False
+
+try:
+    import yara as _yara
+    HAS_YARA = True
+    HAS_YARA_HYPERSCAN = getattr(_yara, 'HAVE_HYPERSCAN', False)
+except ImportError:
+    _yara = None  # type: ignore[assignment]
+    HAS_YARA = False
+    HAS_YARA_HYPERSCAN = False
+
+try:
+    import yara_x as _yara_x  # yara-x Rust rewrite
+    HAS_YARA_X = True
+except ImportError:
+    _yara_x = None  # type: ignore[assignment]
+    HAS_YARA_X = False
+
+try:
+    from iocsearcher.searcher import Searcher as _IocSearcher
+    _IOCSEARCHER: '_IocSearcher | None' = _IocSearcher()
+    HAS_IOCSEARCHER = True
+except Exception:
+    _IOCSEARCHER = None
+    HAS_IOCSEARCHER = False
+
+try:
+    import importlib.util as _ilu
+    _vendor_dir = os.path.join(os.path.dirname(__file__), 'vendor')
+    _pdfid_path = os.path.join(_vendor_dir, 'pdfid.py')
+    if os.path.isfile(_pdfid_path):
+        _spec = _ilu.spec_from_file_location('_vendored_pdfid', _pdfid_path)
+        _vendored_pdfid = _ilu.module_from_spec(_spec)  # type: ignore[arg-type]
+        _spec.loader.exec_module(_vendored_pdfid)        # type: ignore[union-attr]
+        HAS_PDFID = True
+    else:
+        _vendored_pdfid = None
+        HAS_PDFID = False
+except Exception:
+    _vendored_pdfid = None
+    HAS_PDFID = False
+
 # ---------------------------------------------------------------------------
 # Per-request timer (ContextVar — isolated per async task)
 # ---------------------------------------------------------------------------
@@ -134,6 +180,7 @@ config: dict = {
     'xspct_api_header': 'X-Api-Key',
     'xspct_api_key': [],
     'xspct_api_key_verify_fail': True,
+    'xspct_admin_api_key': [],
     'xspct_rspamd_header': 'X-Rspamd-ID',
     'xspct_tls': {
         'tls_enabled': False,
@@ -153,6 +200,29 @@ config: dict = {
     'xspct_stats_enabled': True,
     'xspct_stats_interval': 60,
     'xspct_password_file': '10k-most-common.txt',
+    # Per-analyzer enable/disable flags and analyzer-specific settings.
+    # Each key is an analyzer name; 'enabled' controls whether it runs.
+    'xspct_analyzers': {
+        'pdf':        {'enabled': True},
+        'html':       {'enabled': True},
+        'office':     {'enabled': True},
+        'yara':       {'enabled': False, 'rules_path': ''},
+        'image':      {'enabled': True},
+        'archive':    {'enabled': True},
+        'iocs':       {'enabled': True},
+        'javascript': {'enabled': True},
+    },
+    # When True, the full extracted text is included in the report as
+    # 'text_full'. When False only 'text_preview' (truncated) is returned.
+    'xspct_include_text': False,
+    # Maximum characters for text_preview / text_full (whichever applies).
+    'xspct_text_max_length': 2000,
+    # Maximum archive recursion depth (0 = no extraction).
+    'xspct_archive_max_depth': 2,
+    # Maximum total bytes extracted from a single archive (default 50 MB).
+    'xspct_archive_max_size': 52428800,
+    # When True, partial (timeout) reports are also stored in the cache.
+    'xspct_cache_partial': False,
 }
 """Module-level configuration dictionary.
 
@@ -199,6 +269,7 @@ def load_config(path: 'str | None' = None) -> None:
     """
     if path is None:
         _normalise_api_key()
+        _normalise_admin_key()
         return
     if not os.path.isfile(path):
         print(f'Config file not found: {path}', file=sys.stderr)
@@ -212,6 +283,16 @@ def load_config(path: 'str | None' = None) -> None:
                     merged = config[sub].copy()
                     merged.update(extra.pop(sub))
                     extra[sub] = merged
+            # Two-level merge for xspct_analyzers: preserve defaults for
+            # unmentioned analyzers and unmentioned keys within each analyzer.
+            if 'xspct_analyzers' in extra:
+                merged_a: dict = {k: v.copy() for k, v in config['xspct_analyzers'].items()}
+                for name, override in (extra.pop('xspct_analyzers') or {}).items():
+                    if name in merged_a:
+                        merged_a[name].update(override or {})
+                    else:
+                        merged_a[name] = dict(override or {})
+                extra['xspct_analyzers'] = merged_a
             config.update(extra)
     except yaml.YAMLError as exc:
         print(f'YAML error in {path}: {exc}', file=sys.stderr)
@@ -220,12 +301,19 @@ def load_config(path: 'str | None' = None) -> None:
         print(f'Cannot read {path}: {exc}', file=sys.stderr)
         sys.exit(1)
     _normalise_api_key()
+    _normalise_admin_key()
 
 
 def _normalise_api_key() -> None:
     key = config['xspct_api_key']
     if isinstance(key, str):
         config['xspct_api_key'] = [key] if key else []
+
+
+def _normalise_admin_key() -> None:
+    key = config['xspct_admin_api_key']
+    if isinstance(key, str):
+        config['xspct_admin_api_key'] = [key] if key else []
 
 
 def configure_logging() -> None:
@@ -315,6 +403,36 @@ def verify_api_key(s: str, request: web.Request) -> bool:
     return False
 
 
+def verify_admin_key(s: str, request: web.Request) -> bool:
+    """Check the admin API key supplied in ``X-Admin-Api-Key`` header.
+
+    Uses :func:`hmac.compare_digest` for timing-safe comparison.
+    Returns ``False`` when no admin keys are configured (admin endpoints
+    are disabled) or when the supplied key does not match any configured key.
+
+    Args:
+        s: Session tag for log messages.
+        request: The incoming aiohttp request.
+
+    Returns:
+        ``True`` only when at least one admin key is configured and the
+        request supplies a matching value.
+    """
+    keys = config['xspct_admin_api_key']
+    if not keys:
+        logger.warning('%s - admin endpoint accessed but xspct_admin_api_key not configured', s)
+        return False
+    provided = str(request.headers.get('X-Admin-Api-Key', '') or '')
+    valid = False
+    for k in keys:
+        valid |= hmac.compare_digest(provided, str(k))
+    if valid:
+        logger.debug('%s - admin key verification success', s)
+        return True
+    logger.warning('%s - admin key verification failed', s)
+    return False
+
+
 # ---------------------------------------------------------------------------
 # RTF text extractor
 # ---------------------------------------------------------------------------
@@ -364,6 +482,331 @@ class TextExtractorRtf(RtfParser):
 
 
 # ---------------------------------------------------------------------------
+# OpenAPI schema models (pydantic v2)
+# ---------------------------------------------------------------------------
+#
+# These models serve two purposes:
+#   1. Documentation: their JSON schema is embedded in the OpenAPI spec.
+#   2. (optional) Runtime validation: not enforced automatically — handlers
+#      produce dicts that match the schema; pydantic is used only for schema
+#      generation so that the [openapi] extra is optional.
+# ---------------------------------------------------------------------------
+
+if HAS_PYDANTIC:
+    from typing import Any, Optional
+
+    class _AnalysisHit(_pydantic.BaseModel):
+        type:        str
+        keyword:     str
+        description: str
+        confidence:  Optional[str] = None
+
+    class _IocReport(_pydantic.BaseModel):
+        urls:    list[str] = []
+        ips:     list[str] = []
+        domains: list[str] = []
+
+    class _MetaInfo(_pydantic.BaseModel):
+        script_name: str
+        version:     str
+        type:        str
+
+    class _ScanReport(_pydantic.BaseModel):
+        filename:            str
+        file_hash:           str
+        file_type:           Optional[str] = None
+        file_description:    Optional[str] = None
+        detected_type:       str
+        has_macro:           bool = False
+        has_javascript:      bool = False
+        has_openaction:      bool = False
+        has_embedded_files:  bool = False
+        has_launch:          bool = False
+        has_forms:           bool = False
+        is_encrypted:        bool = False
+        decrypted:           bool = False
+        decryption_password: Optional[str] = None
+        has_scripts:         bool = False
+        has_iframes:         bool = False
+        has_meta_refresh:    bool = False
+        analyses:            list[_AnalysisHit]  = []
+        rtf_objects:         list[Any]           = []
+        iocs:                _IocReport           = _pydantic.Field(default_factory=_IocReport)
+        text_preview:        str                  = ''
+        text_full:           Optional[str]         = None
+        meta_document:       Optional[dict]        = None
+        meta:                _MetaInfo
+        analyzers_completed: list[str]             = []
+        analyzers_pending:   list[str]             = []
+        yara_matches:        list[dict]            = []
+        iocs_extended:       dict                  = _pydantic.Field(default_factory=dict)
+        pdfid_keywords:      Optional[dict]        = None
+        pdfid_meta:          Optional[dict]        = None
+        archive_files:       list[dict]            = []
+        exif:                dict                  = _pydantic.Field(default_factory=dict)
+
+    class _ScanResponse(_pydantic.BaseModel):
+        """Response body for ``POST /scan`` (finished)."""
+        status:     str    # 'finished'
+        time_taken: float
+        cache_hit:  bool   = False
+        report:     Optional[_ScanReport] = None
+        # Scan report fields are inlined at the top level for finished responses.
+
+    class _ProcessingResponse(_pydantic.BaseModel):
+        """Response body for ``POST /scan`` (202 partial / timeout)."""
+        status:              str   # 'processing'
+        file_hash:           str
+        message:             str
+        time_taken:          float
+        analyzers_completed: list[str] = []
+        analyzers_pending:   list[str] = []
+
+    class _QueryResponse(_pydantic.BaseModel):
+        """Response body for ``GET|POST /query``."""
+        status:  str   # 'finished' | 'processing' | 'not_found' | 'error'
+        report:  Optional[_ScanReport] = None
+        error:   Optional[str]         = None
+
+    class _ErrorResponse(_pydantic.BaseModel):
+        error: str
+
+    def _build_openapi_spec() -> dict:
+        """Build and return the OpenAPI 3.0 spec dict."""
+        schemas = {}
+        for model in (_AnalysisHit, _IocReport, _MetaInfo, _ScanReport,
+                       _ScanResponse, _ProcessingResponse, _QueryResponse,
+                       _ErrorResponse):
+            s = model.model_json_schema()
+            # pydantic embeds $defs for nested models — hoist them
+            for k, v in s.pop('$defs', {}).items():
+                schemas[k] = v
+            schemas[model.__name__.lstrip('_')] = s
+
+        def _ref(name: str) -> dict:
+            return {'$ref': f'#/components/schemas/{name}'}
+
+        spec: dict = {
+            'openapi': '3.0.3',
+            'info': {
+                'title':   'xspct-scan API',
+                'version': '2.0.0',
+                'description': (
+                    'HTTP API for scanning Office, PDF, and HTML files '
+                    'for malware indicators.'
+                ),
+            },
+            'paths': {
+                '/scan': {
+                    'post': {
+                        'summary': 'Submit a file for analysis',
+                        'operationId': 'scan',
+                        'requestBody': {
+                            'required': True,
+                            'content': {
+                                'multipart/form-data': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'doc': {
+                                                'type': 'string',
+                                                'format': 'binary',
+                                                'description': 'File to analyse (required)',
+                                            },
+                                            'passwords': {
+                                                'type': 'string',
+                                                'description': 'Comma/newline-separated decryption passwords',
+                                            },
+                                            'file_mime': {'type': 'string'},
+                                            'file_type': {'type': 'string'},
+                                        },
+                                        'required': ['doc'],
+                                    },
+                                },
+                                'application/octet-stream': {
+                                    'schema': {
+                                        'type': 'string',
+                                        'format': 'binary',
+                                        'description': 'Raw file bytes',
+                                    },
+                                },
+                            },
+                        },
+                        'parameters': [
+                            {'in': 'query', 'name': 'timeout',  'schema': {'type': 'number', 'default': 10}, 'description': 'Max wait seconds before returning 202'},
+                            {'in': 'query', 'name': 'rtf',      'schema': {'type': 'boolean', 'default': False}, 'description': 'Enable RTF object extraction'},
+                            {'in': 'query', 'name': 'filename', 'schema': {'type': 'string'}, 'description': 'Filename hint (octet-stream only)'},
+                        ],
+                        'responses': {
+                            '200': {
+                                'description': 'Analysis complete',
+                                'content': {'application/json': {'schema': _ref('ScanReport')}},
+                            },
+                            '202': {
+                                'description': 'Analysis in progress (partial report)',
+                                'content': {'application/json': {'schema': _ref('ProcessingResponse')}},
+                            },
+                            '400': {'description': 'Bad request', 'content': {'application/json': {'schema': _ref('ErrorResponse')}}},
+                            '401': {'description': 'Unauthorized'},
+                            '415': {'description': 'Unsupported Content-Type'},
+                            '500': {'description': 'Internal server error'},
+                        },
+                        'security': [{'ApiKeyAuth': []}],
+                    },
+                },
+                '/query': {
+                    'get': {
+                        'summary': 'Poll scan result by file hash',
+                        'operationId': 'queryGet',
+                        'parameters': [
+                            {'in': 'query', 'name': 'hash', 'required': True, 'schema': {'type': 'string'}, 'description': 'SHA-256 hex digest'},
+                        ],
+                        'responses': {
+                            '200': {'description': 'Query result', 'content': {'application/json': {'schema': _ref('QueryResponse')}}},
+                            '400': {'description': 'No hash provided'},
+                            '404': {'description': 'Not found'},
+                        },
+                        'security': [{'ApiKeyAuth': []}],
+                    },
+                    'post': {
+                        'summary': 'Poll scan result by file hash (JSON body)',
+                        'operationId': 'queryPost',
+                        'requestBody': {
+                            'content': {'application/json': {'schema': {'type': 'object', 'properties': {'hash': {'type': 'string'}}, 'required': ['hash']}}},
+                        },
+                        'responses': {
+                            '200': {'description': 'Query result', 'content': {'application/json': {'schema': _ref('QueryResponse')}}},
+                        },
+                        'security': [{'ApiKeyAuth': []}],
+                    },
+                },
+                '/metrics': {
+                    'get': {
+                        'summary': 'Prometheus metrics',
+                        'operationId': 'metrics',
+                        'responses': {
+                            '200': {'description': 'Prometheus exposition text', 'content': {'text/plain': {'schema': {'type': 'string'}}}},
+                        },
+                        'security': [{'ApiKeyAuth': []}],
+                    },
+                },
+                '/health': {
+                    'get': {
+                        'summary': 'Health check',
+                        'operationId': 'health',
+                        'responses': {'200': {'description': 'OK', 'content': {'text/plain': {'schema': {'type': 'string', 'example': 'OK'}}}}},
+                    },
+                },
+            },
+            'components': {
+                'schemas': schemas,
+                'securitySchemes': {
+                    'ApiKeyAuth': {
+                        'type': 'apiKey',
+                        'in':   'header',
+                        'name': 'X-Api-Key',
+                    },
+                },
+            },
+        }
+        return spec
+
+    _OPENAPI_SPEC: 'dict | None' = None
+
+    def _get_openapi_spec() -> dict:
+        global _OPENAPI_SPEC
+        if _OPENAPI_SPEC is None:
+            _OPENAPI_SPEC = _build_openapi_spec()
+        return _OPENAPI_SPEC
+
+else:
+    def _get_openapi_spec() -> dict:  # type: ignore[misc]
+        return {'error': 'pydantic not installed; install xspct-scan[openapi]'}
+
+
+# ---------------------------------------------------------------------------
+# Partial report accumulator
+# ---------------------------------------------------------------------------
+
+class PartialReport:
+    """Thread-safe accumulator for concurrent per-analyzer results.
+
+    One instance is created per in-flight scan request.  Each analyzer
+    coroutine calls :meth:`merge` when it finishes; the asyncio lock ensures
+    the underlying report dict is never mutated from two coroutines at once.
+
+    :attr:`analyzers_completed` and :attr:`analyzers_pending` are updated
+    automatically by :meth:`merge`.  :meth:`snapshot` returns a shallow copy
+    safe to serialise while the scan is still running.
+
+    Args:
+        base: Initial report skeleton (all fields pre-populated with defaults).
+        pending: Names of analyzers that are expected to run.
+    """
+
+    __slots__ = ('_report', '_lock', '_completed', '_pending', '_successful')
+
+    def __init__(self, base: dict, pending: 'list[str]') -> None:
+        self._report: dict = base
+        self._lock: asyncio.Lock = asyncio.Lock()
+        self._completed: list[str] = []
+        self._pending: list[str] = list(pending)
+        self._successful: list[str] = []  # analyzers that returned non-None
+        self._report['analyzers_completed'] = self._completed
+        self._report['analyzers_pending']   = self._pending
+
+    async def merge(self, analyzer_name: str, result: 'dict | None',
+                    daemon: 'InspectorDaemon') -> None:
+        """Merge *result* into the report under the asyncio lock.
+
+        Args:
+            analyzer_name: Name of the analyzer (e.g. ``'pdf'``).
+            result: Report fragment returned by the analyzer, or ``None`` if the
+                analyzer found nothing or the file type did not match.
+            daemon: :class:`InspectorDaemon` instance whose
+                :meth:`~InspectorDaemon.merge_reports` does the actual merging.
+        """
+        async with self._lock:
+            if result:
+                daemon.merge_reports(self._report, result)
+                if analyzer_name not in self._successful:
+                    self._successful.append(analyzer_name)
+            if analyzer_name in self._pending:
+                self._pending.remove(analyzer_name)
+            if analyzer_name not in self._completed:
+                self._completed.append(analyzer_name)
+            # Keep the live lists in the report up to date so that a snapshot()
+            # taken at any point reflects the current state.
+            self._report['analyzers_completed'] = list(self._completed)
+            self._report['analyzers_pending']   = list(self._pending)
+
+    def snapshot(self) -> dict:
+        """Return a shallow copy of the current partial report.
+
+        Safe to call from the event loop while analyzers are still running.
+        The copy prevents callers from accidentally mutating the live report.
+
+        Returns:
+            Shallow-copied report dict including up-to-date
+            ``analyzers_completed`` and ``analyzers_pending`` lists.
+        """
+        snap = dict(self._report)
+        snap['analyzers_completed'] = list(self._completed)
+        snap['analyzers_pending']   = list(self._pending)
+        return snap
+
+    @property
+    def report(self) -> dict:
+        """The live (mutable) report dict."""
+        return self._report
+
+    @property
+    def successful(self) -> 'list[str]':
+        """Analyzers that returned a non-None result."""
+        return list(self._successful)
+
+
+# ---------------------------------------------------------------------------
 # InspectorDaemon
 # ---------------------------------------------------------------------------
 
@@ -400,6 +843,12 @@ class InspectorDaemon:
         self.redis_pool = None
         self._redis_error_count = 0
         self.tasks: OrderedDict = OrderedDict()
+        # In-flight PartialReport objects keyed by file_hash.
+        # Populated by analyze_pipeline(); removed when the scan finishes.
+        self._partials: dict = {}
+        # Compiled YARA rules (None when YARA is unavailable or not configured).
+        self._yara_rules   = None   # yara-python compiled rules
+        self._yara_x_rules = None   # yara-x compiled rules
 
     # ------------------------------------------------------------------
     # Redis helpers
@@ -469,6 +918,7 @@ class InspectorDaemon:
         self.tasks[file_hash] = report
         self.tasks.move_to_end(file_hash)
         self._evict_tasks()
+        self._partials.pop(file_hash, None)  # partial no longer needed
         if not self._redis_enabled(s):
             return
         key = config['xspct_redis_cache']['prefix'] + file_hash
@@ -495,6 +945,7 @@ class InspectorDaemon:
         ``on_startup`` signal.
         """
         self._read_passwords()
+        self._compile_yara_rules()
         if HAS_REDIS and config['xspct_redis_cache']['enabled']:
             rc = config['xspct_redis_cache']
             url = f"redis://{rc['host']}:{rc['port']}"
@@ -529,14 +980,190 @@ class InspectorDaemon:
 
     def _read_passwords(self) -> None:
         defaults = ['VelvetSweatshop', '123', '1234', '12345', '123456', '4321']
-        pw_file = config['xspct_password_file']
-        try:
-            with open(pw_file) as fh:
-                self.passwords = fh.read().splitlines() + defaults
-        except FileNotFoundError:
-            logger.warning('Password file %s not found. Using defaults.', pw_file)
-            self.passwords = defaults
+        pw_config = config['xspct_password_file']
+        files = [pw_config] if isinstance(pw_config, str) else list(pw_config)
+        all_passwords: list[str] = []
+        for pw_file in files:
+            try:
+                with open(pw_file) as fh:
+                    all_passwords.extend(fh.read().splitlines())
+            except FileNotFoundError:
+                logger.warning('Password file %s not found. Using defaults.', pw_file)
+        self.passwords = (all_passwords + defaults) if all_passwords else defaults
         logger.info('Loaded %d passwords.', len(self.passwords))
+
+    def _resolve_enabled_analyzers(self) -> list[str]:
+        """Return the list of analyzer names that are currently enabled.
+
+        Reads ``xspct_analyzers`` from the module config and returns the names
+        of all analyzers whose ``enabled`` flag is truthy.
+
+        Returns:
+            Ordered list of enabled analyzer name strings.
+        """
+        return [
+            name for name, cfg in config['xspct_analyzers'].items()
+            if cfg.get('enabled', True)
+        ]
+
+    def _resolve_enabled_analyzers(self) -> list[str]:
+        """Return the list of analyzer names that are currently enabled.
+
+        Reads ``xspct_analyzers`` from the module config and returns the names
+        of all analyzers whose ``enabled`` flag is truthy.
+
+        Returns:
+            Ordered list of enabled analyzer name strings.
+        """
+        return [
+            name for name, cfg in config['xspct_analyzers'].items()
+            if cfg.get('enabled', True)
+        ]
+
+    # ------------------------------------------------------------------
+    # YARA rules
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _collect_yara_files(rules_path: str) -> list:
+        """Return a list of ``*.yar``/``*.yara`` file paths under *rules_path*.
+
+        If *rules_path* is a file, returns ``[rules_path]``.  If it is a
+        directory, returns all matching files inside it (non-recursive).
+        Returns an empty list when the path does not exist.
+        """
+        if os.path.isfile(rules_path):
+            return [rules_path]
+        if os.path.isdir(rules_path):
+            return [
+                os.path.join(rules_path, f)
+                for f in os.listdir(rules_path)
+                if f.endswith(('.yar', '.yara'))
+            ]
+        return []
+
+    def _compile_yara_rules(self) -> None:
+        """Compile YARA rules for both the classic (yara-python) and modern
+        (yara-x) engines based on ``xspct_analyzers.yara`` /
+        ``xspct_analyzers.yara_x`` config blocks.
+
+        Results are stored in:
+            - ``self._yara_rules``   — compiled yara-python ruleset or ``None``
+            - ``self._yara_x_rules`` — compiled yara-x ruleset or ``None``
+
+        Both engines can be active simultaneously, which enables side-by-side
+        comparison of match results in ``analyze_yara()``.
+        """
+        self._yara_rules   = None
+        self._yara_x_rules = None
+
+        # --- classic yara-python ---
+        yara_cfg = config['xspct_analyzers'].get('yara', {})
+        if HAS_YARA and yara_cfg.get('enabled', False):
+            rules_path = yara_cfg.get('rules_path', '')
+            if not rules_path:
+                logger.debug('YARA (classic) rules_path not set — disabled')
+            else:
+                files = self._collect_yara_files(rules_path)
+                if not files:
+                    logger.warning('YARA (classic): no *.yar files at %s', rules_path)
+                else:
+                    try:
+                        if len(files) == 1:
+                            self._yara_rules = _yara.compile(filepath=files[0])
+                        else:
+                            filepaths = {os.path.basename(f): f for f in files}
+                            self._yara_rules = _yara.compile(filepaths=filepaths)
+                        logger.info('YARA (classic): compiled %d file(s) from %s'
+                                    '%s', len(files), rules_path,
+                                    ' [Hyperscan]' if HAS_YARA_HYPERSCAN else '')
+                    except Exception as exc:
+                        logger.error('YARA (classic) compilation failed: %s', exc)
+
+        # --- yara-x ---
+        yara_x_cfg = config['xspct_analyzers'].get('yara_x', {})
+        if HAS_YARA_X and yara_x_cfg.get('enabled', False):
+            rules_path = yara_x_cfg.get('rules_path', '')
+            if not rules_path:
+                logger.debug('YARA-X rules_path not set — disabled')
+            else:
+                files = self._collect_yara_files(rules_path)
+                if not files:
+                    logger.warning('YARA-X: no *.yar files at %s', rules_path)
+                else:
+                    try:
+                        compiler = _yara_x.Compiler()
+                        for fpath in files:
+                            with open(fpath, 'r', encoding='utf-8', errors='replace') as fh:
+                                compiler.add_source(fh.read())
+                        self._yara_x_rules = compiler.build()
+                        logger.info('YARA-X: compiled %d file(s) from %s',
+                                    len(files), rules_path)
+                    except Exception as exc:
+                        logger.error('YARA-X compilation failed: %s', exc)
+
+    def analyze_yara(self, data: bytes) -> 'dict | None':
+        """Run compiled YARA rules against *data* using any loaded engine(s).
+
+        When both classic (yara-python) and modern (yara-x) engines are
+        configured, both scan the same bytes and their results are merged
+        into a single ``yara_matches`` list.  Each entry is tagged with an
+        ``engine`` key (``'classic'`` or ``'yara-x'``) so callers can
+        compare results.
+
+        Args:
+            data: Raw file bytes to scan.
+
+        Returns:
+            A dict with key ``yara_matches`` (list of match dicts), or
+            ``None`` when no engines are loaded or nothing matches.
+
+            Each match dict has keys:
+                - **engine** (str): ``'classic'`` or ``'yara-x'``.
+                - **rule** (str): Rule name.
+                - **namespace** (str): Rule namespace.
+                - **tags** (list[str]): Rule tags.
+                - **meta** (dict): Rule metadata.
+                - **strings** (list[str]): Matched string identifiers.
+        """
+        results: list = []
+
+        # --- classic yara-python ---
+        if HAS_YARA and getattr(self, '_yara_rules', None):
+            try:
+                for m in self._yara_rules.match(data=data):
+                    results.append({
+                        'engine':    'classic',
+                        'rule':      m.rule,
+                        'namespace': m.namespace,
+                        'tags':      list(m.tags),
+                        'meta':      dict(m.meta),
+                        'strings':   [str(s) for s in m.strings],
+                    })
+            except Exception as exc:
+                logger.error('YARA (classic) scan error: %s', exc)
+
+        # --- yara-x ---
+        if HAS_YARA_X and getattr(self, '_yara_x_rules', None):
+            try:
+                scanner = _yara_x.Scanner(self._yara_x_rules)
+                for m in scanner.scan(data).matching_rules:
+                    results.append({
+                        'engine':    'yara-x',
+                        'rule':      m.identifier,
+                        'namespace': m.namespace,
+                        'tags':      list(m.tags),
+                        'meta':      {k: v for k, v in m.metadata},
+                        'strings':   [
+                            p.identifier
+                            for p in m.patterns
+                            if list(p.matches)
+                        ],
+                    })
+            except Exception as exc:
+                logger.error('YARA-X scan error: %s', exc)
+
+        return {'yara_matches': results} if results else None
 
     # ------------------------------------------------------------------
     # IOC extraction
@@ -570,6 +1197,37 @@ class InspectorDaemon:
         )
         domains = sorted(set(self._DOM_RE.findall(combined)))
         return {'urls': urls, 'ips': ips, 'domains': domains}
+
+    def analyze_iocsearcher(self, text: str, label: str = '') -> 'dict | None':
+        """Extract extended IOCs from *text* using ``iocsearcher``.
+
+        Supplements :meth:`extract_iocs` with additional indicator types that
+        regex-only extraction misses: e-mail addresses, CVE identifiers,
+        cryptocurrency wallet addresses, onion addresses, and more.
+
+        Args:
+            text: Decoded document text to search.
+            label: Source label for log messages.
+
+        Returns:
+            A dict with key ``iocs_extended`` whose value is a sub-dict
+            mapping IOC type strings to sorted lists of unique values.
+            Returns ``None`` when iocsearcher is unavailable or ``text``
+            is empty.
+        """
+        if not HAS_IOCSEARCHER or not _IOCSEARCHER or not text:
+            return None
+        try:
+            hits = _IOCSEARCHER.search_raw(text)
+        except Exception as exc:
+            logger.debug('iocsearcher failed (%s): %s', label, exc)
+            return None
+        result: dict = {}
+        for ioc_type, normalized, _pos, _raw in hits:
+            result.setdefault(ioc_type, set()).add(normalized)
+        if not result:
+            return None
+        return {'iocs_extended': {k: sorted(v) for k, v in result.items()}}
 
     # ------------------------------------------------------------------
     # JavaScript static analysis + sandbox
@@ -800,6 +1458,7 @@ class InspectorDaemon:
             'qr_codes': [],
             'analyses': [],
             'iocs': {'urls': [], 'ips': [], 'domains': []},
+            'exif': {},
         }
         if not image_data:
             return result
@@ -864,7 +1523,163 @@ class InspectorDaemon:
             except Exception as exc:
                 logger.debug('pytesseract OCR failed (%s): %s', label, exc)
 
+        # -- EXIF metadata extraction ----------------------------------------
+        if HAS_OCR and img is not None:
+            try:
+                from PIL import ExifTags as _ExifTags
+                exif_raw = img._getexif() if hasattr(img, '_getexif') else None
+                if exif_raw:
+                    def _safe_exif(v) -> str:
+                        if isinstance(v, bytes):
+                            return v.decode('utf-8', 'ignore')[:256]
+                        return re.sub(r'[\x00-\x1f\x7f]', '', str(v))[:256]
+                    result['exif'] = {
+                        _ExifTags.TAGS.get(k, str(k)): _safe_exif(v)
+                        for k, v in exif_raw.items()
+                        if k in _ExifTags.TAGS
+                    }
+                    # GPS data in EXIF may be a privacy concern
+                    if 'GPSInfo' in result['exif'] or any(
+                        'GPS' in str(k) for k in result['exif']
+                    ):
+                        result['analyses'].append({
+                            'type': 'EXIFGps',
+                            'keyword': 'gps-metadata',
+                            'description': f'GPS coordinates found in image EXIF ({label})',
+                        })
+            except Exception as exc:
+                logger.debug('EXIF extraction failed (%s): %s', label, exc)
+
         return result
+
+    # ------------------------------------------------------------------
+    # Archive analysis
+    # ------------------------------------------------------------------
+
+    def analyze_archive(self, s: str, filename: str, data: bytes,
+                         depth: int = 0) -> 'dict | None':
+        """Recursively extract and analyse files inside a ZIP or 7z archive.
+
+        Supports:
+            - ZIP (``zipfile`` stdlib)
+            - 7z (``py7zr``, optional)
+
+        Protected archives are tried with the daemon password list.  Extraction
+        stops when the configured ``xspct_archive_max_depth`` or
+        ``xspct_archive_max_size`` limits are reached.  Each extracted file is
+        passed through the normal type-detection + analysis pipeline.
+
+        Args:
+            s: Session tag for log messages.
+            filename: Original archive filename (used for log/report only).
+            data: Raw archive bytes.
+            depth: Current recursion depth (callers should pass 0).
+
+        Returns:
+            A merged report dict with ``archive_files`` (list of
+            ``{"name": str, "size": int, "detected_type": str}`` entries)
+            and the aggregated ``analyses``, ``iocs`` from contained files.
+            Returns ``None`` when archives are disabled, depth exceeded, or
+            the data is not a recognized archive.
+        """
+        max_depth = int(config['xspct_archive_max_depth'])
+        max_size  = int(config['xspct_archive_max_size'])
+        if max_depth == 0 or depth >= max_depth:
+            return None
+
+        enabled = self._resolve_enabled_analyzers()
+        if 'archive' not in enabled:
+            return None
+
+        # Try to detect archive type
+        is_zip = zipfile.is_zipfile(io.BytesIO(data))
+        is_7z  = data[:6] == b'7z\xbc\xaf\x27\x1c'
+
+        if not is_zip and not is_7z:
+            return None
+
+        report: dict = {
+            'archive_files': [],
+            'analyses':      [],
+            'iocs':          {'urls': [], 'ips': [], 'domains': []},
+        }
+        total_extracted = 0
+
+        def _analyse_member(name: str, member_data: bytes) -> None:
+            nonlocal total_extracted
+            total_extracted += len(member_data)
+            report['archive_files'].append({
+                'name': name,
+                'size': len(member_data),
+            })
+            # Recursively analyse (nested archives + documents)
+            detected = self.get_detected_type(None, None, name, member_data[:4096])
+            if detected == 'archive' and depth + 1 < max_depth:
+                sub = self.analyze_archive(s, name, member_data, depth + 1)
+                if sub:
+                    self.merge_reports(report, sub)
+            elif detected in ('pdf', 'html', 'office'):
+                sub = self.sync_analyze(s, name, member_data, None)
+                if sub:
+                    for k in ('analyses', 'rtf_objects'):
+                        for item in sub.get(k, []):
+                            if item not in report[k]:
+                                report[k].append(item)
+                    for ik in ('urls', 'ips', 'domains'):
+                        report['iocs'][ik] = sorted(
+                            set(report['iocs'][ik] + sub.get('iocs', {}).get(ik, []))
+                        )
+            elif (HAS_OCR or HAS_PYZBAR) and detected == 'image':
+                img_result = self.analyze_image(member_data, label=name)
+                for hit in img_result.get('analyses', []):
+                    if hit not in report['analyses']:
+                        report['analyses'].append(hit)
+                for ik in ('urls', 'ips', 'domains'):
+                    report['iocs'][ik] = sorted(
+                        set(report['iocs'][ik] + img_result['iocs'][ik])
+                    )
+
+        try:
+            if is_zip:
+                with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                    for info in zf.infolist():
+                        if info.is_dir():
+                            continue
+                        if total_extracted + info.file_size > max_size:
+                            logger.warning('%s - archive %s: size limit reached', s, filename)
+                            break
+                        for pwd in [None] + [p.encode() for p in self.passwords[:50]]:
+                            try:
+                                member_data = zf.read(info, pwd=pwd)
+                                _analyse_member(info.filename, member_data)
+                                break
+                            except RuntimeError:
+                                # Wrong password or unencrypted — try next
+                                continue
+                            except Exception as exc:
+                                logger.debug('%s - zip member %s failed: %s',
+                                             s, info.filename, exc)
+                                break
+            elif is_7z:
+                try:
+                    import py7zr as _py7zr
+                    with _py7zr.SevenZipFile(io.BytesIO(data), mode='r') as zf:
+                        members = zf.readall()
+                        for name, bio in (members or {}).items():
+                            if bio is None:
+                                continue
+                            member_data = bio.read()
+                            if total_extracted + len(member_data) > max_size:
+                                logger.warning('%s - 7z %s: size limit reached', s, filename)
+                                break
+                            _analyse_member(name, member_data)
+                except ImportError:
+                    logger.debug('py7zr not installed — 7z archive not extracted')
+                    return None
+        except Exception as exc:
+            logger.error('%s - archive analysis error for %s: %s', s, filename, exc)
+
+        return report if report['archive_files'] else None
 
     # ------------------------------------------------------------------
     # PDF analysis
@@ -933,6 +1748,8 @@ class InspectorDaemon:
         for k in ('urls', 'ips', 'domains'):
             report['iocs'][k] = sorted(set(report['iocs'][k] + body_iocs[k]))
         report['text_preview'] = self.extract_text_preview(data, 'application/pdf')
+        # Supplement with pdfid keyword-count heuristics when available.
+        self._analyze_pdf_pdfid(data, report)
         return report
 
     def _analyze_pdf_pymupdf(self, data: bytes, report: dict,
@@ -1194,6 +2011,80 @@ class InspectorDaemon:
                     report['iocs']['urls'].append(url)
             except Exception:
                 pass
+
+    def _analyze_pdf_pdfid(self, data: bytes, report: dict) -> None:
+        """Supplement PDF analysis with pdfid keyword-count heuristics.
+
+        pdfid counts occurrences of named PDF keywords (``/JS``,
+        ``/OpenAction``, ``/Encrypt``, etc.) directly in the raw byte
+        stream.  Results are added to *report* under ``pdfid_keywords``
+        (a ``{keyword: count}`` dict) and any suspicious keywords produce
+        additional ``analyses`` entries prefixed with ``pdfid-``.
+
+        This analysis runs **in addition to** :meth:`_analyze_pdf_pymupdf` /
+        :meth:`_analyze_pdf_bytescan` and is skipped when the vendored
+        ``pdfid.py`` is not present.
+
+        Args:
+            data: Raw PDF bytes.
+            report: Report dict to enrich in-place.
+        """
+        if not HAS_PDFID or _vendored_pdfid is None:
+            return
+        import tempfile
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as fh:
+                fh.write(data)
+                tmp_path = fh.name
+            result = _vendored_pdfid.PDFiD(tmp_path, allNames=False, extraData=False,
+                                            disarm=False, force=False)
+            json_str = _vendored_pdfid.PDFiD2JSON(result, '')
+            pdfid_data = json.loads(json_str)[0]['pdfid']
+            keywords = {
+                kw['name']: kw['count']
+                for kw in pdfid_data.get('keywords', {}).get('keyword', [])
+            }
+            report['pdfid_keywords'] = keywords
+            # Flag keywords that indicate suspicious content
+            _SUSPICIOUS_PDFID: dict = {
+                '/JS':           ('JavaScript',   'JavaScript keyword count'),
+                '/JavaScript':   ('JavaScript',   'JavaScript keyword count'),
+                '/AA':           ('AutoExecute',  'Additional Actions keyword count'),
+                '/OpenAction':   ('AutoExecute',  'OpenAction keyword count'),
+                '/Launch':       ('Execution',    'Launch action keyword count'),
+                '/EmbeddedFile': ('EmbeddedFile', 'EmbeddedFile keyword count'),
+                '/Encrypt':      ('Encryption',   'Encrypt keyword count'),
+                '/XFA':          ('XFA',          'XFA keyword count'),
+                '/JBIG2Decode':  ('JBIG2',        'JBIG2Decode — CVE-2009-0658 related'),
+                '/RichMedia':    ('RichMedia',     'RichMedia — Flash/3D embedding'),
+            }
+            for kw, (a_type, desc_prefix) in _SUSPICIOUS_PDFID.items():
+                count = keywords.get(kw, 0)
+                if count > 0:
+                    entry = {
+                        'type':        f'pdfid-{a_type}',
+                        'keyword':     kw,
+                        'description': f'pdfid: {desc_prefix} ({count})',
+                    }
+                    if entry not in report['analyses']:
+                        report['analyses'].append(entry)
+            # Extra metadata from pdfid
+            report.setdefault('pdfid_meta', {}).update({
+                'count_eof':               pdfid_data.get('countEof', 0),
+                'count_chat_after_eof':    pdfid_data.get('countChatAfterLastEof', 0),
+                'total_entropy':           pdfid_data.get('totalEntropy', 0.0),
+                'stream_entropy':          pdfid_data.get('streamEntropy', 0.0),
+                'non_stream_entropy':      pdfid_data.get('nonStreamEntropy', 0.0),
+            })
+        except Exception as exc:
+            logger.debug('pdfid analysis failed: %s', exc)
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     # ------------------------------------------------------------------
     # HTML analysis
@@ -1537,19 +2428,79 @@ class InspectorDaemon:
             data: First few bytes of the file (used for RTF magic detection).
 
         Returns:
-            One of ``'pdf'``, ``'html'``, or ``'office'``.
+            One of ``'pdf'``, ``'html'``, ``'office'``, ``'image'``,
+            ``'archive'``, ``'text'``, or ``'unknown'``.
         """
         mime     = (mime     or '').lower()
         desc     = (desc     or '').lower()
         filename = (filename or '').lower()
+
+        # PDF
         if 'pdf' in mime or 'pdf' in desc or filename.endswith('.pdf'):
             return 'pdf'
+
+        # HTML / XHTML
         if ('html' in mime or 'html' in desc or mime == 'application/xhtml+xml'
                 or any(filename.endswith(e) for e in ('.html', '.htm', '.xhtml'))):
             return 'html'
+
+        # RTF → processed as office
         if 'rtf' in mime or 'rtf' in desc or (data and data.startswith(b'{\\rt')):
             return 'office'
-        return 'office'
+
+        # OLE2 / Compound Document / generic binary → office
+        if any(kw in desc for kw in ('composite document', 'ole', 'compound', 'cdfv2')):
+            return 'office'
+
+        # MS-Office and ODF MIME types → office
+        _OFFICE_MIME_FRAGS = (
+            'application/msword',
+            'application/vnd.ms-',
+            'application/vnd.openxmlformats',
+            'application/vnd.oasis.opendocument',
+        )
+        if any(f in mime for f in _OFFICE_MIME_FRAGS):
+            return 'office'
+
+        # Office filename extensions → office
+        _OFFICE_EXTS = (
+            '.doc', '.docx', '.xls', '.xlsx', '.xlsm', '.xlsb',
+            '.ppt', '.pptx', '.odt', '.ods', '.odp', '.msg',
+        )
+        if any(filename.endswith(e) for e in _OFFICE_EXTS):
+            return 'office'
+
+        # Raster / vector images
+        _IMAGE_EXTS = (
+            '.jpg', '.jpeg', '.png', '.gif', '.bmp',
+            '.tiff', '.tif', '.webp', '.ico', '.svg',
+        )
+        if mime.startswith('image/') or any(filename.endswith(e) for e in _IMAGE_EXTS):
+            return 'image'
+
+        # Archives
+        _ARCHIVE_MIMES = (
+            'application/zip',
+            'application/x-7z-compressed',
+            'application/x-tar',
+            'application/gzip',
+            'application/x-bzip2',
+            'application/x-xz',
+            'application/x-rar-compressed',
+            'application/vnd.rar',
+        )
+        _ARCHIVE_EXTS = ('.zip', '.7z', '.tar', '.gz', '.bz2', '.xz', '.rar', '.tgz')
+        if (mime in _ARCHIVE_MIMES
+                or any(filename.endswith(e) for e in _ARCHIVE_EXTS)
+                or 'zip archive' in desc
+                or '7-zip' in desc):
+            return 'archive'
+
+        # Plain text / scripts
+        if mime.startswith('text/') or 'ascii' in desc or 'utf-8' in desc or 'unicode' in desc:
+            return 'text'
+
+        return 'unknown'
 
     # ------------------------------------------------------------------
     # Report merging
@@ -1590,6 +2541,35 @@ class InspectorDaemon:
                 for item in value:
                     if item not in target['rtf_objects']:
                         target['rtf_objects'].append(item)
+            elif key == 'yara_matches':
+                existing = target.setdefault('yara_matches', [])
+                for item in value:
+                    if item not in existing:
+                        existing.append(item)
+            elif key == 'iocs_extended':
+                # Deep-merge extended IOC sub-dicts (each value is a list[str])
+                existing_ext = target.setdefault('iocs_extended', {})
+                for ioc_type, values in value.items():
+                    existing_ext[ioc_type] = sorted(
+                        set(existing_ext.get(ioc_type, [])) | set(values)
+                    )
+            elif key in ('pdfid_keywords', 'pdfid_meta'):
+                # First non-empty value wins (a file is only parsed once by pdfid)
+                if value and not target.get(key):
+                    target[key] = value
+            elif key == 'archive_files':
+                existing_af = target.setdefault('archive_files', [])
+                for item in value:
+                    if item not in existing_af:
+                        existing_af.append(item)
+            elif key == 'exif':
+                if value and not target.get('exif'):
+                    target['exif'] = value
+            elif key == 'text_full':
+                # Keep the longest full-text across merged reports
+                if value:
+                    existing = target.get('text_full') or ''
+                    target['text_full'] = value if len(value) > len(existing) else existing
             elif key in ('has_macro', 'has_javascript', 'has_openaction',
                          'has_embedded_files', 'has_launch', 'is_encrypted',
                          'has_scripts', 'has_forms', 'has_iframes',
@@ -1870,7 +2850,45 @@ class InspectorDaemon:
         file_hash = hashlib.sha256(data).hexdigest()
         if not types_to_run:
             types_to_run = [self.get_detected_type(file_mime, file_desc, filename, data)]
-        report: dict = {
+        enabled = self._resolve_enabled_analyzers()
+        report: dict = self._make_base_report(filename, file_hash, file_mime, file_desc)
+        successful_types = []
+        for t in types_to_run:
+            res = None
+            if t == 'pdf' and 'pdf' in enabled:
+                res = self.analyze_pdf(data, custom_passwords=custom_passwords)
+            elif t == 'html' and 'html' in enabled:
+                res = self.analyze_html(data)
+            elif t == 'office' and 'office' in enabled:
+                res = self.analyze_office(
+                    s, filename, data, file_mime, rtf_eval, custom_passwords
+                )
+            elif t == 'image' and 'image' in enabled:
+                res = self.analyze_image(data, label=filename)
+            elif t == 'archive' and 'archive' in enabled:
+                res = self.analyze_archive(s, filename, data, 0)
+            # 'text', 'unknown' — not analysed by a dedicated method yet
+            if res:
+                successful_types.append(t)
+                self.merge_reports(report, res)
+        report['detected_type'] = (
+            ','.join(sorted(successful_types)) if successful_types else 'unknown'
+        )
+        if not report['text_preview']:
+            report['text_preview'] = self.extract_text_preview(data, file_mime)
+        # Image OCR / QR analysis for OOXML (contains media/ entries in ZIP)
+        if (HAS_OCR or HAS_PYZBAR) and file_mime and 'openxmlformats' in file_mime.lower():
+            self._extract_ooxml_images(s, data, report)
+        return report
+
+    # ------------------------------------------------------------------
+    # Parallel analysis pipeline
+    # ------------------------------------------------------------------
+
+    def _make_base_report(self, filename: str, file_hash: str,
+                          file_mime: 'str | None', file_desc: 'str | None') -> dict:
+        """Return the skeleton report dict used by both sync and async pipelines."""
+        return {
             'filename':            filename,
             'file_hash':           file_hash,
             'file_type':           file_mime,
@@ -1888,46 +2906,180 @@ class InspectorDaemon:
             'decryption_password': None,
             'iocs':                {'urls': [], 'ips': [], 'domains': []},
             'text_preview':        '',
+            'text_full':           None,
             'meta_document':       None,
+            'yara_matches':        [],
+            'iocs_extended':       {},
+            'pdfid_keywords':      None,
+            'pdfid_meta':          None,
+            'archive_files':       [],
+            'exif':                {},
         }
-        successful_types = []
+
+    async def analyze_pipeline(self, s: str, filename: str, data: bytes,
+                                file_mime: 'str | None',
+                                file_desc: 'str | None' = None,
+                                rtf_eval: bool = False,
+                                custom_passwords: 'list | None' = None,
+                                types_to_run: 'list | None' = None) -> PartialReport:
+        """Run analyzers in parallel and return a populated :class:`PartialReport`.
+
+        Dispatches each applicable analyzer to the thread-pool executor as
+        an independent asyncio task and awaits them all with
+        :func:`asyncio.gather`.  The :class:`PartialReport` accumulates
+        results under an asyncio lock as each analyzer finishes.
+
+        After all analyzers complete the method finalises ``detected_type``
+        and, if needed, runs a text-preview extraction.
+
+        Args:
+            s: Session tag for log messages.
+            filename: Original filename.
+            data: Raw file bytes.
+            file_mime: MIME type (from magic or caller-supplied).
+            file_desc: Human-readable magic description (optional).
+            rtf_eval: Enable RTF object extraction.
+            custom_passwords: Extra decryption passwords.
+            types_to_run: Override auto-detection by providing explicit
+                analysis type strings (``'pdf'``, ``'html'``, ``'office'``).
+
+        Returns:
+            A fully-populated :class:`PartialReport`.  Access ``.report``
+            for the final dict or call ``.snapshot()`` for a safe copy.
+        """
+        file_hash = hashlib.sha256(data).hexdigest()
+        if not types_to_run:
+            types_to_run = [self.get_detected_type(file_mime, file_desc, filename, data)]
+        enabled = self._resolve_enabled_analyzers()
+
+        # Determine which analyzers will actually run so the pending list is accurate.
+        pending: list[str] = []
         for t in types_to_run:
-            res = None
-            if t == 'pdf':
-                res = self.analyze_pdf(data, custom_passwords=custom_passwords)
-            elif t == 'html':
-                res = self.analyze_html(data)
-            elif t == 'office':
-                res = self.analyze_office(
-                    s, filename, data, file_mime, rtf_eval, custom_passwords
-                )
-            if res:
-                successful_types.append(t)
-                self.merge_reports(report, res)
-        report['detected_type'] = (
-            ','.join(sorted(successful_types)) if successful_types else 'unknown'
+            if t == 'pdf'    and 'pdf'    in enabled: pending.append('pdf')
+            elif t == 'html' and 'html'   in enabled: pending.append('html')
+            elif t == 'office' and 'office' in enabled: pending.append('office')
+            # image / archive / text / unknown — added in later phases
+        # YARA runs regardless of file type (always on raw bytes).
+        # Either or both engines may be active simultaneously.
+        yara_enabled = (
+            ('yara'   in enabled and (HAS_YARA   and getattr(self, '_yara_rules',   None) is not None)) or
+            ('yara_x' in enabled and (HAS_YARA_X and getattr(self, '_yara_x_rules', None) is not None))
         )
-        if not report['text_preview']:
-            report['text_preview'] = self.extract_text_preview(data, file_mime)
-        # Image OCR / QR analysis for OOXML (contains media/ entries in ZIP)
-        if (HAS_OCR or HAS_PYZBAR) and file_mime and 'openxmlformats' in file_mime.lower():
+        if yara_enabled:
+            pending.append('yara')
+
+        base = self._make_base_report(filename, file_hash, file_mime, file_desc)
+        base['analyzers_completed'] = []
+        base['analyzers_pending']   = list(pending)
+        partial = PartialReport(base, pending)
+
+        # Register so handle_scan() can read the partial on timeout.
+        self._partials[file_hash] = partial
+
+        loop = asyncio.get_running_loop()
+
+        async def _run(name: str, sync_fn, *args) -> None:
+            """Run *sync_fn* in the thread pool and merge the result."""
             try:
-                import zipfile
-                with zipfile.ZipFile(io.BytesIO(data)) as z:
-                    for name in z.namelist():
-                        if re.match(r'(?:word|xl|ppt)/media/', name, re.I):
-                            img_bytes = z.read(name)
-                            img_result = self.analyze_image(img_bytes, label=f'OOXML {name}')
-                            for hit in img_result.get('analyses', []):
-                                if hit not in report['analyses']:
-                                    report['analyses'].append(hit)
-                            for k in ('urls', 'ips', 'domains'):
-                                report['iocs'][k] = sorted(
-                                    set(report['iocs'].get(k, []) + img_result['iocs'][k])
-                                )
+                result = await loop.run_in_executor(None, sync_fn, *args)
             except Exception as exc:
-                logger.debug('OOXML image extraction failed: %s', exc)
-        return report
+                logger.error('%s - analyzer %s raised: %s', s, name, exc)
+                result = None
+            await partial.merge(name, result, self)
+
+        tasks: list = []
+        for t in types_to_run:
+            if t == 'pdf' and 'pdf' in enabled:
+                tasks.append(asyncio.create_task(
+                    _run('pdf', self.analyze_pdf, data, custom_passwords)
+                ))
+            elif t == 'html' and 'html' in enabled:
+                tasks.append(asyncio.create_task(
+                    _run('html', self.analyze_html, data)
+                ))
+            elif t == 'office' and 'office' in enabled:
+                tasks.append(asyncio.create_task(
+                    _run('office', self.analyze_office,
+                         s, filename, data, file_mime, rtf_eval, custom_passwords)
+                ))
+            elif t == 'image' and 'image' in enabled:
+                tasks.append(asyncio.create_task(
+                    _run('image', self.analyze_image, data, filename)
+                ))
+            elif t == 'archive' and 'archive' in enabled:
+                tasks.append(asyncio.create_task(
+                    _run('archive', self.analyze_archive, s, filename, data, 0)
+                ))
+        if yara_enabled:
+            tasks.append(asyncio.create_task(_run('yara', self.analyze_yara, data)))
+
+        if tasks:
+            await asyncio.gather(*tasks)
+
+        # --- Group 2: iocsearcher (needs text from Group 1) ---
+        iocs_enabled = (HAS_IOCSEARCHER and 'iocs' in enabled)
+        if iocs_enabled:
+            text_for_iocs = partial.report.get('text_preview', '') or ''
+            if text_for_iocs:
+                iocs_result = await loop.run_in_executor(
+                    None, self.analyze_iocsearcher, text_for_iocs, filename
+                )
+                if iocs_result:
+                    await partial.merge('iocs', iocs_result, self)
+
+        # --- Finalise ---
+        report = partial.report
+        # detected_type reflects only primary content-type analyzers (pdf/html/office/image/archive).
+        # Supplementary analyzers (iocs, yara, javascript) are excluded.
+        _SUPPLEMENTARY = frozenset({'iocs', 'yara', 'javascript'})
+        successful = [a for a in partial.successful if a not in _SUPPLEMENTARY]
+        report['detected_type'] = (
+            ','.join(sorted(successful)) if successful else 'unknown'
+        )
+        # Fill text_preview if no analyzer provided one.
+        if not report.get('text_preview'):
+            report['text_preview'] = await loop.run_in_executor(
+                None, self.extract_text_preview, data, file_mime
+            )
+        # text_full: only when configured, uses xspct_text_max_length.
+        if config.get('xspct_include_text'):
+            max_len = int(config.get('xspct_text_max_length', 2000))
+            report['text_full'] = await loop.run_in_executor(
+                None, self.extract_text_preview, data, file_mime, max_len
+            )
+        # OOXML embedded images: analyse in thread pool.
+        if (HAS_OCR or HAS_PYZBAR) and file_mime and 'openxmlformats' in file_mime.lower():
+            await loop.run_in_executor(
+                None, self._extract_ooxml_images, s, data, report
+            )
+        return partial
+
+    def _extract_ooxml_images(self, s: str, data: bytes, report: dict) -> None:
+        """Extract and analyse images embedded in an OOXML ZIP archive.
+
+        Mutates *report* in-place.  Called from :meth:`analyze_pipeline`
+        via :meth:`~asyncio.loop.run_in_executor`.
+
+        Args:
+            s: Session tag for log messages.
+            data: Raw OOXML file bytes.
+            report: Report dict to merge image analysis results into.
+        """
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                for name in z.namelist():
+                    if re.match(r'(?:word|xl|ppt)/media/', name, re.I):
+                        img_bytes = z.read(name)
+                        img_result = self.analyze_image(img_bytes, label=f'OOXML {name}')
+                        for hit in img_result.get('analyses', []):
+                            if hit not in report['analyses']:
+                                report['analyses'].append(hit)
+                        for k in ('urls', 'ips', 'domains'):
+                            report['iocs'][k] = sorted(
+                                set(report['iocs'].get(k, []) + img_result['iocs'][k])
+                            )
+        except Exception as exc:
+            logger.debug('%s - OOXML image extraction failed: %s', s, exc)
 
     async def analyze_task(self, s: str, file_hash: str, filename: str,
                            data: bytes, file_mime: 'str | None',
@@ -1935,11 +3087,10 @@ class InspectorDaemon:
                            rtf_eval: bool = False,
                            custom_passwords: 'list | None' = None,
                            types_to_run: 'list | None' = None) -> dict:
-        """Run :meth:`sync_analyze` in a thread-pool and cache the result.
+        """Run :meth:`analyze_pipeline` and cache the final report.
 
-        Wraps :meth:`sync_analyze` with :func:`asyncio.get_running_loop` (``.run_in_executor``) so CPU-bound oletools work does not block the
-        event loop, then persists the finished report via
-        :meth:`cache_report`.
+        Drives the parallel analyzer pipeline via :meth:`analyze_pipeline`,
+        then persists the finished report via :meth:`cache_report`.
 
         Args:
             s: Session tag for log messages.
@@ -1953,14 +3104,14 @@ class InspectorDaemon:
             types_to_run: Explicit list of analysis types to run.
 
         Returns:
-            The finished report dict from :meth:`sync_analyze`.
+            The finished report dict.
         """
         logger.info('%s - starting analysis for %s (%s)', s, filename, file_hash)
-        loop = asyncio.get_running_loop()
-        report = await loop.run_in_executor(
-            None, self.sync_analyze, s, filename, data, file_mime,
+        partial = await self.analyze_pipeline(
+            s, filename, data, file_mime,
             file_desc, rtf_eval, custom_passwords, types_to_run,
         )
+        report = partial.report
         await self.cache_report(s, file_hash, report)
         return report
 
@@ -1969,22 +3120,33 @@ class InspectorDaemon:
     # ------------------------------------------------------------------
 
     async def handle_scan(self, request: web.Request) -> web.Response:
-        """Handle ``POST /scan`` — accept a multipart file and return a report.
+        """Handle ``POST /scan`` — accept a file and return an analysis report.
 
-        Reads the ``doc`` part (required), optional ``passwords``,
-        ``file_mime``, and ``file_type`` parts.  Checks the Redis cache
-        first; on a miss, dispatches to :meth:`analyze_task` and waits up
-        to *timeout* seconds (default 10).  Returns HTTP 202 with status
-        ``processing`` if the timeout is exceeded — the analysis continues
-        in the background and the result can be polled via ``GET /query``.
+        Supports two upload modes selected by ``Content-Type``:
+
+        **Multipart** (``multipart/form-data``):
+            - ``doc`` (required): the file to analyse.
+            - ``passwords``: comma- or newline-separated extra decryption passwords.
+            - ``file_mime``: override MIME type hint.
+            - ``file_type``: override description hint.
+
+        **Octet-stream** (``application/octet-stream``):
+            The raw file bytes are the request body.  Options are supplied via
+            query parameters: ``timeout``, ``rtf``, ``filename``, ``file_mime``,
+            ``file_type``, ``passwords`` (comma-separated).
+
+        Query parameters (both modes):
+            - ``timeout`` (float, default 10): seconds to wait before returning
+              HTTP 202.
+            - ``rtf`` (bool, default false): enable RTF object extraction.
 
         Args:
             request: Incoming aiohttp request.
 
         Returns:
             JSON :class:`aiohttp.web.Response` containing the report dict
-            (HTTP 200), a ``processing`` stub (HTTP 202), or an error
-            response (HTTP 400 / 401 / 500).
+            (HTTP 200), a partial ``processing`` snapshot (HTTP 202), or an
+            error response (HTTP 400 / 401 / 500).
         """
         timer('start')
         s = make_session(request)
@@ -1996,32 +3158,59 @@ class InspectorDaemon:
         try:
             timeout  = float(request.query.get('timeout', 10))
             rtf_eval = request.query.get('rtf', 'false').lower() == 'true'
-            reader = await request.multipart()
+
+            content_type = request.headers.get('Content-Type', '')
             filedata:           'bytes | None' = None
             custom_passwords:   list           = []
             file_mime_provided: 'str | None'   = None
             file_type_provided: 'str | None'   = None
-            async for part in reader:
-                if part.name == 'doc':
-                    filename = part.filename
-                    filedata = bytes(await part.read())
-                    logger.info('%s (%s) - read %d bytes from %s',
-                                s, timer(), len(filedata), filename)
-                elif part.name == 'passwords':
-                    raw = await part.text()
+
+            if 'multipart/form-data' in content_type:
+                # ---- Multipart upload ----------------------------------------
+                reader = await request.multipart()
+                async for part in reader:
+                    if part.name == 'doc':
+                        filename = part.filename
+                        filedata = bytes(await part.read())
+                        logger.info('%s (%s) - read %d bytes from %s',
+                                    s, timer(), len(filedata), filename)
+                    elif part.name == 'passwords':
+                        raw = await part.text()
+                        custom_passwords = [
+                            p.strip() for p in raw.replace(',', '\n').split('\n')
+                            if p.strip()
+                        ]
+                        logger.info('%s (%s) - received %d custom passwords',
+                                    s, timer(), len(custom_passwords))
+                    elif part.name == 'file_mime':
+                        file_mime_provided = (await part.text()).strip()
+                    elif part.name == 'file_type':
+                        file_type_provided = (await part.text()).strip()
+                if not filedata:
+                    logger.warning('%s - no "doc" part in multipart request', s)
+                    return web.json_response(
+                        {'error': 'No file part named "doc"'}, status=400
+                    )
+            elif 'application/octet-stream' in content_type:
+                # ---- Raw octet-stream upload ---------------------------------
+                filedata = bytes(await request.read())
+                if not filedata:
+                    return web.json_response({'error': 'Empty request body'}, status=400)
+                filename = request.query.get('filename', 'upload.bin')
+                file_mime_provided = request.query.get('file_mime') or None
+                file_type_provided = request.query.get('file_type') or None
+                pw_param = request.query.get('passwords', '')
+                if pw_param:
                     custom_passwords = [
-                        p.strip() for p in raw.replace(',', '\n').split('\n') if p.strip()
+                        p.strip() for p in pw_param.split(',') if p.strip()
                     ]
-                    logger.info('%s (%s) - received %d custom passwords',
-                                s, timer(), len(custom_passwords))
-                elif part.name == 'file_mime':
-                    file_mime_provided = (await part.text()).strip()
-                elif part.name == 'file_type':
-                    file_type_provided = (await part.text()).strip()
-            if not filedata:
-                logger.warning('%s - no "doc" part in multipart request', s)
+                logger.info('%s (%s) - read %d bytes (octet-stream) from %s',
+                            s, timer(), len(filedata), filename)
+            else:
                 return web.json_response(
-                    {'error': 'No file part named "doc"'}, status=400
+                    {'error': 'Unsupported Content-Type — use multipart/form-data '
+                              'or application/octet-stream'},
+                    status=415,
                 )
             file_hash = hashlib.sha256(filedata).hexdigest()
             cached = await self.get_cached_report(s, file_hash)
@@ -2077,6 +3266,15 @@ class InspectorDaemon:
                 logger.info('%s (%s) - timeout for %s, continuing in background',
                             s, timer(), filename)
                 stats['requests_timeout'] += 1
+                # Return whatever has been completed so far from the partial report.
+                partial = self._partials.get(file_hash)
+                if partial:
+                    snap = partial.snapshot()
+                    snap['status']     = 'processing'
+                    snap['file_hash']  = file_hash
+                    snap['message']    = 'Analysis is continuing in background'
+                    snap['time_taken'] = round(time.monotonic() - start_time, 4)
+                    return web.json_response(snap, status=202)
                 return web.json_response({
                     'status':     'processing',
                     'file_hash':  file_hash,
@@ -2132,6 +3330,12 @@ class InspectorDaemon:
                             {'status': 'error', 'error': 'Internal server error'},
                             status=500,
                         )
+                # Task still running — return partial report if available.
+                partial = self._partials.get(file_hash)
+                if partial:
+                    snap = partial.snapshot()
+                    snap['status'] = 'processing'
+                    return web.json_response(snap)
                 return web.json_response({'status': 'processing'})
             return web.json_response({'status': 'finished', 'report': result})
         report = await self.get_cached_report(s, file_hash)
@@ -2180,6 +3384,96 @@ class InspectorDaemon:
             f'xspct_tasks_in_memory {len(self.tasks)}',
         ]
         return web.Response(text='\n'.join(lines) + '\n', content_type='text/plain')
+
+    async def handle_admin_reload(self, request: web.Request) -> web.Response:
+        """Handle ``POST /admin/reload`` — hot-reload config, YARA rules, and passwords.
+
+        Requires a valid ``X-Admin-Api-Key`` header (``xspct_admin_api_key``
+        config key).  Performs the following atomically from the event loop's
+        perspective (each step blocks the loop briefly while the file is read):
+
+        1. Re-reads the YAML config file supplied at startup (no-op if no file
+           was passed on the command line).
+        2. Re-reads the password list(s).
+        3. Recompiles YARA rules from the configured ``rules_path``.
+
+        Args:
+            request: Incoming aiohttp request.
+
+        Returns:
+            JSON response ``{"status": "ok", "reloaded": [...]}`` on success,
+            or an appropriate error response (401, 403, 500).
+        """
+        s = make_session(request)
+        if not verify_admin_key(s, request):
+            return web.json_response({'error': 'Forbidden'}, status=403)
+        reloaded = []
+        try:
+            # Re-apply the config file if one was given at startup.
+            import sys as _sys
+            config_path = _sys.argv[1] if len(_sys.argv) > 1 else None
+            if config_path and os.path.isfile(config_path):
+                load_config(config_path)
+                configure_logging()
+                reloaded.append('config')
+                logger.info('%s - admin reload: config reloaded from %s', s, config_path)
+            # Re-read passwords.
+            self._read_passwords()
+            reloaded.append('passwords')
+            # Recompile YARA rules.
+            if HAS_YARA:
+                self._compile_yara_rules()
+                reloaded.append('yara')
+            logger.info('%s - admin reload complete: %s', s, reloaded)
+            return web.json_response({'status': 'ok', 'reloaded': reloaded})
+        except Exception as exc:
+            logger.exception('%s - admin reload error: %s', s, exc)
+            return web.json_response({'error': 'Reload failed'}, status=500)
+
+    async def handle_openapi_json(self, request: web.Request) -> web.Response:
+        """Handle ``GET /openapi.json`` — return the OpenAPI 3.0 spec.
+
+        The spec is generated once (lazily) from the pydantic response models
+        and cached in memory.  If pydantic is not installed the response
+        contains an error message with a 503 status.
+
+        Args:
+            request: Incoming aiohttp request (unused).
+
+        Returns:
+            JSON response with the OpenAPI spec (200) or an error (503).
+        """
+        spec = _get_openapi_spec()
+        status = 503 if 'error' in spec else 200
+        return web.json_response(spec, status=status)
+
+    async def handle_redoc(self, request: web.Request) -> web.Response:
+        """Handle ``GET /apidoc/redoc`` — serve the ReDoc UI.
+
+        Renders a self-contained HTML page that loads ReDoc from the
+        official CDN and points it at ``/openapi.json``.
+
+        Args:
+            request: Incoming aiohttp request (unused).
+
+        Returns:
+            HTML response with the ReDoc UI.
+        """
+        html = '''<!DOCTYPE html>
+<html>
+<head>
+  <title>xspct-scan API</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="https://fonts.googleapis.com/css?family=Montserrat:300,400,700|Roboto:300,400,700" rel="stylesheet">
+  <style>body { margin: 0; padding: 0; }</style>
+</head>
+<body>
+  <redoc spec-url="/openapi.json"></redoc>
+  <script src="https://cdn.jsdelivr.net/npm/redoc/bundles/redoc.standalone.js"></script>
+</body>
+</html>'''
+        return web.Response(text=html, content_type='text/html')
 
 
 # ---------------------------------------------------------------------------
@@ -2245,10 +3539,13 @@ async def make_app() -> web.Application:
     app = web.Application()
     app.on_startup.append(_on_startup)
     app.on_shutdown.append(_on_shutdown)
-    app.router.add_post('/scan',   daemon.handle_scan)
-    app.router.add_post('/query',  daemon.handle_query)
-    app.router.add_get('/query',   daemon.handle_query)
-    app.router.add_get('/metrics', daemon.handle_metrics)
+    app.router.add_post('/scan',          daemon.handle_scan)
+    app.router.add_post('/query',         daemon.handle_query)
+    app.router.add_get('/query',          daemon.handle_query)
+    app.router.add_get('/metrics',        daemon.handle_metrics)
+    app.router.add_post('/admin/reload',  daemon.handle_admin_reload)
+    app.router.add_get('/openapi.json',   daemon.handle_openapi_json)
+    app.router.add_get('/apidoc/redoc',   daemon.handle_redoc)
     app.router.add_get('/health',  lambda r: web.Response(text='OK'))
     app.router.add_get('/ping',    lambda r: web.Response(text='pong'))
     app.router.add_get('/',        lambda r: web.Response(text='xspct-scan'))

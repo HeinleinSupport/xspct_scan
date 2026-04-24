@@ -20,6 +20,9 @@ xspct_api_header: 'X-Api-Key'
 xspct_api_key: ''            # single string or YAML list for key rotation
 xspct_api_key_verify_fail: true
 
+# Admin API key for POST /admin/reload (leave empty to disable admin endpoints)
+xspct_admin_api_key: ''      # single string or YAML list
+
 # Rspamd correlation header
 xspct_rspamd_header: 'X-Rspamd-ID'
 
@@ -45,4 +48,34 @@ xspct_stats_enabled: true
 xspct_stats_interval: 60    # seconds
 
 # Password list for decrypting encrypted Office documents
+# Single file path or YAML list of paths (all are loaded and merged).
 xspct_password_file: '10k-most-common.txt'
+
+# Per-analyzer enable/disable and analyzer-specific settings.
+# Only specify the keys you want to override — defaults are deep-merged.
+xspct_analyzers:
+  pdf:        {enabled: true}
+  html:       {enabled: true}
+  office:     {enabled: true}
+  yara:       {enabled: false, rules_path: ''}   # classic yara-python engine
+  yara_x:     {enabled: false, rules_path: ''}   # modern yara-x (Rust) engine — enable both for comparison
+  image:      {enabled: true}
+  archive:    {enabled: true}
+  iocs:       {enabled: true}
+  javascript: {enabled: true}
+
+# When true, the full extracted document text is returned as 'text_full'.
+# When false (default), only the truncated 'text_preview' is included.
+xspct_include_text: false
+
+# Maximum characters for text_preview / text_full.
+xspct_text_max_length: 2000
+
+# Maximum archive nesting depth (0 = no extraction).
+xspct_archive_max_depth: 2
+
+# Maximum total bytes extracted from a single archive (default 50 MB).
+xspct_archive_max_size: 52428800
+
+# When true, partial reports (from timed-out requests) are also cached.
+xspct_cache_partial: false

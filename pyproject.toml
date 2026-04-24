@@ -33,11 +33,21 @@ dev    = [
     "pytest-asyncio>=1.0",
     "pytest-aiohttp>=1.0",
 ]
+openapi = [
+    "pydantic>=2.0",
+]
+advanced = [
+    "yara-python>=4.3",
+    "yara-x>=0.9",
+    "iocsearcher>=0.5",
+    "py7zr>=0.20",
+]
 docs   = [
     "sphinx>=7",
     "furo>=2024",
     "sphinx-autodoc-typehints>=2",
     "myst-parser>=3",
+    "sphinxcontrib-redoc>=1.6",
 ]
 
 [project.scripts]
