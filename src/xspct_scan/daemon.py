@@ -274,7 +274,7 @@ config: dict = {
         'image':      {'enabled': True},
         'archive':    {'enabled': True},
         'iocs':       {'enabled': True},
-        'javascript': {'enabled': True},
+        'javascript': {'enabled': True, 'quickjs': False},
         'text':       {'enabled': True},
     },
     # When True, the full extracted text is included in the report as
@@ -1104,7 +1104,7 @@ class InspectorDaemon:
             ('image',      'pyzbar',         HAS_PYZBAR,       _az.get('image',      {}).get('enabled', True),   'pip install "xspct-scan[enrichment]"  # also: apt install libzbar0'),
             ('image',      'tesseract-ocr',  HAS_OCR,          _az.get('image',      {}).get('enabled', True),   'pip install "xspct-scan[enrichment]"  # also: apt install tesseract-ocr'),
             ('javascript', 'jsbeautifier',   HAS_JSBEAUTIFIER, _az.get('javascript', {}).get('enabled', True),   'pip install "xspct-scan[enrichment]"'),
-            ('javascript', 'quickjs',        HAS_QUICKJS,      _az.get('javascript', {}).get('enabled', True),   'pip install "xspct-scan[enrichment]"'),
+            ('javascript', 'quickjs',        HAS_QUICKJS,      _az.get('javascript', {}).get('enabled', True) and _az.get('javascript', {}).get('quickjs', False),   'pip install "xspct-scan[enrichment]"'),
             ('javascript', 'tree-sitter-js', HAS_TREESITTER,   _az.get('javascript', {}).get('enabled', True),   'pip install "xspct-scan[enrichment]"'),
             ('pdf',        'pymupdf',        HAS_PYMUPDF,      _az.get('pdf',        {}).get('enabled', True),   'pip install pymupdf'),
             ('yara',       'yara-python',    HAS_YARA,         _az.get('yara',       {}).get('enabled', False),  'pip install "xspct-scan[advanced]"'),
@@ -1788,7 +1788,8 @@ class InspectorDaemon:
 
         # -- 3. QuickJS sandbox emulation --------------------------------------
         _JS_EMULATE_LIMIT = 512 * 1024  # 512 KB — parse/compile overhead guard
-        if HAS_QUICKJS and len(js_src) <= _JS_EMULATE_LIMIT:
+        _quickjs_enabled = config.get('xspct_analyzers', {}).get('javascript', {}).get('quickjs', False)
+        if HAS_QUICKJS and _quickjs_enabled and len(js_src) <= _JS_EMULATE_LIMIT:
             try:
                 ctx = _quickjs.Context()
                 output: list[str] = []
@@ -1889,7 +1890,7 @@ class InspectorDaemon:
                         f'{type(exc).__name__}'
                     ),
                 })
-        elif HAS_QUICKJS:
+        elif HAS_QUICKJS and _quickjs_enabled:
             logger.debug(
                 'QuickJS emulation skipped for %s: input too large (%d bytes > %d)',
                 source_label, len(js_src), _JS_EMULATE_LIMIT,
