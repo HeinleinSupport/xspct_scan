@@ -198,8 +198,8 @@ def reset_global_state():
     xspct.config['xspct_api_key_verify_fail'] = True
     xspct.config['xspct_password_file']       = PASSWD_FILE
     xspct.config['xspct_stats_enabled']       = False  # no background tasks in tests
-    for k in xspct.stats:
-        xspct.stats[k] = 0
+    for k, v in xspct.stats.items():
+        xspct.stats[k] = {} if isinstance(v, dict) else 0
 
     yield
 
