@@ -353,6 +353,113 @@ class TestExtractIocs:
         assert '5.6.7.8' in r['ips']
 
 
+# ===========================================================================
+# UNIT TESTS — _ioc_excluded helper
+# ===========================================================================
+
+class TestIocExcluded:
+
+    def test_exact_match(self):
+        assert xspct.InspectorDaemon._ioc_excluded('w3.org', ('w3.org',))
+
+    def test_subdomain_match(self):
+        assert xspct.InspectorDaemon._ioc_excluded('www.w3.org', ('w3.org',))
+
+    def test_deep_subdomain_match(self):
+        assert xspct.InspectorDaemon._ioc_excluded('a.b.w3.org', ('w3.org',))
+
+    def test_no_match(self):
+        assert not xspct.InspectorDaemon._ioc_excluded('evil.com', ('w3.org',))
+
+    def test_partial_suffix_not_matched(self):
+        # 'w3.org' should NOT match 'notw3.org'
+        assert not xspct.InspectorDaemon._ioc_excluded('notw3.org', ('w3.org',))
+
+    def test_empty_suffixes(self):
+        assert not xspct.InspectorDaemon._ioc_excluded('anything.com', ())
+
+
+# ===========================================================================
+# UNIT TESTS — extract_iocs domain exclusion
+# ===========================================================================
+
+class TestExtractIocsExcludeDomains:
+
+    def test_excluded_url_dropped(self, daemon):
+        saved = xspct.config.get('xspct_ioc_url_exclude_domains')
+        xspct.config['xspct_ioc_url_exclude_domains'] = ['w3.org']
+        try:
+            r = daemon.extract_iocs(b'see http://www.w3.org/1999/xhtml for details')
+            assert all('w3.org' not in u for u in r['urls'])
+        finally:
+            xspct.config['xspct_ioc_url_exclude_domains'] = saved
+
+    def test_excluded_domain_dropped(self, daemon):
+        saved = xspct.config.get('xspct_ioc_url_exclude_domains')
+        xspct.config['xspct_ioc_url_exclude_domains'] = ['w3.org']
+        try:
+            r = daemon.extract_iocs(b'namespace http://www.w3.org/TR/xhtml1/')
+            assert all('w3.org' not in d for d in r['domains'])
+        finally:
+            xspct.config['xspct_ioc_url_exclude_domains'] = saved
+
+    def test_non_excluded_url_kept(self, daemon):
+        saved = xspct.config.get('xspct_ioc_url_exclude_domains')
+        xspct.config['xspct_ioc_url_exclude_domains'] = ['w3.org']
+        try:
+            r = daemon.extract_iocs(b'payload at https://evil.example.com/drop')
+            assert any('evil.example.com' in u for u in r['urls'])
+        finally:
+            xspct.config['xspct_ioc_url_exclude_domains'] = saved
+
+    def test_empty_exclusion_list_keeps_all(self, daemon):
+        saved = xspct.config.get('xspct_ioc_url_exclude_domains')
+        xspct.config['xspct_ioc_url_exclude_domains'] = []
+        try:
+            r = daemon.extract_iocs(b'see http://www.w3.org/TR/xhtml1/ and https://evil.com')
+            assert any('w3.org' in u for u in r['urls'])
+        finally:
+            xspct.config['xspct_ioc_url_exclude_domains'] = saved
+
+
+# ===========================================================================
+# UNIT TESTS — analyze_iocsearcher domain exclusion
+# ===========================================================================
+
+class TestAnalyzeIocsearcherExclude:
+
+    def test_excluded_fqdn_dropped(self, daemon):
+        if not xspct.HAS_IOCSEARCHER:
+            pytest.skip('iocsearcher not installed')
+        saved = xspct.config.get('xspct_ioc_url_exclude_domains')
+        xspct.config['xspct_ioc_url_exclude_domains'] = ['w3.org']
+        try:
+            result = daemon.analyze_iocsearcher(
+                'namespace http://www.w3.org/1999/xhtml something', 'test'
+            )
+            if result and 'iocs_extended' in result:
+                for ioc_list in result['iocs_extended'].values():
+                    assert all('w3.org' not in v for v in ioc_list)
+        finally:
+            xspct.config['xspct_ioc_url_exclude_domains'] = saved
+
+    def test_non_excluded_kept(self, daemon):
+        if not xspct.HAS_IOCSEARCHER:
+            pytest.skip('iocsearcher not installed')
+        saved = xspct.config.get('xspct_ioc_url_exclude_domains')
+        xspct.config['xspct_ioc_url_exclude_domains'] = ['w3.org']
+        try:
+            result = daemon.analyze_iocsearcher(
+                'contact info@evil.example.com for payload', 'test'
+            )
+            # evil.example.com is NOT excluded — email or fqdn should survive
+            if result and 'iocs_extended' in result:
+                all_vals = [v for lst in result['iocs_extended'].values() for v in lst]
+                assert any('evil.example.com' in v for v in all_vals)
+        finally:
+            xspct.config['xspct_ioc_url_exclude_domains'] = saved
+
+
 class TestAnalyzePdf:
 
     def test_non_pdf_returns_none(self, daemon):
@@ -1227,6 +1334,27 @@ class TestAnalyzeHtmlExtras:
         r = daemon.analyze_html(data)
         types = {a['type'] for a in r['analyses']}
         assert 'SpamRedirect' not in types
+
+    def test_external_script_detected(self, daemon):
+        data = b'<html><script src="http://evil.com/script.php?id=loader"></script></html>'
+        r = daemon.analyze_html(data)
+        types = {a['type'] for a in r['analyses']}
+        assert 'ExternalScript' in types
+
+    def test_external_script_keyword(self, daemon):
+        data = b'<html><script src="https://track.bad.net/t.js"></script></html>'
+        r = daemon.analyze_html(data)
+        kw = {a['keyword'] for a in r['analyses']}
+        assert 'external-script-src' in kw
+
+    def test_tracker_url_not_double_counted_as_external(self, daemon):
+        # A ?u= tracker URL should produce SpamRedirect but NOT also ExternalScript
+        data = b'<html><script src="https://track.evil.com/?u=Ab3Cd7Ef"></script></html>'
+        r = daemon.analyze_html(data)
+        types = [a['type'] for a in r['analyses']]
+        assert types.count('SpamRedirect') == 1
+        # ExternalScript should NOT appear because the URL is already in tracker_scripts
+        assert 'ExternalScript' not in types
 
     def test_inline_script_eval_triggers_suspicious_js(self, daemon):
         data = b'<html><script>eval("alert(1)")</script></html>'
