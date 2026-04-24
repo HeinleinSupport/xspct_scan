@@ -215,8 +215,12 @@ config: dict = {
     # When True, the full extracted text is included in the report as
     # 'text_full'. When False only 'text_preview' (truncated) is returned.
     'xspct_include_text': False,
-    # Maximum characters for text_preview / text_full (whichever applies).
-    'xspct_text_max_length': 2000,
+    # Maximum characters for 'text_preview' (the short excerpt sent in every
+    # response). Independent of xspct_text_max_length.
+    'xspct_text_preview_length': 2000,
+    # Maximum characters for internal full-text extraction used by iocsearcher
+    # and (when xspct_include_text is true) for the 'text_full' report field.
+    'xspct_text_max_length': 50000,
     # Maximum archive recursion depth (0 = no extraction).
     'xspct_archive_max_depth': 2,
     # Maximum total bytes extracted from a single archive (default 50 MB).
@@ -2958,7 +2962,10 @@ class InspectorDaemon:
             if t == 'pdf'    and 'pdf'    in enabled: pending.append('pdf')
             elif t == 'html' and 'html'   in enabled: pending.append('html')
             elif t == 'office' and 'office' in enabled: pending.append('office')
-            # image / archive / text / unknown — added in later phases
+            elif t == 'image'   and 'image'   in enabled: pending.append('image')
+            elif t == 'archive' and 'archive' in enabled: pending.append('archive')
+            # text/unknown: no dedicated analyzer; text_preview is extracted
+            # in the pre-Group-2 block so iocsearcher always receives full text
         # YARA runs regardless of file type (always on raw bytes).
         # Either or both engines may be active simultaneously.
         yara_enabled = (
@@ -3010,22 +3017,43 @@ class InspectorDaemon:
                 tasks.append(asyncio.create_task(
                     _run('archive', self.analyze_archive, s, filename, data, 0)
                 ))
+            # 'text' and 'unknown' have no dedicated Group 1 analyzer.
+            # text_preview / _full_text_for_analysis are extracted in the
+            # pre-Group-2 block so iocsearcher still receives the full content.
         if yara_enabled:
             tasks.append(asyncio.create_task(_run('yara', self.analyze_yara, data)))
 
         if tasks:
             await asyncio.gather(*tasks)
 
-        # --- Group 2: iocsearcher (needs text from Group 1) ---
+        # --- Pre-Group-2: ensure full text is available for internal analysis ---
+        # text_preview (≤2000 chars) may already be set by a document analyzer.
+        # For internal consumers (iocsearcher, text/unknown dispatch) always use
+        # the full extraction up to xspct_text_max_length so that IOCs beyond
+        # the first 2000 characters are not silently missed.
+        _text_max = int(config.get('xspct_text_max_length', 50000))
+        _preview_limit = int(config.get('xspct_text_preview_length', 2000))
+        if not partial.report.get('text_preview'):
+            partial.report['text_preview'] = await loop.run_in_executor(
+                None, self.extract_text_preview, data, file_mime, _preview_limit
+            )
+        # Full text for internal analysis (may equal text_preview when
+        # xspct_text_max_length <= 2000, but never shorter).
+        if _text_max > _preview_limit or not partial.report.get('text_preview'):
+            _full_text_for_analysis = await loop.run_in_executor(
+                None, self.extract_text_preview, data, file_mime, _text_max
+            )
+        else:
+            _full_text_for_analysis = partial.report['text_preview']
+
+        # --- Group 2: iocsearcher (uses full extracted text) ---
         iocs_enabled = (HAS_IOCSEARCHER and 'iocs' in enabled)
-        if iocs_enabled:
-            text_for_iocs = partial.report.get('text_preview', '') or ''
-            if text_for_iocs:
-                iocs_result = await loop.run_in_executor(
-                    None, self.analyze_iocsearcher, text_for_iocs, filename
-                )
-                if iocs_result:
-                    await partial.merge('iocs', iocs_result, self)
+        if iocs_enabled and _full_text_for_analysis:
+            iocs_result = await loop.run_in_executor(
+                None, self.analyze_iocsearcher, _full_text_for_analysis, filename
+            )
+            if iocs_result:
+                await partial.merge('iocs', iocs_result, self)
 
         # --- Finalise ---
         report = partial.report
@@ -3036,17 +3064,11 @@ class InspectorDaemon:
         report['detected_type'] = (
             ','.join(sorted(successful)) if successful else 'unknown'
         )
-        # Fill text_preview if no analyzer provided one.
-        if not report.get('text_preview'):
-            report['text_preview'] = await loop.run_in_executor(
-                None, self.extract_text_preview, data, file_mime
-            )
-        # text_full: only when configured, uses xspct_text_max_length.
+        # text_preview already populated above; no second extraction needed.
+        # text_full: store when xspct_include_text is enabled.
         if config.get('xspct_include_text'):
-            max_len = int(config.get('xspct_text_max_length', 2000))
-            report['text_full'] = await loop.run_in_executor(
-                None, self.extract_text_preview, data, file_mime, max_len
-            )
+            report['text_full'] = _full_text_for_analysis if _text_max > _preview_limit \
+                else partial.report['text_preview']
         # OOXML embedded images: analyse in thread pool.
         if (HAS_OCR or HAS_PYZBAR) and file_mime and 'openxmlformats' in file_mime.lower():
             await loop.run_in_executor(

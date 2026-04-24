@@ -118,7 +118,8 @@ xspct_analyzers:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `xspct_include_text` | `false` | When `true`, the `text_full` field is included in scan reports. |
-| `xspct_text_max_length` | `2000` | Maximum characters returned in `text_full` (also caps `text_preview`). |
+| `xspct_text_preview_length` | `2000` | Maximum characters for `text_preview` — the short excerpt included in every response. |
+| `xspct_text_max_length` | `50000` | Maximum characters for internal full-text extraction. Used by iocsearcher and (when `xspct_include_text` is `true`) for `text_full`. Higher values improve IOC recall on long documents at the cost of more memory and CPU per scan. |
 
 ### Archive analysis
 

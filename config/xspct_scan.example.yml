@@ -68,8 +68,14 @@ xspct_analyzers:
 # When false (default), only the truncated 'text_preview' is included.
 xspct_include_text: false
 
-# Maximum characters for text_preview / text_full.
-xspct_text_max_length: 2000
+# Maximum characters for 'text_preview' (the short excerpt included in every
+# response). Keep this small for low-latency API consumers.
+xspct_text_preview_length: 2000
+
+# Maximum characters for internal full-text extraction used by iocsearcher
+# and (when xspct_include_text is true) for the 'text_full' report field.
+# Set higher to improve IOC recall on long documents.
+xspct_text_max_length: 50000
 
 # Maximum archive nesting depth (0 = no extraction).
 xspct_archive_max_depth: 2
