@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: EUPL-1.2
 # Copyright (C) 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
 """
-test_olefy.py — Comprehensive pytest test suite for InspectorDaemon / olefy_v2.daemon.
+test_olefy.py — Comprehensive pytest test suite for InspectorDaemon / xspct_scan.daemon.
 
 Coverage:
   Unit tests (no HTTP, direct method calls):
@@ -40,7 +40,7 @@ Coverage:
     - Auth: /health always accessible without key
 
 Run:
-    cd /home/cr/git/olefy_v2
+    cd /home/cr/git/xspct-scan
     pip install -e .[dev]
     python3 -m pytest tests/ -v
 """
@@ -62,7 +62,7 @@ try:
 except ImportError:
     _HAS_FITZ = False
 
-import olefy_v2.daemon as olefy
+import xspct_scan.daemon as xspct
 from tests.conftest import OLE_FILE, RTF_FILE, PASSWD_FILE
 
 # ---------------------------------------------------------------------------
@@ -169,49 +169,49 @@ def _form(data: bytes, filename: str, **extra_fields) -> aiohttp.FormData:
 @pytest.fixture(autouse=True)
 def reset_global_state():
     """Reset module-level mutable state before and after every test."""
-    saved_keys     = list(olefy.config['olefy_api_key'])
-    saved_fail     = olefy.config['olefy_api_key_verify_fail']
-    saved_stats    = dict(olefy.stats)
-    saved_pw_file  = olefy.config['olefy_password_file']
-    saved_stats_en = olefy.config['olefy_stats_enabled']
+    saved_keys     = list(xspct.config['xspct_api_key'])
+    saved_fail     = xspct.config['xspct_api_key_verify_fail']
+    saved_stats    = dict(xspct.stats)
+    saved_pw_file  = xspct.config['xspct_password_file']
+    saved_stats_en = xspct.config['xspct_stats_enabled']
 
-    olefy.config['olefy_api_key']             = []
-    olefy.config['olefy_api_key_verify_fail'] = True
-    olefy.config['olefy_password_file']       = PASSWD_FILE
-    olefy.config['olefy_stats_enabled']       = False  # no background tasks in tests
-    for k in olefy.stats:
-        olefy.stats[k] = 0
+    xspct.config['xspct_api_key']             = []
+    xspct.config['xspct_api_key_verify_fail'] = True
+    xspct.config['xspct_password_file']       = PASSWD_FILE
+    xspct.config['xspct_stats_enabled']       = False  # no background tasks in tests
+    for k in xspct.stats:
+        xspct.stats[k] = 0
 
     yield
 
-    olefy.config['olefy_api_key']             = saved_keys
-    olefy.config['olefy_api_key_verify_fail'] = saved_fail
-    olefy.config['olefy_password_file']       = saved_pw_file
-    olefy.config['olefy_stats_enabled']       = saved_stats_en
+    xspct.config['xspct_api_key']             = saved_keys
+    xspct.config['xspct_api_key_verify_fail'] = saved_fail
+    xspct.config['xspct_password_file']       = saved_pw_file
+    xspct.config['xspct_stats_enabled']       = saved_stats_en
     for k, val in saved_stats.items():
-        olefy.stats[k] = val
+        xspct.stats[k] = val
 
 
 @pytest.fixture
 async def client(aiohttp_client):
     """Full daemon TestClient with no API key required."""
-    app = await olefy.make_app()
+    app = await xspct.make_app()
     return await aiohttp_client(app)
 
 
 @pytest.fixture
 async def auth_client(aiohttp_client):
     """Full daemon TestClient with API key enforcement."""
-    olefy.config['olefy_api_key']             = ['test-secret-key']
-    olefy.config['olefy_api_key_verify_fail'] = True
-    app = await olefy.make_app()
+    xspct.config['xspct_api_key']             = ['test-secret-key']
+    xspct.config['xspct_api_key_verify_fail'] = True
+    app = await xspct.make_app()
     return await aiohttp_client(app)
 
 
 @pytest.fixture
 def daemon():
     """Bare InspectorDaemon with a small, known password list."""
-    d = olefy.InspectorDaemon()
+    d = xspct.InspectorDaemon()
     d.passwords = ['VelvetSweatshop', 'test123', '123456', 'password']
     return d
 
@@ -223,25 +223,25 @@ def daemon():
 class TestSessionHelpers:
 
     def test_session_id_is_6_hex_chars(self):
-        sid = olefy.generate_session_id()
+        sid = xspct.generate_session_id()
         assert len(sid) == 6
         assert all(c in '0123456789abcdef' for c in sid)
 
     def test_session_ids_are_unique(self):
-        ids = {olefy.generate_session_id() for _ in range(200)}
+        ids = {xspct.generate_session_id() for _ in range(200)}
         assert len(ids) > 1
 
     def test_make_session_format_no_rspamd(self):
         req = MagicMock()
         req.headers = {}
-        s = olefy.make_session(req)
+        s = xspct.make_session(req)
         assert s.startswith('<') and s.endswith('>')
         assert len(s) == 8  # <xxxxxx>
 
     def test_make_session_includes_rspamd_id(self):
         req = MagicMock()
-        req.headers = {olefy.config['olefy_rspamd_header']: 'rspamd99'}
-        s = olefy.make_session(req)
+        req.headers = {xspct.config['xspct_rspamd_header']: 'rspamd99'}
+        s = xspct.make_session(req)
         assert '-' in s
         assert 'rspamd' in s
 
@@ -249,56 +249,56 @@ class TestSessionHelpers:
 class TestApiKeyVerification:
 
     def test_no_keys_always_passes(self):
-        olefy.config['olefy_api_key'] = []
+        xspct.config['xspct_api_key'] = []
         req = MagicMock()
         req.headers = {}
-        assert olefy.verify_api_key('<t>', req) is True
+        assert xspct.verify_api_key('<t>', req) is True
 
     def test_correct_key_passes(self):
-        olefy.config['olefy_api_key'] = ['my-secret']
+        xspct.config['xspct_api_key'] = ['my-secret']
         req = MagicMock()
-        req.headers = {olefy.config['olefy_api_header']: 'my-secret'}
-        assert olefy.verify_api_key('<t>', req) is True
+        req.headers = {xspct.config['xspct_api_header']: 'my-secret'}
+        assert xspct.verify_api_key('<t>', req) is True
 
     def test_wrong_key_fails_when_verify_fail_true(self):
-        olefy.config['olefy_api_key']             = ['my-secret']
-        olefy.config['olefy_api_key_verify_fail'] = True
+        xspct.config['xspct_api_key']             = ['my-secret']
+        xspct.config['xspct_api_key_verify_fail'] = True
         req = MagicMock()
-        req.headers = {olefy.config['olefy_api_header']: 'wrong'}
-        assert olefy.verify_api_key('<t>', req) is False
+        req.headers = {xspct.config['xspct_api_header']: 'wrong'}
+        assert xspct.verify_api_key('<t>', req) is False
 
     def test_wrong_key_passes_when_verify_fail_false(self):
-        olefy.config['olefy_api_key']             = ['my-secret']
-        olefy.config['olefy_api_key_verify_fail'] = False
+        xspct.config['xspct_api_key']             = ['my-secret']
+        xspct.config['xspct_api_key_verify_fail'] = False
         req = MagicMock()
-        req.headers = {olefy.config['olefy_api_header']: 'wrong'}
-        assert olefy.verify_api_key('<t>', req) is True
+        req.headers = {xspct.config['xspct_api_header']: 'wrong'}
+        assert xspct.verify_api_key('<t>', req) is True
 
     def test_missing_header_fails(self):
-        olefy.config['olefy_api_key']             = ['my-secret']
-        olefy.config['olefy_api_key_verify_fail'] = True
+        xspct.config['xspct_api_key']             = ['my-secret']
+        xspct.config['xspct_api_key_verify_fail'] = True
         req = MagicMock()
         req.headers = {}
-        assert olefy.verify_api_key('<t>', req) is False
+        assert xspct.verify_api_key('<t>', req) is False
 
     def test_multi_key_first_accepted(self):
-        olefy.config['olefy_api_key'] = ['key-A', 'key-B']
+        xspct.config['xspct_api_key'] = ['key-A', 'key-B']
         req = MagicMock()
-        req.headers = {olefy.config['olefy_api_header']: 'key-A'}
-        assert olefy.verify_api_key('<t>', req) is True
+        req.headers = {xspct.config['xspct_api_header']: 'key-A'}
+        assert xspct.verify_api_key('<t>', req) is True
 
     def test_multi_key_second_accepted(self):
-        olefy.config['olefy_api_key'] = ['key-A', 'key-B']
+        xspct.config['xspct_api_key'] = ['key-A', 'key-B']
         req = MagicMock()
-        req.headers = {olefy.config['olefy_api_header']: 'key-B'}
-        assert olefy.verify_api_key('<t>', req) is True
+        req.headers = {xspct.config['xspct_api_header']: 'key-B'}
+        assert xspct.verify_api_key('<t>', req) is True
 
     def test_multi_key_unknown_rejected(self):
-        olefy.config['olefy_api_key']             = ['key-A', 'key-B']
-        olefy.config['olefy_api_key_verify_fail'] = True
+        xspct.config['xspct_api_key']             = ['key-A', 'key-B']
+        xspct.config['xspct_api_key_verify_fail'] = True
         req = MagicMock()
-        req.headers = {olefy.config['olefy_api_header']: 'key-C'}
-        assert olefy.verify_api_key('<t>', req) is False
+        req.headers = {xspct.config['xspct_api_header']: 'key-C'}
+        assert xspct.verify_api_key('<t>', req) is False
 
 
 class TestExtractIocs:
@@ -660,7 +660,7 @@ class TestSyncAnalyze:
 
     def test_meta_always_present(self, daemon):
         r = daemon.sync_analyze('<t>', 'x.pdf', PDF_CLEAN, 'application/pdf')
-        assert r['meta']['script_name'] == 'olefy_v2'
+        assert r['meta']['script_name'] == 'xspct-scan'
         assert r['meta']['version'] == '2.0.0'
 
     @pytest.mark.skipif(not os.path.exists(OLE_FILE), reason='OLE sample not present')
@@ -723,10 +723,10 @@ class TestHealthPingRoot:
         assert r.status == 200
         assert await r.text() == 'pong'
 
-    async def test_root_200_olefy(self, client):
+    async def test_root_200_xspct(self, client):
         r = await client.get('/')
         assert r.status == 200
-        assert 'Olefy' in await r.text()
+        assert 'xspct-scan' in await r.text()
 
 
 class TestMetricsEndpoint:
@@ -736,13 +736,13 @@ class TestMetricsEndpoint:
         assert r.status == 200
         text = await r.text()
         for metric in (
-            'olefy_requests_total',
-            'olefy_requests_finished',
-            'olefy_requests_timeout',
-            'olefy_redis_hits',
-            'olefy_redis_misses',
-            'olefy_redis_errors',
-            'olefy_tasks_in_memory',
+            'xspct_requests_total',
+            'xspct_requests_finished',
+            'xspct_requests_timeout',
+            'xspct_redis_hits',
+            'xspct_redis_misses',
+            'xspct_redis_errors',
+            'xspct_tasks_in_memory',
         ):
             assert metric in text
 
@@ -750,19 +750,19 @@ class TestMetricsEndpoint:
         await client.post('/scan', data=_form(PDF_CLEAN, 'a.pdf'))
         r = await client.get('/metrics')
         text = await r.text()
-        assert 'olefy_requests_total 1' in text
+        assert 'xspct_requests_total 1' in text
 
     async def test_metrics_finished_counter_increments(self, client):
         await client.post('/scan', data=_form(PDF_CLEAN, 'b.pdf'))
         r = await client.get('/metrics')
         text = await r.text()
-        assert 'olefy_requests_finished 1' in text
+        assert 'xspct_requests_finished 1' in text
 
     async def test_metrics_tasks_in_memory_increases(self, client):
         await client.post('/scan', data=_form(PDF_CLEAN, 'c.pdf'))
         r = await client.get('/metrics')
         text = await r.text()
-        assert 'olefy_tasks_in_memory 0' not in text or 'olefy_tasks_in_memory 1' in text
+        assert 'xspct_tasks_in_memory 0' not in text or 'xspct_tasks_in_memory 1' in text
 
 
 class TestScanEndpoint:
@@ -1250,20 +1250,20 @@ class TestTextExtractorRtf:
 
     def test_minimal_rtf_extracts_text(self):
         rtf = b'{\\rtf1\\ansi {\\fonttbl} Hello World}'
-        te = olefy.TextExtractorRtf(rtf)
+        te = xspct.TextExtractorRtf(rtf)
         text = te.get_text()
         # The RTF parser may or may not produce text from this minimal sample;
         # the important thing is that it runs without exception and returns a string.
         assert isinstance(text, str)
 
     def test_empty_rtf_does_not_raise(self):
-        te = olefy.TextExtractorRtf(b'{\\rtf1}')
+        te = xspct.TextExtractorRtf(b'{\\rtf1}')
         result = te.get_text()
         assert isinstance(result, str)
 
     def test_all_text_list_populated(self):
         rtf = b'{\\rtf1 hello}'
-        te = olefy.TextExtractorRtf(rtf)
+        te = xspct.TextExtractorRtf(rtf)
         te.parse()
         assert isinstance(te.all_text, list)
 
@@ -1276,59 +1276,59 @@ class TestLoadConfig:
 
     def test_none_path_is_noop(self):
         # Should not raise and should normalise api_key
-        olefy.config['olefy_api_key'] = 'single-key'
-        olefy.load_config(None)
-        assert isinstance(olefy.config['olefy_api_key'], list)
-        assert olefy.config['olefy_api_key'] == ['single-key']
+        xspct.config['xspct_api_key'] = 'single-key'
+        xspct.load_config(None)
+        assert isinstance(xspct.config['xspct_api_key'], list)
+        assert xspct.config['xspct_api_key'] == ['single-key']
 
     def test_missing_file_exits(self, tmp_path):
         with pytest.raises(SystemExit):
-            olefy.load_config(str(tmp_path / 'nonexistent.yml'))
+            xspct.load_config(str(tmp_path / 'nonexistent.yml'))
 
     def test_valid_yaml_updates_config(self, tmp_path):
-        cfg = tmp_path / 'olefy.yml'
-        cfg.write_text('olefy_listen_port: 9999\n')
-        original = olefy.config['olefy_listen_port']
+        cfg = tmp_path / 'xspct.yml'
+        cfg.write_text('xspct_listen_port: 9999\n')
+        original = xspct.config['xspct_listen_port']
         try:
-            olefy.load_config(str(cfg))
-            assert olefy.config['olefy_listen_port'] == 9999
+            xspct.load_config(str(cfg))
+            assert xspct.config['xspct_listen_port'] == 9999
         finally:
-            olefy.config['olefy_listen_port'] = original
+            xspct.config['xspct_listen_port'] = original
 
     def test_sub_dict_is_merged_not_replaced(self, tmp_path):
-        cfg = tmp_path / 'olefy.yml'
-        cfg.write_text('olefy_redis_cache:\n  host: redis.custom.example\n')
-        original_port = olefy.config['olefy_redis_cache']['port']
+        cfg = tmp_path / 'xspct.yml'
+        cfg.write_text('xspct_redis_cache:\n  host: redis.custom.example\n')
+        original_port = xspct.config['xspct_redis_cache']['port']
         try:
-            olefy.load_config(str(cfg))
-            assert olefy.config['olefy_redis_cache']['host'] == 'redis.custom.example'
-            assert olefy.config['olefy_redis_cache']['port'] == original_port
+            xspct.load_config(str(cfg))
+            assert xspct.config['xspct_redis_cache']['host'] == 'redis.custom.example'
+            assert xspct.config['xspct_redis_cache']['port'] == original_port
         finally:
-            olefy.config['olefy_redis_cache']['host'] = 'localhost'
+            xspct.config['xspct_redis_cache']['host'] = 'localhost'
 
     def test_invalid_yaml_exits(self, tmp_path):
         cfg = tmp_path / 'bad.yml'
         cfg.write_text(': invalid: yaml: {unclosed\n')
         with pytest.raises(SystemExit):
-            olefy.load_config(str(cfg))
+            xspct.load_config(str(cfg))
 
     def test_string_api_key_normalised_to_list(self, tmp_path):
-        cfg = tmp_path / 'olefy.yml'
-        cfg.write_text('olefy_api_key: my-secret-key\n')
+        cfg = tmp_path / 'xspct.yml'
+        cfg.write_text('xspct_api_key: my-secret-key\n')
         try:
-            olefy.load_config(str(cfg))
-            assert olefy.config['olefy_api_key'] == ['my-secret-key']
+            xspct.load_config(str(cfg))
+            assert xspct.config['xspct_api_key'] == ['my-secret-key']
         finally:
-            olefy.config['olefy_api_key'] = []
+            xspct.config['xspct_api_key'] = []
 
     def test_empty_string_api_key_normalised_to_empty_list(self, tmp_path):
-        cfg = tmp_path / 'olefy.yml'
-        cfg.write_text('olefy_api_key: ""\n')
+        cfg = tmp_path / 'xspct.yml'
+        cfg.write_text('xspct_api_key: ""\n')
         try:
-            olefy.load_config(str(cfg))
-            assert olefy.config['olefy_api_key'] == []
+            xspct.load_config(str(cfg))
+            assert xspct.config['xspct_api_key'] == []
         finally:
-            olefy.config['olefy_api_key'] = []
+            xspct.config['xspct_api_key'] = []
 
 
 # ===========================================================================
@@ -1338,25 +1338,25 @@ class TestLoadConfig:
 class TestConfigureLogging:
 
     def test_calling_twice_does_not_duplicate_handlers(self):
-        olefy.configure_logging()
-        olefy.configure_logging()
+        xspct.configure_logging()
+        xspct.configure_logging()
         real_handlers = [
-            h for h in olefy.logger.handlers
+            h for h in xspct.logger.handlers
             if not isinstance(h, logging.NullHandler)
         ]
         assert len(real_handlers) == 1
 
     def test_log_level_applied(self):
-        olefy.config['olefy_log_level'] = logging.WARNING
-        olefy.configure_logging()
-        assert olefy.logger.level == logging.WARNING
-        olefy.config['olefy_log_level'] = 20  # restore
-        olefy.configure_logging()
+        xspct.config['xspct_log_level'] = logging.WARNING
+        xspct.configure_logging()
+        assert xspct.logger.level == logging.WARNING
+        xspct.config['xspct_log_level'] = 20  # restore
+        xspct.configure_logging()
 
     def test_handler_is_stream_handler(self):
-        olefy.configure_logging()
+        xspct.configure_logging()
         real_handlers = [
-            h for h in olefy.logger.handlers
+            h for h in xspct.logger.handlers
             if not isinstance(h, logging.NullHandler)
         ]
         assert isinstance(real_handlers[0], logging.StreamHandler)

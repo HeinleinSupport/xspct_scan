@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: EUPL-1.2
 # Copyright (C) 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
 """
-Olefy v2 Daemon
-===============
+xspct-scan Daemon
+=================
 Async HTTP service for analyzing Office/PDF/HTML documents for malware indicators.
 
 Public API
 ----------
     load_config(path)       -- load and merge a YAML config file into `config`
-    configure_logging()     -- configure the 'olefy' logger from current `config`
+    configure_logging()     -- configure the 'xspct-scan' logger from current `config`
     make_app()              -- coroutine returning a configured aiohttp.web.Application
     config                  -- module-level dict with current configuration
     stats                   -- module-level dict with runtime counters
@@ -126,33 +126,33 @@ def timer(action: str = '') -> object:
 # Default configuration
 # ---------------------------------------------------------------------------
 config: dict = {
-    'olefy_listen_address': ['0.0.0.0'],
-    'olefy_listen_port': 8080,
-    'olefy_listen_backlog': 256,
-    'olefy_log_level': 20,
-    'olefy_log_prefix': 'olefy',
-    'olefy_api_header': 'X-Api-Key',
-    'olefy_api_key': [],
-    'olefy_api_key_verify_fail': True,
-    'olefy_rspamd_header': 'X-Rspamd-ID',
-    'olefy_tls': {
+    'xspct_listen_address': ['0.0.0.0'],
+    'xspct_listen_port': 8080,
+    'xspct_listen_backlog': 256,
+    'xspct_log_level': 20,
+    'xspct_log_prefix': 'xspct-scan',
+    'xspct_api_header': 'X-Api-Key',
+    'xspct_api_key': [],
+    'xspct_api_key_verify_fail': True,
+    'xspct_rspamd_header': 'X-Rspamd-ID',
+    'xspct_tls': {
         'tls_enabled': False,
         'tls_cert': '',
         'tls_key': '',
     },
-    'olefy_redis_cache': {
+    'xspct_redis_cache': {
         'enabled': False,
         'host': 'localhost',
         'port': 6379,
         'user': '',
         'password': '',
-        'prefix': 'olefy:',
+        'prefix': 'xspct:',
         'expire': 3600,
         'max_errors': 3,
     },
-    'olefy_stats_enabled': True,
-    'olefy_stats_interval': 60,
-    'olefy_password_file': '10k-most-common.txt',
+    'xspct_stats_enabled': True,
+    'xspct_stats_interval': 60,
+    'xspct_password_file': '10k-most-common.txt',
 }
 """Module-level configuration dictionary.
 
@@ -181,7 +181,7 @@ Exposed as Prometheus metrics via ``GET /metrics``.
 # Logger — NullHandler so we don't warn when used as a library.
 # Call configure_logging() to attach a real handler.
 # ---------------------------------------------------------------------------
-logger = logging.getLogger('olefy')
+logger = logging.getLogger('xspct-scan')
 logger.addHandler(logging.NullHandler())
 
 
@@ -192,7 +192,7 @@ logger.addHandler(logging.NullHandler())
 def load_config(path: 'str | None' = None) -> None:
     """Load *path* (YAML) and deep-merge it into the module-level ``config`` dict.
 
-    Sub-dicts ``olefy_tls`` and ``olefy_redis_cache`` are merged key-by-key so
+    Sub-dicts ``xspct_tls`` and ``xspct_redis_cache`` are merged key-by-key so
     callers only need to specify the keys they want to override.
 
     Raises ``SystemExit(1)`` if the file is missing or contains invalid YAML.
@@ -207,7 +207,7 @@ def load_config(path: 'str | None' = None) -> None:
         with open(path) as fh:
             extra = yaml.safe_load(fh)
         if extra:
-            for sub in ('olefy_tls', 'olefy_redis_cache'):
+            for sub in ('xspct_tls', 'xspct_redis_cache'):
                 if sub in extra:
                     merged = config[sub].copy()
                     merged.update(extra.pop(sub))
@@ -223,25 +223,25 @@ def load_config(path: 'str | None' = None) -> None:
 
 
 def _normalise_api_key() -> None:
-    key = config['olefy_api_key']
+    key = config['xspct_api_key']
     if isinstance(key, str):
-        config['olefy_api_key'] = [key] if key else []
+        config['xspct_api_key'] = [key] if key else []
 
 
 def configure_logging() -> None:
-    """Attach a ``StreamHandler`` to the *olefy* logger using current ``config``.
+    """Attach a ``StreamHandler`` to the *xspct-scan* logger using current ``config``.
 
     Safe to call multiple times; existing non-NullHandler handlers are removed
     first so reconfiguration works correctly.
     """
-    logger.setLevel(int(config['olefy_log_level']))
+    logger.setLevel(int(config['xspct_log_level']))
     # Remove any real handlers added by a previous call, keep NullHandler
     for h in list(logger.handlers):
         if not isinstance(h, logging.NullHandler):
             logger.removeHandler(h)
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(logging.Formatter(
-        config['olefy_log_prefix'] + ' %(levelname)s %(funcName)s %(message)s'
+        config['xspct_log_prefix'] + ' %(levelname)s %(funcName)s %(message)s'
     ))
     logger.addHandler(handler)
 
@@ -273,7 +273,7 @@ def make_session(request: web.Request, session_id: 'str | None' = None) -> str:
         A bracketed tag such as ``<a3f2c1>`` or ``<a3f2c1-rspamd>``.
     """
     sid = session_id or generate_session_id()
-    rspamd_id = request.headers.get(config['olefy_rspamd_header'], '') if request else ''
+    rspamd_id = request.headers.get(config['xspct_rspamd_header'], '') if request else ''
     if rspamd_id:
         return f'<{sid[:6]}-{rspamd_id[:6]}>'
     return f'<{sid[:6]}>'
@@ -298,17 +298,17 @@ def verify_api_key(s: str, request: web.Request) -> bool:
         ``True`` if authentication passes (including when auth is disabled),
         ``False`` when a key is required but the provided value is wrong.
     """
-    keys = config['olefy_api_key']
+    keys = config['xspct_api_key']
     if not keys:
         return True
-    provided = str(request.headers.get(config['olefy_api_header'], '') or '')
+    provided = str(request.headers.get(config['xspct_api_header'], '') or '')
     valid = False
     for k in keys:
         valid |= hmac.compare_digest(provided, str(k))
     if valid:
         logger.debug('%s - api key verification success', s)
         return True
-    if not config['olefy_api_key_verify_fail']:
+    if not config['xspct_api_key_verify_fail']:
         logger.debug('%s - api key failed but not fatal', s)
         return True
     logger.warning('%s - api key verification failed', s)
@@ -406,9 +406,9 @@ class InspectorDaemon:
     # ------------------------------------------------------------------
 
     def _redis_enabled(self, s: str) -> bool:
-        if not config['olefy_redis_cache']['enabled'] or not self.redis_pool:
+        if not config['xspct_redis_cache']['enabled'] or not self.redis_pool:
             return False
-        if self._redis_error_count > int(config['olefy_redis_cache']['max_errors']):
+        if self._redis_error_count > int(config['xspct_redis_cache']['max_errors']):
             logger.debug('%s - Redis circuit-breaker open (%d errors)', s, self._redis_error_count)
             return False
         return True
@@ -440,7 +440,7 @@ class InspectorDaemon:
         if not self._redis_enabled(s):
             stats['redis_misses'] += 1
             return None
-        key = config['olefy_redis_cache']['prefix'] + file_hash
+        key = config['xspct_redis_cache']['prefix'] + file_hash
         try:
             raw = await self.redis_pool.get(key)
             self._redis_reset_errors(s)
@@ -471,8 +471,8 @@ class InspectorDaemon:
         self._evict_tasks()
         if not self._redis_enabled(s):
             return
-        key = config['olefy_redis_cache']['prefix'] + file_hash
-        expire = int(config['olefy_redis_cache']['expire'])
+        key = config['xspct_redis_cache']['prefix'] + file_hash
+        expire = int(config['xspct_redis_cache']['expire'])
         try:
             await self.redis_pool.setex(key, expire, json.dumps(report))
             self._redis_reset_errors(s)
@@ -495,8 +495,8 @@ class InspectorDaemon:
         ``on_startup`` signal.
         """
         self._read_passwords()
-        if HAS_REDIS and config['olefy_redis_cache']['enabled']:
-            rc = config['olefy_redis_cache']
+        if HAS_REDIS and config['xspct_redis_cache']['enabled']:
+            rc = config['xspct_redis_cache']
             url = f"redis://{rc['host']}:{rc['port']}"
             try:
                 if hasattr(redis, 'from_url'):
@@ -512,7 +512,7 @@ class InspectorDaemon:
             except Exception as exc:
                 logger.error('Failed to connect to Redis: %s', exc)
                 self.redis_pool = None
-        elif config['olefy_redis_cache']['enabled'] and not HAS_REDIS:
+        elif config['xspct_redis_cache']['enabled'] and not HAS_REDIS:
             logger.warning('Redis requested but library not found. Caching disabled.')
 
     async def teardown(self) -> None:
@@ -529,7 +529,7 @@ class InspectorDaemon:
 
     def _read_passwords(self) -> None:
         defaults = ['VelvetSweatshop', '123', '1234', '12345', '123456', '4321']
-        pw_file = config['olefy_password_file']
+        pw_file = config['xspct_password_file']
         try:
             with open(pw_file) as fh:
                 self.passwords = fh.read().splitlines() + defaults
@@ -1879,7 +1879,7 @@ class InspectorDaemon:
             'has_macro':           False,
             'analyses':            [],
             'meta': {
-                'script_name': 'olefy_v2',
+                'script_name': 'xspct-scan',
                 'version': '2.0.0',
                 'type': 'MetaInformation',
             },
@@ -2157,27 +2157,27 @@ class InspectorDaemon:
         if not verify_api_key(s, request):
             return web.json_response({'error': 'Unauthorized'}, status=401)
         lines = [
-            '# HELP olefy_requests_total Total scan requests received',
-            '# TYPE olefy_requests_total counter',
-            f'olefy_requests_total {stats["requests_total"]}',
-            '# HELP olefy_requests_finished Scan requests completed within timeout',
-            '# TYPE olefy_requests_finished counter',
-            f'olefy_requests_finished {stats["requests_finished"]}',
-            '# HELP olefy_requests_timeout Scan requests that timed out (202)',
-            '# TYPE olefy_requests_timeout counter',
-            f'olefy_requests_timeout {stats["requests_timeout"]}',
-            '# HELP olefy_redis_hits Redis cache hits',
-            '# TYPE olefy_redis_hits counter',
-            f'olefy_redis_hits {stats["redis_hits"]}',
-            '# HELP olefy_redis_misses Redis cache misses',
-            '# TYPE olefy_redis_misses counter',
-            f'olefy_redis_misses {stats["redis_misses"]}',
-            '# HELP olefy_redis_errors Redis errors total',
-            '# TYPE olefy_redis_errors counter',
-            f'olefy_redis_errors {stats["redis_errors"]}',
-            '# HELP olefy_tasks_in_memory Current in-memory task/report entries',
-            '# TYPE olefy_tasks_in_memory gauge',
-            f'olefy_tasks_in_memory {len(self.tasks)}',
+            '# HELP xspct_requests_total Total scan requests received',
+            '# TYPE xspct_requests_total counter',
+            f'xspct_requests_total {stats["requests_total"]}',
+            '# HELP xspct_requests_finished Scan requests completed within timeout',
+            '# TYPE xspct_requests_finished counter',
+            f'xspct_requests_finished {stats["requests_finished"]}',
+            '# HELP xspct_requests_timeout Scan requests that timed out (202)',
+            '# TYPE xspct_requests_timeout counter',
+            f'xspct_requests_timeout {stats["requests_timeout"]}',
+            '# HELP xspct_redis_hits Redis cache hits',
+            '# TYPE xspct_redis_hits counter',
+            f'xspct_redis_hits {stats["redis_hits"]}',
+            '# HELP xspct_redis_misses Redis cache misses',
+            '# TYPE xspct_redis_misses counter',
+            f'xspct_redis_misses {stats["redis_misses"]}',
+            '# HELP xspct_redis_errors Redis errors total',
+            '# TYPE xspct_redis_errors counter',
+            f'xspct_redis_errors {stats["redis_errors"]}',
+            '# HELP xspct_tasks_in_memory Current in-memory task/report entries',
+            '# TYPE xspct_tasks_in_memory gauge',
+            f'xspct_tasks_in_memory {len(self.tasks)}',
         ]
         return web.Response(text='\n'.join(lines) + '\n', content_type='text/plain')
 
@@ -2187,7 +2187,7 @@ class InspectorDaemon:
 # ---------------------------------------------------------------------------
 
 async def _log_stats_periodically(daemon: InspectorDaemon) -> None:
-    interval = int(config['olefy_stats_interval'])
+    interval = int(config['xspct_stats_interval'])
     while True:
         await asyncio.sleep(interval)
         total   = stats['requests_total']
@@ -2224,7 +2224,7 @@ async def make_app() -> web.Application:
     /metrics   GET     :meth:`~InspectorDaemon.handle_metrics`
     /health    GET     Returns ``OK``
     /ping      GET     Returns ``pong``
-    /          GET     Returns ``Olefy v2``
+    /          GET     Returns ``xspct-scan``
     =========  ======  ====================
 
     Returns:
@@ -2234,13 +2234,13 @@ async def make_app() -> web.Application:
 
     async def _on_startup(app: web.Application) -> None:
         await daemon.setup()
-        if config['olefy_stats_enabled']:
+        if config['xspct_stats_enabled']:
             asyncio.create_task(_log_stats_periodically(daemon))
-        logger.info('Olefy v2 ready')
+        logger.info('xspct-scan ready')
 
     async def _on_shutdown(app: web.Application) -> None:
         await daemon.teardown()
-        logger.info('Olefy v2 stopped')
+        logger.info('xspct-scan stopped')
 
     app = web.Application()
     app.on_startup.append(_on_startup)
@@ -2251,5 +2251,5 @@ async def make_app() -> web.Application:
     app.router.add_get('/metrics', daemon.handle_metrics)
     app.router.add_get('/health',  lambda r: web.Response(text='OK'))
     app.router.add_get('/ping',    lambda r: web.Response(text='pong'))
-    app.router.add_get('/',        lambda r: web.Response(text='Olefy v2'))
+    app.router.add_get('/',        lambda r: web.Response(text='xspct-scan'))
     return app

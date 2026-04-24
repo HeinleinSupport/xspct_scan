@@ -16,7 +16,7 @@
 ## Install from PyPI
 
 ```bash
-pip install olefy_v2
+pip install xspct_scan
 ```
 
 ### Optional extras
@@ -27,14 +27,14 @@ pip install olefy_v2
 | `redis` | `redis[asyncio]` | Persistent result cache across restarts |
 
 ```bash
-pip install "olefy_v2[uvloop,redis]"
+pip install "xspct_scan[uvloop,redis]"
 ```
 
 ## Install from source
 
 ```bash
-git clone https://github.com/heinlein-support/olefy_v2.git
-cd olefy_v2
+git clone https://github.com/heinlein-support/xspct_scan.git
+cd xspct_scan
 pip install -e ".[uvloop,redis]"
 ```
 
@@ -42,29 +42,29 @@ pip install -e ".[uvloop,redis]"
 
 ```bash
 # With a config file
-olefy_v2 /etc/olefy_v2/config.yml
+xspct_scan /etc/xspct_scan/config.yml
 
 # With defaults (listens on 0.0.0.0:8080)
-olefy_v2
+xspct_scan
 ```
 
 Alternatively, run as a module:
 
 ```bash
-python -m olefy_v2 /etc/olefy_v2/config.yml
+python -m xspct_scan /etc/xspct_scan/config.yml
 ```
 
 ## Systemd unit (example)
 
 ```ini
 [Unit]
-Description=olefy_v2 malware scanner
+Description=xspct_scan malware scanner
 After=network.target
 
 [Service]
 Type=simple
-User=olefy
-ExecStart=/usr/local/bin/olefy_v2 /etc/olefy_v2/config.yml
+User=xspct-scan
+ExecStart=/usr/local/bin/xspct_scan /etc/xspct_scan/config.yml
 Restart=on-failure
 
 [Install]

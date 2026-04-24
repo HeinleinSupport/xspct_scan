@@ -5,7 +5,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "olefy_v2"
+name = "xspct-scan"
 version = "2.0.0"
 description = "Async HTTP daemon for scanning Office/PDF/HTML documents for malware indicators"
 requires-python = ">=3.10"
@@ -41,7 +41,7 @@ docs   = [
 ]
 
 [project.scripts]
-olefy_v2 = "olefy_v2.__main__:main"
+xspct-scan = "xspct_scan.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

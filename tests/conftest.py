@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: EUPL-1.2
 # Copyright (C) 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
 """
-Pytest configuration for the olefy_v2 test suite.
+Pytest configuration for the xspct_scan test suite.
 
 Provides:
   - session-scoped logging setup
@@ -20,12 +20,12 @@ CLI options:
 import os
 from pathlib import Path
 
-import olefy_v2.daemon as olefy
+import xspct_scan.daemon as xspct
 
 # ---------------------------------------------------------------------------
 # Logging — configure once for the whole test session
 # ---------------------------------------------------------------------------
-olefy.configure_logging()
+xspct.configure_logging()
 
 # ---------------------------------------------------------------------------
 # Fixture file locations (populated by pytest_configure below)

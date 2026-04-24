@@ -1,8 +1,8 @@
-# olefy_v2
+# xspct_scan
 
 [[_TOC_]]
 
-**olefy_v2** is an async HTTP daemon that scans Office, PDF, and HTML documents
+**xspct_scan** is an async HTTP daemon that scans Office, PDF, and HTML documents
 for malware indicators. It is designed to integrate with
 [Rspamd](https://rspamd.com/) and other mail-security pipelines.
 
@@ -26,8 +26,8 @@ for malware indicators. It is designed to integrate with
 ## Quick start
 
 ```bash
-pip install olefy_v2
-olefy_v2 /etc/olefy_v2/config.yml
+pip install xspct_scan
+xspct_scan /etc/xspct_scan/config.yml
 ```
 
 Scan a document:
@@ -54,7 +54,7 @@ curl -s -F "doc=@invoice.docx" http://localhost:8080/scan | python3 -m json.tool
 ### From PyPI
 
 ```bash
-pip install olefy_v2
+pip install xspct_scan
 ```
 
 ### Optional extras
@@ -66,14 +66,14 @@ pip install olefy_v2
 | `enrichment` | `jsbeautifier`, `quickjs`, `Pillow`, `pytesseract`, `pyzbar` | Dynamic JS analysis, image OCR/barcode |
 
 ```bash
-pip install "olefy_v2[uvloop,redis,enrichment]"
+pip install "xspct_scan[uvloop,redis,enrichment]"
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/heinlein-support/olefy_v2.git
-cd olefy_v2
+git clone https://github.com/heinlein-support/xspct_scan.git
+cd xspct_scan
 pip install -e ".[uvloop,redis,enrichment]"
 ```
 
@@ -82,19 +82,19 @@ pip install -e ".[uvloop,redis,enrichment]"
 Copy the example config and edit to suit:
 
 ```bash
-cp config/olefy_v2.example.yml /etc/olefy_v2/config.yml
-olefy_v2 /etc/olefy_v2/config.yml
+cp config/xspct_scan.example.yml /etc/xspct_scan/config.yml
+xspct_scan /etc/xspct_scan/config.yml
 ```
 
 Key settings:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `olefy_listen_address` | `0.0.0.0` | Bind address(es) |
-| `olefy_listen_port` | `8080` | Listen port |
-| `olefy_api_key` | _(empty)_ | Shared secret for `X-Api-Key` auth |
-| `olefy_redis_cache.enabled` | `false` | Enable Redis result cache |
-| `olefy_password_file` | | Path to wordlist for decrypting Office files |
+| `xspct_listen_address` | `0.0.0.0` | Bind address(es) |
+| `xspct_listen_port` | `8080` | Listen port |
+| `xspct_api_key` | _(empty)_ | Shared secret for `X-Api-Key` auth |
+| `xspct_redis_cache.enabled` | `false` | Enable Redis result cache |
+| `xspct_password_file` | | Path to wordlist for decrypting Office files |
 
 See [docs/configuration.md](docs/configuration.md) for the full reference.
 
@@ -145,16 +145,16 @@ See [docs/api-http.md](docs/api-http.md) for full request/response details.
 
 ## Decrypting password-protected files
 
-olefy_v2 automatically tries to decrypt encrypted **Office and PDF** documents
+xspct_scan automatically tries to decrypt encrypted **Office and PDF** documents
 using a password list loaded at startup.
 
 ### Global password list (config)
 
-Point `olefy_password_file` at a newline-delimited file of candidate passwords
+Point `xspct_password_file` at a newline-delimited file of candidate passwords
 (lines starting with `#` are ignored):
 
 ```yaml
-olefy_password_file: /etc/olefy_v2/passwords.txt
+xspct_password_file: /etc/xspct_scan/passwords.txt
 ```
 
 The file is loaded once on startup. If the file is not found, a small set of
@@ -202,13 +202,13 @@ When decryption succeeds, the response includes:
 
 ```ini
 [Unit]
-Description=olefy_v2 malware scanner
+Description=xspct_scan malware scanner
 After=network.target
 
 [Service]
 Type=simple
-User=olefy
-ExecStart=/usr/local/bin/olefy_v2 /etc/olefy_v2/config.yml
+User=xspct-scan
+ExecStart=/usr/local/bin/xspct_scan /etc/xspct_scan/config.yml
 Restart=on-failure
 
 [Install]
@@ -220,7 +220,7 @@ WantedBy=multi-user.target
 Full docs are in the [docs/](docs/) directory and can be built with Sphinx:
 
 ```bash
-pip install "olefy_v2[docs]"
+pip install "xspct_scan[docs]"
 sphinx-build docs docs/_build/html
 ```
 

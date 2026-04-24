@@ -75,7 +75,7 @@ Submit a document for malware analysis.
     "title": "Q1 Invoice",
     "creation_date": "D:20260115120000Z"
   },
-  "meta": {"script_name": "olefy_v2", "version": "2.0.0", "type": "MetaInformation"},
+  "meta": {"script_name": "xspct_scan", "version": "2.0.0", "type": "MetaInformation"},
   "status": "finished",
   "time_taken": 0.123
 }
@@ -125,21 +125,21 @@ curl -s -X POST http://localhost:8080/query \
 Prometheus-compatible counter/gauge text exposition.
 
 ```
-# HELP olefy_requests_total Total scan requests received
-# TYPE olefy_requests_total counter
-olefy_requests_total 42
-# HELP olefy_requests_finished Scan requests completed within timeout
-# TYPE olefy_requests_finished counter
-olefy_requests_finished 40
+# HELP xspct_requests_total Total scan requests received
+# TYPE xspct_requests_total counter
+xspct_requests_total 42
+# HELP xspct_requests_finished Scan requests completed within timeout
+# TYPE xspct_requests_finished counter
+xspct_requests_finished 40
 ...
 ```
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `olefy_requests_total` | counter | Total `/scan` requests received |
-| `olefy_requests_finished` | counter | Scans completed within timeout |
-| `olefy_requests_timeout` | counter | Scans that returned `202` |
-| `olefy_redis_hits` | counter | Redis cache hits |
-| `olefy_redis_misses` | counter | Redis cache misses |
-| `olefy_redis_errors` | counter | Redis errors |
-| `olefy_tasks_in_memory` | gauge | Current in-memory task/report entries |
+| `xspct_requests_total` | counter | Total `/scan` requests received |
+| `xspct_requests_finished` | counter | Scans completed within timeout |
+| `xspct_requests_timeout` | counter | Scans that returned `202` |
+| `xspct_redis_hits` | counter | Redis cache hits |
+| `xspct_redis_misses` | counter | Redis cache misses |
+| `xspct_redis_errors` | counter | Redis errors |
+| `xspct_tasks_in_memory` | gauge | Current in-memory task/report entries |

@@ -1,48 +1,48 @@
 # SPDX-License-Identifier: EUPL-1.2
 # Copyright (C) 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
-# olefy_v2 example configuration
+# xspct-scan example configuration
 # Pass this file as the first argument:
-#   olefy_v2 /etc/olefy_v2/config.yml
+#   xspct-scan /etc/xspct_scan/config.yml
 
 # Listen addresses (list or single string)
-olefy_listen_address:
+xspct_listen_address:
   - '0.0.0.0'
 
-olefy_listen_port: 8080
-olefy_listen_backlog: 256
+xspct_listen_port: 8080
+xspct_listen_backlog: 256
 
 # Logging: 10=DEBUG  20=INFO  30=WARNING  40=ERROR
-olefy_log_level: 20
-olefy_log_prefix: 'olefy'
+xspct_log_level: 20
+xspct_log_prefix: 'xspct-scan'
 
 # API key authentication (leave empty to disable)
-olefy_api_header: 'X-Api-Key'
-olefy_api_key: ''            # single string or YAML list for key rotation
-olefy_api_key_verify_fail: true
+xspct_api_header: 'X-Api-Key'
+xspct_api_key: ''            # single string or YAML list for key rotation
+xspct_api_key_verify_fail: true
 
 # Rspamd correlation header
-olefy_rspamd_header: 'X-Rspamd-ID'
+xspct_rspamd_header: 'X-Rspamd-ID'
 
 # TLS (optional)
-olefy_tls:
+xspct_tls:
   tls_enabled: false
   tls_cert: ''
   tls_key: ''
 
 # Redis result cache (optional)
-olefy_redis_cache:
+xspct_redis_cache:
   enabled: false
   host: localhost
   port: 6379
   user: ''
   password: ''
-  prefix: 'olefy:'
+  prefix: 'xspct:'
   expire: 3600      # seconds
   max_errors: 3     # circuit-breaker threshold
 
 # Periodic stats logging
-olefy_stats_enabled: true
-olefy_stats_interval: 60    # seconds
+xspct_stats_enabled: true
+xspct_stats_interval: 60    # seconds
 
 # Password list for decrypting encrypted Office documents
-olefy_password_file: '10k-most-common.txt'
+xspct_password_file: '10k-most-common.txt'

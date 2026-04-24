@@ -2,7 +2,7 @@
 
 ## 2.0.0 — 2026-04-18
 
-Initial public release of olefy_v2.
+Initial public release of xspct_scan.
 
 ### Features
 

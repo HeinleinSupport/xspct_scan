@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: EUPL-1.2
 # Copyright (C) 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
-# Sphinx configuration for olefy_v2
+# Sphinx configuration for xspct_scan
 
 import sys
 from pathlib import Path
@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / 'src'))
 
 # -- Project information -------------------------------------------------------
-project   = 'olefy_v2'
+project   = 'xspct_scan'
 author    = 'Carsten Rosenberg'
 copyright = '2026, Carsten Rosenberg'
 release   = '2.0.0'
@@ -36,5 +36,5 @@ autodoc_typehints_format   = 'short'
 # -- HTML output ---------------------------------------------------------------
 html_theme         = 'furo'
 html_static_path   = ['_static']
-html_title         = 'olefy_v2'
-html_short_title   = 'olefy_v2'
+html_title         = 'xspct_scan'
+html_short_title   = 'xspct_scan'

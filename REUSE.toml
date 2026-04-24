@@ -21,7 +21,7 @@ SPDX-License-Identifier = "EUPL-1.2"
 # ── Agent / documentation files ─────────────────────────────────────────────
 [[annotations]]
 path = [
-    ".github/agents/olefy-feature.agent.md",
+    ".github/agents/xspct-feature.agent.md",
     ".gitignore",
     ".reuseignore",
     "docs/**",
@@ -33,8 +33,8 @@ SPDX-License-Identifier = "EUPL-1.2"
 [[annotations]]
 path = [
     ".pytest_cache/**",
-    "src/olefy_v2.egg-info/**",
-    "src/olefy_v2/__pycache__/**",
+    "src/xspct_scan.egg-info/**",
+    "src/xspct_scan/__pycache__/**",
     "tests/__pycache__/**",
     "docs/_build/**",
     "docs/_build/**/**",

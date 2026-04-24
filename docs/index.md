@@ -1,6 +1,6 @@
-# olefy_v2
+# xspct_scan
 
-**olefy_v2** is an async HTTP daemon that scans Office, PDF, and HTML documents
+**xspct_scan** is an async HTTP daemon that scans Office, PDF, and HTML documents
 for malware indicators using [oletools](https://github.com/decalage2/oletools),
 [msoffcrypto-tool](https://github.com/nolze/msoffcrypto-tool), and
 [python-magic](https://github.com/ahupp/python-magic).
@@ -22,8 +22,8 @@ changelog
 ## Quick start
 
 ```bash
-pip install olefy_v2
-olefy_v2 /etc/olefy_v2/config.yml
+pip install xspct_scan
+xspct_scan /etc/xspct_scan/config.yml
 ```
 
 Then scan a document:
