@@ -4314,12 +4314,24 @@ class InspectorDaemon:
             '# HELP xspct_background_errors Background scans that raised an exception',
             '# TYPE xspct_background_errors counter',
             f'xspct_background_errors {stats["background_errors"]}',
+            '# HELP xspct_foreground_slots_total Configured foreground semaphore slots',
+            '# TYPE xspct_foreground_slots_total gauge',
+            f'xspct_foreground_slots_total {int(config.get("xspct_foreground_slots", 16))}',
             '# HELP xspct_foreground_slots_free Current free foreground semaphore slots',
             '# TYPE xspct_foreground_slots_free gauge',
             f'xspct_foreground_slots_free {self._fg_sem._value if self._fg_sem else 0}',
+            '# HELP xspct_foreground_slots_used Current in-use foreground semaphore slots',
+            '# TYPE xspct_foreground_slots_used gauge',
+            f'xspct_foreground_slots_used {int(config.get("xspct_foreground_slots", 16)) - (self._fg_sem._value if self._fg_sem else 0)}',
+            '# HELP xspct_background_slots_total Configured background semaphore slots',
+            '# TYPE xspct_background_slots_total gauge',
+            f'xspct_background_slots_total {int(config.get("xspct_background_slots", 4))}',
             '# HELP xspct_background_slots_free Current free background semaphore slots',
             '# TYPE xspct_background_slots_free gauge',
             f'xspct_background_slots_free {self._bg_sem._value if self._bg_sem else 0}',
+            '# HELP xspct_background_slots_used Current in-use background semaphore slots',
+            '# TYPE xspct_background_slots_used gauge',
+            f'xspct_background_slots_used {int(config.get("xspct_background_slots", 4)) - (self._bg_sem._value if self._bg_sem else 0)}',
             # --- ClamAV engine ---
             '# HELP xspct_clamav_clean Files scanned clean by ClamAV',
             '# TYPE xspct_clamav_clean counter',
@@ -4479,32 +4491,99 @@ class InspectorDaemon:
 
 async def _log_stats_periodically(daemon: InspectorDaemon) -> None:
     interval = int(config['xspct_stats_interval'])
+
+    # Snapshots of cumulative counters taken at the end of the previous
+    # interval.  Deltas (current − previous) are logged so that a quiet
+    # period shows zeros rather than repeating the lifetime totals.
+    _prev: dict = {
+        'requests_total':    0,
+        'requests_finished': 0,
+        'requests_timeout':  0,
+        'redis_hits':        0,
+        'redis_misses':      0,
+    }
+    # Per-analyzer previous snapshot: {name: {calls, hits, ms_total}}
+    _prev_az: dict = {}
+
     while True:
         await asyncio.sleep(interval)
-        total         = stats['requests_total']
-        finished      = stats['requests_finished']
-        timeout       = stats['requests_timeout']
-        redis_hits    = stats['redis_hits']
-        redis_misses  = stats['redis_misses']
-        total_lookups = redis_hits + redis_misses
-        hit_rate      = (redis_hits / total_lookups * 100) if total_lookups > 0 else 0.0
+
+        # --- global counters ---
+        total    = stats['requests_total']
+        finished = stats['requests_finished']
+        timeout  = stats['requests_timeout']
+        r_hits   = stats['redis_hits']
+        r_misses = stats['redis_misses']
+
+        d_total    = total    - _prev['requests_total']
+        d_finished = finished - _prev['requests_finished']
+        d_timeout  = timeout  - _prev['requests_timeout']
+        d_hits     = r_hits   - _prev['redis_hits']
+        d_misses   = r_misses - _prev['redis_misses']
+
+        d_lookups = d_hits + d_misses
+        hit_rate  = (d_hits / d_lookups * 100) if d_lookups > 0 else 0.0
+
         logger.info(
-            'STATS requests_total=%d finished=%d timeout=%d '
-            'redis_hits=%d redis_misses=%d hit_rate=%.1f%% tasks_in_memory=%d',
-            total, finished, timeout,
-            redis_hits, redis_misses, hit_rate, len(daemon.tasks),
+            'STATS requests_total=%d(+%d) finished=%d(+%d) timeout=%d(+%d) '
+            'redis_hits=%d(+%d) redis_misses=%d(+%d) hit_rate=%.1f%% tasks_in_memory=%d',
+            total, d_total, finished, d_finished, timeout, d_timeout,
+            r_hits, d_hits, r_misses, d_misses, hit_rate, len(daemon.tasks),
         )
+
+        _prev['requests_total']    = total
+        _prev['requests_finished'] = finished
+        _prev['requests_timeout']  = timeout
+        _prev['redis_hits']        = r_hits
+        _prev['redis_misses']      = r_misses
+
+        # --- slot fill rate (instantaneous snapshot) ---
+        fg_total = int(config.get('xspct_foreground_slots', 16))
+        bg_total = int(config.get('xspct_background_slots', 4))
+        fg_free  = daemon._fg_sem._value if daemon._fg_sem else fg_total
+        bg_free  = daemon._bg_sem._value if daemon._bg_sem else bg_total
+        fg_used  = fg_total - fg_free
+        bg_used  = bg_total - bg_free
+        fg_pct   = fg_used / fg_total * 100 if fg_total else 0.0
+        bg_pct   = bg_used / bg_total * 100 if bg_total else 0.0
+        logger.info(
+            'SLOTS fg=%d/%d(%.0f%%) bg=%d/%d(%.0f%%) '
+            'fg_overloaded=%d(+%d) bg_rejected=%d(+%d) bg_completed=%d bg_errors=%d',
+            fg_used, fg_total, fg_pct,
+            bg_used, bg_total, bg_pct,
+            stats['foreground_overloaded'],
+            stats['foreground_overloaded'] - _prev.get('foreground_overloaded', 0),
+            stats['background_rejected'],
+            stats['background_rejected'] - _prev.get('background_rejected', 0),
+            stats['background_completed'],
+            stats['background_errors'],
+        )
+        _prev['foreground_overloaded'] = stats['foreground_overloaded']
+        _prev['background_rejected']   = stats['background_rejected']
+
+        # --- per-analyzer counters ---
         for name, e in sorted(stats['analyzer_stats'].items()):
-            calls = e['calls']
-            hits  = e['hits']
-            avg   = e['ms_total'] / calls if calls else 0.0
-            pct   = hits / calls * 100 if calls else 0.0
+            calls    = e['calls']
+            hits     = e['hits']
+            ms_total = e['ms_total']
+
+            prev    = _prev_az.get(name, {'calls': 0, 'hits': 0, 'ms_total': 0})
+            d_calls = calls    - prev['calls']
+            d_hits  = hits     - prev['hits']
+            d_ms    = ms_total - prev['ms_total']
+
+            # Average over the new calls in this window only.
+            avg = d_ms / d_calls if d_calls else 0.0
+            pct = d_hits / d_calls * 100 if d_calls else 0.0
+
             logger.info(
-                'ANALYZER %-12s calls=%d hits=%d(%.0f%%) '
+                'ANALYZER %-12s calls=%d(+%d) hits=%d(+%d)(%.0f%%) '
                 'time avg=%.0fms min=%dms max=%dms',
-                name, calls, hits, pct,
+                name, calls, d_calls, hits, d_hits, pct,
                 avg, e['ms_min'] or 0, e['ms_max'],
             )
+
+            _prev_az[name] = {'calls': calls, 'hits': hits, 'ms_total': ms_total}
 
 
 # ---------------------------------------------------------------------------
