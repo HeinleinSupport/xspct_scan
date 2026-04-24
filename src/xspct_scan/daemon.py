@@ -68,6 +68,20 @@ except ImportError:
     HAS_QUICKJS = False
 
 try:
+    from tree_sitter import (
+        Language as _TSLanguage,
+        Parser as _TSParser,
+        Query as _TSQuery,
+        QueryCursor as _TSQueryCursor,
+    )
+    import tree_sitter_javascript as _ts_js
+    _TS_JS_LANGUAGE = _TSLanguage(_ts_js.language())
+    _TS_JS_PARSER = _TSParser(_TS_JS_LANGUAGE)
+    HAS_TREESITTER = True
+except Exception:
+    HAS_TREESITTER = False
+
+try:
     from PIL import Image as _PILImage
     import pytesseract as _pytesseract
     HAS_OCR = True
@@ -1269,6 +1283,54 @@ class InspectorDaemon:
     # JavaScript static analysis + sandbox
     # ------------------------------------------------------------------
 
+    # tree-sitter queries — compiled once at class definition time (tree-sitter >= 0.25).
+    # Each entry: (Query, keyword, description)
+    if HAS_TREESITTER:
+        _TS_QUERIES: list[tuple] = [
+            # Direct calls: eval(), unescape(), atob(), Function(), escape()
+            (
+                _TSQuery(_TS_JS_LANGUAGE, '''
+                    (call_expression
+                        function: (identifier) @match
+                        (#match? @match "^(eval|unescape|atob|escape|Function)$"))
+                '''),
+                'ts-eval-call',
+                'Direct call to dangerous function (AST)',
+            ),
+            # Member calls: document.write(), String.fromCharCode(),
+            #               app.launchURL(), app.openDoc(), app.launchApp(),
+            #               util.printf(), execScript()
+            (
+                _TSQuery(_TS_JS_LANGUAGE, '''
+                    (call_expression
+                        function: (member_expression
+                            property: (property_identifier) @match)
+                        (#match? @match
+                            "^(write|fromCharCode|launchURL|openDoc|launchApp|execScript)$"))
+                '''),
+                'ts-member-call',
+                'Dangerous member-function call (AST)',
+            ),
+            # Bracket/computed property access: window["eval"], this["atob"], …
+            (
+                _TSQuery(_TS_JS_LANGUAGE, '''
+                    (subscript_expression
+                        index: (string (string_fragment) @match)
+                        (#match? @match
+                            "^(eval|Function|atob|unescape|escape|write|execScript)$"))
+                '''),
+                'bracket-eval',
+                'Dangerous function accessed via bracket notation — obfuscation pattern (AST)',
+            ),
+        ]
+        # String-literal extractor — all static string values in the AST
+        _TS_STRING_QUERY: '_TSQuery | None' = _TSQuery(_TS_JS_LANGUAGE, '''
+            (string (string_fragment) @s)
+        ''')
+    else:
+        _TS_QUERIES = []
+        _TS_STRING_QUERY = None
+
     # Patterns that indicate a script is worth looking at more closely
     _JS_SUSPICIOUS = [
         (r'\beval\s*\(',               'SuspiciousJS', 'eval()',               'Use of eval() for dynamic code execution'),
@@ -1344,7 +1406,50 @@ class InspectorDaemon:
                 source_label, len(js_src), _JS_BEAUTIFY_LIMIT,
             )
 
-        # -- 2. Static pattern scan -------------------------------------------
+        # -- 2. tree-sitter AST scan ------------------------------------------
+        _JS_TS_LIMIT = 512 * 1024  # 512 KB — parse overhead guard (same as beautifier)
+        if HAS_TREESITTER and len(js_src) <= _JS_TS_LIMIT:
+            try:
+                _ts_tree = _TS_JS_PARSER.parse(bytes(js_src, 'utf-8'))
+                _ts_root = _ts_tree.root_node
+                for _ts_q, keyword, desc in self._TS_QUERIES:
+                    if any(True for _ in _TSQueryCursor(_ts_q).matches(_ts_root)):
+                        entry = {
+                            'type': 'SuspiciousJS',
+                            'keyword': keyword,
+                            'description': f'{desc} [in {source_label}]' if source_label else desc,
+                        }
+                        if entry not in hits:
+                            hits.append(entry)
+                # Extract static string literals and scan for URLs / IOCs.
+                # QueryCursor.matches() yields (pattern_idx, {capture_name: [Node, ...]}).
+                if self._TS_STRING_QUERY is not None:
+                    _seen_urls: set[str] = set()
+                    for _, _cap in _TSQueryCursor(self._TS_STRING_QUERY).matches(_ts_root):
+                        for _node in _cap.get('s', []):
+                            _val = _node.text.decode('utf-8', errors='replace')
+                            if re.search(r'https?://', _val):
+                                _safe = re.sub(r'[\x00-\x1f\x7f]', ' ', _val)[:120]
+                                if _safe not in _seen_urls:
+                                    _seen_urls.add(_safe)
+                                    hits.append({
+                                        'type': 'SuspiciousJS',
+                                        'keyword': 'static-url',
+                                        'description': (
+                                            f'URL in static JS string literal'
+                                            f'{" [in " + source_label + "]" if source_label else ""}'
+                                            f': {_safe}'
+                                        ),
+                                    })
+            except Exception as exc:
+                logger.debug('tree-sitter JS parse failed (%s): %s', source_label, exc)
+        elif HAS_TREESITTER:
+            logger.debug(
+                'tree-sitter JS scan skipped for %s: input too large (%d bytes > %d)',
+                source_label, len(js_src), _JS_TS_LIMIT,
+            )
+
+        # -- 3. Static pattern scan -------------------------------------------
         for pattern, a_type, keyword, desc in self._JS_SUSPICIOUS:
             if re.search(pattern, js_src):
                 entry = {
