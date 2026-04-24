@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: EUPL-1.2
 # Copyright (C) 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
 """
-test_olefy.py — Comprehensive pytest test suite for InspectorDaemon / xspct_scan.daemon.
+test_xspct_scan.py — Comprehensive pytest test suite for InspectorDaemon / xspct_scan.daemon.
 
 Coverage:
   Unit tests (no HTTP, direct method calls):

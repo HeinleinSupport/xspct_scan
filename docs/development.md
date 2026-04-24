@@ -61,7 +61,7 @@ pytest -v -k "TestScan or TestQuery or TestAdmin"
 pytest -v -k "not TestScan and not TestQuery and not TestAuth and not TestMetrics and not TestHealth and not TestOpenApi"
 
 # Run a single test
-pytest "tests/test_olefy.py::TestAnalyzeArchive::test_zip_with_pdf_extracted" -v
+pytest "tests/test_xspct_scan.py::TestAnalyzeArchive::test_zip_with_pdf_extracted" -v
 
 # Run with oletools test data for real-file fixture tests
 pytest --oletools-testdata /path/to/oletools/tests/test-data
@@ -149,14 +149,14 @@ pip install -e ".[dev,enrichment,openapi,advanced]"
 tests/
 ├── conftest.py          # pytest configuration, shared constants, autouse fixtures
 ├── __init__.py
-├── test_olefy.py        # all tests (unit + integration)
+├── test_xspct_scan.py   # all tests (unit + integration)
 └── fixtures/
     ├── autostart-encrypt-standardpassword.xls
     ├── RTF-Spec-1.7.rtf
     └── passwords.txt
 ```
 
-`test_olefy.py` is organised into test classes:
+`test_xspct_scan.py` is organised into test classes:
 
 | Class | Type | What it tests |
 |-------|------|---------------|

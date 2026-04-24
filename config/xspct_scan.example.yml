@@ -82,7 +82,7 @@ xspct_analyzers:
   image:      {enabled: true}
   archive:    {enabled: true}
   iocs:       {enabled: true}
-  javascript: {enabled: true}
+  javascript: {enabled: true, quickjs: false}  # set quickjs: true to enable sandboxed JS emulation
   text:       {enabled: true}   # plain-text / script files (feeds YARA + iocsearcher)
 
 # When true, the full extracted document text is returned as 'text_full'.

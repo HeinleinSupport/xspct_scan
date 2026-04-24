@@ -21,7 +21,9 @@ a simple HTTP API for on-demand scanning.
 - **RTF** — embedded object extraction via `rtfobj` (opt-in per request)
 - **Dynamic JS emulation** — sandboxed execution with
   [quickjs](https://github.com/PetterS/quickjs) and deobfuscation with
-  [jsbeautifier](https://github.com/beautify-web/js-beautify) (optional)
+  [jsbeautifier](https://github.com/beautify-web/js-beautify) (optional;
+  QuickJS emulation is **disabled by default** — enable with
+  `xspct_analyzers.javascript.quickjs: true`)
 
 ### Enrichment
 - **IOC extraction** — URLs, IPs, and domains from all document types
@@ -102,7 +104,7 @@ pip install xspct_scan
 |-------|----------|----------|
 | `uvloop` | `uvloop` | Higher-throughput async event loop |
 | `redis` | `redis[asyncio]` | Persistent result cache across restarts |
-| `enrichment` | `Pillow`, `pytesseract`, `pyzbar`, `jsbeautifier`, `quickjs` | Image OCR/barcode/EXIF, dynamic JS analysis |
+| `enrichment` | `Pillow`, `pytesseract`, `pyzbar`, `jsbeautifier`, `quickjs` | Image OCR/barcode/EXIF, JS deobfuscation (QuickJS sandbox opt-in via config) |
 | `openapi` | `pydantic>=2.0` | OpenAPI 3.0 spec + ReDoc UI |
 | `advanced` | `yara-python`, `yara-x`, `iocsearcher`, `py7zr`, `SFlock2` | YARA scanning, extended IOCs, sandboxed archive extraction (ZIP/RAR/7z/EML/MSG/…) |
 
@@ -138,6 +140,7 @@ Key settings:
 | `xspct_redis_cache.enabled` | `false` | Enable Redis result cache |
 | `xspct_password_file` | | Path to wordlist for decrypting encrypted files |
 | `xspct_analyzers` | _(all enabled)_ | Per-analyzer enable/disable + options |
+| `xspct_analyzers.javascript.quickjs` | `false` | Enable QuickJS sandbox emulation for JS |
 | `xspct_include_text` | `false` | Include full extracted text in reports |
 | `xspct_archive_max_depth` | `2` | Recursion limit for archive extraction |
 | `xspct_foreground_slots` | `16` | Max concurrent scans holding a client connection open |

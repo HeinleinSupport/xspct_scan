@@ -85,6 +85,15 @@ Requires the `redis` extra (`pip install "xspct_scan[redis]"`).
 | `xspct_stats_enabled` | `true` | Log runtime counters periodically. |
 | `xspct_stats_interval` | `60` | Interval in seconds between stats log lines. |
 
+Each stats interval emits three types of log lines:
+
+- **`STATS`** — global counters in `total(+delta)` format so that a quiet
+  period shows `(+0)` rather than repeating the same lifetime totals.
+- **`SLOTS`** — instantaneous foreground/background slot fill-rate
+  (`fg=used/total(%)`) plus per-interval deltas for rejection counters.
+- **`ANALYZER`** — per-analyzer call counts, hit rates, and timing
+  averaged over the current interval window only.
+
 ### Password list
 
 | Key | Default | Description |
@@ -105,7 +114,7 @@ xspct_analyzers:
   archive:    { enabled: true }
   text:       { enabled: true }
   iocs:       { enabled: true }
-  javascript: { enabled: true }
+  javascript: { enabled: true, quickjs: false }
   yara:       { enabled: false, rules_path: '' }
   yara_x:     { enabled: false, rules_path: '' }
 ```
@@ -113,6 +122,7 @@ xspct_analyzers:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `xspct_analyzers.<name>.enabled` | `true` | Enable/disable the named analyzer. |
+| `xspct_analyzers.javascript.quickjs` | `false` | Enable sandboxed JS emulation via QuickJS. Disabled by default because it adds significant per-request CPU time. Set to `true` to activate (requires the `enrichment` extra). |
 | `xspct_analyzers.yara.rules_path` | `` | Path to a YARA rules file or directory. Required when `yara.enabled` is `true`. |
 | `xspct_analyzers.yara_x.rules_path` | `` | Same as above for the yara-x engine. |
 
@@ -191,13 +201,18 @@ feedback loop where slow background scans starve new foreground requests.
 thread capacity of downstream workers (e.g. `clamd MaxThreads`).  Start with
 an 80/20 split and tune using these metrics:
 
-| Metric | High value means |
-|--------|-----------------|
-| `xspct_foreground_overloaded` | Increase `foreground_slots` or reduce per-scan latency |
-| `xspct_background_rejected` | Increase `background_slots` or investigate which file types are slow |
-| `xspct_background_completed` | Background scans finishing — useful baseline for business case |
-| `xspct_background_errors` | Background scan exceptions — check logs |
-| `xspct_foreground_slots_free` | Should be close to `foreground_slots` under normal load |
+| Metric | Type | High value means |
+|--------|------|------------------|
+| `xspct_foreground_overloaded` | counter | Increase `foreground_slots` or reduce per-scan latency |
+| `xspct_background_rejected` | counter | Increase `background_slots` or investigate which file types are slow |
+| `xspct_background_completed` | counter | Background scans finishing — useful baseline for business case |
+| `xspct_background_errors` | counter | Background scan exceptions — check logs |
+| `xspct_foreground_slots_total` | gauge | Configured foreground capacity |
+| `xspct_foreground_slots_free` | gauge | Should be close to `foreground_slots` under normal load |
+| `xspct_foreground_slots_used` | gauge | Instantaneous in-use foreground slots (`total − free`) |
+| `xspct_background_slots_total` | gauge | Configured background capacity |
+| `xspct_background_slots_free` | gauge | Available background slots |
+| `xspct_background_slots_used` | gauge | Instantaneous in-use background slots |
 
 ### IOC URL / domain exclusion list
 
