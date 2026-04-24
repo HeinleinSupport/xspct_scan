@@ -18,6 +18,7 @@ installation
 configuration
 api-http
 api-python
+development
 changelog
 ```
 
