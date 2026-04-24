@@ -82,6 +82,12 @@ except Exception:
     HAS_TREESITTER = False
 
 try:
+    import clamd as _clamd
+    HAS_CLAMD = True
+except ImportError:
+    HAS_CLAMD = False
+
+try:
     from PIL import Image as _PILImage
     import pytesseract as _pytesseract
     HAS_OCR = True
@@ -1033,6 +1039,26 @@ class InspectorDaemon:
             config.get('xspct_foreground_slots', 16),
             config.get('xspct_background_slots', 4),
         )
+        if HAS_CLAMD and config['xspct_clamav']['enabled']:
+            cv = config['xspct_clamav']
+            timeout = int(cv.get('timeout', 60))
+            try:
+                if cv.get('socket'):
+                    self._clamd = _clamd.ClamdUnixSocket(cv['socket'], timeout=timeout)
+                else:
+                    self._clamd = _clamd.ClamdNetworkSocket(
+                        cv.get('host', '127.0.0.1'), int(cv.get('port', 3310)),
+                        timeout=timeout,
+                    )
+                self._clamd.ping()
+                self._clamav_version = self._clamd.version()
+                logger.info('Connected to ClamAV: %s', self._clamav_version)
+            except Exception as exc:
+                logger.error('ClamAV connection failed: %s — ClamAV engine disabled', exc)
+                self._clamd = None
+        elif config['xspct_clamav']['enabled'] and not HAS_CLAMD:
+            logger.warning('ClamAV requested but clamd library not found. Engine disabled.')
+
         if HAS_REDIS and config['xspct_redis_cache']['enabled']:
             rc = config['xspct_redis_cache']
             url = f"redis://{rc['host']}:{rc['port']}"
