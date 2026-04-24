@@ -870,7 +870,8 @@ class InspectorDaemon:
     # PDF analysis
     # ------------------------------------------------------------------
 
-    def analyze_pdf(self, data: bytes) -> 'dict | None':
+    def analyze_pdf(self, data: bytes,
+                    custom_passwords: 'list | None' = None) -> 'dict | None':
         """Analyse a PDF document for malware indicators.
 
         When PyMuPDF (``fitz``) is available the PDF object graph is walked
@@ -880,8 +881,13 @@ class InspectorDaemon:
         model rather than raw byte scanning.  A plain byte-scan fallback is
         used when PyMuPDF is not installed.
 
+        Encrypted PDFs are decrypted automatically: *custom_passwords* are
+        tried first, followed by the daemon-wide :attr:`passwords` list.
+
         Args:
             data: Raw PDF bytes. Must start with ``%PDF``.
+            custom_passwords: Extra passwords to try before the built-in
+                list (same semantics as for Office decryption).
 
         Returns:
             A report dict on success, or ``None`` if *data* is not a PDF.
@@ -893,6 +899,10 @@ class InspectorDaemon:
                 - **has_launch** (bool)
                 - **has_forms** (bool)
                 - **is_encrypted** (bool)
+                - **decrypted** (bool): ``True`` when an encrypted PDF was
+                  successfully decrypted with a password.
+                - **decryption_password** (str | None): The password that
+                  unlocked the PDF, or ``None``.
                 - **analyses** (list[dict]): Detected indicators.
                 - **iocs** (dict): Extracted URLs, IPs, and domains.
                 - **text_preview** (str)
@@ -904,15 +914,17 @@ class InspectorDaemon:
         """
         if not data.startswith(b'%PDF'):
             return None
+        passwords = list(custom_passwords or []) + self.passwords
         report: dict = {
             'has_javascript': False, 'has_openaction': False,
             'has_embedded_files': False, 'has_launch': False,
             'has_forms': False, 'is_encrypted': False,
+            'decrypted': False, 'decryption_password': None,
             'analyses': [], 'iocs': {'urls': [], 'ips': [], 'domains': []},
         }
 
         if HAS_PYMUPDF:
-            self._analyze_pdf_pymupdf(data, report)
+            self._analyze_pdf_pymupdf(data, report, passwords)
         else:
             logger.debug('PyMuPDF not available — falling back to byte-scan PDF analysis')
             self._analyze_pdf_bytescan(data, report)
@@ -923,7 +935,8 @@ class InspectorDaemon:
         report['text_preview'] = self.extract_text_preview(data, 'application/pdf')
         return report
 
-    def _analyze_pdf_pymupdf(self, data: bytes, report: dict) -> None:
+    def _analyze_pdf_pymupdf(self, data: bytes, report: dict,
+                              passwords: list) -> None:
         """Deep PDF inspection using the PyMuPDF object graph.
 
         Populates *report* in-place.  Called by :meth:`analyze_pdf` when
@@ -932,6 +945,8 @@ class InspectorDaemon:
         Args:
             data: Raw PDF bytes.
             report: Accumulator dict to populate.
+            passwords: Ordered list of passwords to try when the PDF is
+                encrypted (custom passwords first, then the daemon-wide list).
         """
         def _add(a_type: str, keyword: str, desc: str) -> None:
             entry = {'type': a_type, 'keyword': keyword, 'description': desc}
@@ -951,8 +966,21 @@ class InspectorDaemon:
             return
 
         try:
-            # -- Encryption / permissions ----------------------------------
-            if doc.is_encrypted:
+            # -- Encryption / password decryption --------------------------
+            if doc.needs_pass:
+                report['is_encrypted'] = True
+                for pwd in passwords:
+                    if doc.authenticate(pwd):
+                        report['decrypted'] = True
+                        report['decryption_password'] = pwd
+                        logger.info('PDF decrypted with password: %s', pwd)
+                        break
+                else:
+                    _add('Encryption', '/Encrypt',
+                         'PDF is encrypted — no matching password found')
+                    return
+            elif doc.is_encrypted:
+                # Opened with the empty/owner password (no password needed)
                 report['is_encrypted'] = True
                 _add('Encryption', '/Encrypt', 'PDF is encrypted')
 
@@ -1866,7 +1894,7 @@ class InspectorDaemon:
         for t in types_to_run:
             res = None
             if t == 'pdf':
-                res = self.analyze_pdf(data)
+                res = self.analyze_pdf(data, custom_passwords=custom_passwords)
             elif t == 'html':
                 res = self.analyze_html(data)
             elif t == 'office':
