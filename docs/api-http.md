@@ -38,7 +38,7 @@ Submit a document for malware analysis.
 | `doc` | ✓ | The file to scan (any filename). |
 | `file_mime` | | Override the detected MIME type. |
 | `file_type` | | Override the detected file description string. |
-| `passwords` | | Comma- or newline-separated passwords to try when decrypting encrypted Office files. |
+| `passwords` | | Comma- or newline-separated passwords to try when decrypting encrypted Office **or PDF** files. Custom passwords are tried before the daemon-wide list. |
 
 **Query parameters**
 
@@ -57,6 +57,7 @@ Submit a document for malware analysis.
   "file_description": "Microsoft Word 2007+",
   "detected_type": "office",
   "has_macro": true,
+  "is_encrypted": false,
   "analyses": [
     {"type": "AutoExec", "keyword": "AutoOpen", "description": "..."}
   ],
@@ -69,6 +70,11 @@ Submit a document for malware analysis.
   "decrypted": false,
   "decryption_password": null,
   "text_preview": "...",
+  "meta_document": {
+    "author": "John Doe",
+    "title": "Q1 Invoice",
+    "creation_date": "D:20260115120000Z"
+  },
   "meta": {"script_name": "olefy_v2", "version": "2.0.0", "type": "MetaInformation"},
   "status": "finished",
   "time_taken": 0.123

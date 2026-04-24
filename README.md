@@ -1,5 +1,7 @@
 # olefy_v2
 
+[[_TOC_]]
+
 **olefy_v2** is an async HTTP daemon that scans Office, PDF, and HTML documents
 for malware indicators. It is designed to integrate with
 [Rspamd](https://rspamd.com/) and other mail-security pipelines.
@@ -10,7 +12,8 @@ for malware indicators. It is designed to integrate with
   [oletools](https://github.com/decalage2/oletools); decrypts password-protected
   files with [msoffcrypto-tool](https://github.com/nolze/msoffcrypto-tool)
 - **PDF** — deep content analysis via [PyMuPDF](https://pymupdf.readthedocs.io/);
-  extracts embedded JavaScript, URIs, and document metadata
+  extracts embedded JavaScript, URIs, and document metadata; decrypts
+  password-protected PDFs using the same password list as Office files
 - **HTML** — script extraction, CSS hiding detection, external resource analysis
 - **RTF** — embedded object extraction via `rtfobj` (opt-in per request)
 - **Dynamic JS emulation** — optional sandboxed execution with
@@ -140,10 +143,10 @@ curl "http://localhost:8080/query?hash=sha256..."
 
 See [docs/api-http.md](docs/api-http.md) for full request/response details.
 
-## Decrypting password-protected Office files
+## Decrypting password-protected files
 
-olefy_v2 automatically tries to decrypt encrypted Office documents using a
-password list loaded at startup.
+olefy_v2 automatically tries to decrypt encrypted **Office and PDF** documents
+using a password list loaded at startup.
 
 ### Global password list (config)
 
@@ -157,15 +160,24 @@ olefy_password_file: /etc/olefy_v2/passwords.txt
 The file is loaded once on startup. If the file is not found, a small set of
 built-in defaults (`infected`, `virus`, `malware`, …) is used instead.
 
+For PDFs, PyMuPDF's `authenticate()` API is used; for Office files,
+`msoffcrypto-tool` handles decryption. Both use the same password list.
+
 ### Per-request passwords
 
 Extra passwords can be supplied with each `/scan` request via the `passwords`
-field. They are tried **before** the global list:
+field. They are tried **before** the global list and work for both Office and PDF files:
 
 ```bash
 # comma-separated
 curl -s \
   -F "doc=@protected.xlsx" \
+  -F "passwords=Secret123,CompanyPass" \
+  http://localhost:8080/scan
+
+# PDF example
+curl -s \
+  -F "doc=@invoice.pdf" \
   -F "passwords=Secret123,CompanyPass" \
   http://localhost:8080/scan
 
