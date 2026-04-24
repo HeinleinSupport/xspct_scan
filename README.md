@@ -17,7 +17,10 @@ a simple HTTP API for on-demand scanning.
 - **PDF** — deep content analysis via [PyMuPDF](https://pymupdf.readthedocs.io/)
   (JavaScript, URIs, document metadata, encryption) plus structural keyword
   counts via vendored [pdfid](https://github.com/DidierStevens/DidierStevensSuite)
-- **HTML** — script extraction, CSS-hiding detection, external resource tracking
+- **HTML / SVG** — script extraction, CSS-hiding detection, external resource
+  tracking; SVG files (`image/svg+xml`) are treated as HTML because they are
+  XML-based and can carry `<script>` elements, inline event handlers, and
+  external `href`/`src` references
 - **RTF** — embedded object extraction via `rtfobj` (opt-in per request)
 - **Dynamic JS emulation** — sandboxed execution with
   [quickjs](https://github.com/PetterS/quickjs) and deobfuscation with
@@ -34,9 +37,12 @@ a simple HTTP API for on-demand scanning.
   optional Hyperscan acceleration) and/or
   [yara-x](https://github.com/VirusTotal/yara-x) (Rust rewrite); both engines
   can run simultaneously for comparison
-- **Image analysis** — OCR via [pytesseract](https://github.com/madmaze/pytesseract),
-  QR/barcode decode via [pyzbar](https://github.com/NaturalHistoryMuseum/pyzbar),
-  EXIF metadata extraction with GPS flagging (optional)
+- **Image analysis** — OCR text extraction via
+  [pytesseract](https://github.com/madmaze/pytesseract) (wraps Tesseract),
+  QR-code and barcode decoding via
+  [pyzbar](https://github.com/NaturalHistoryMuseum/pyzbar) (requires the
+  `libzbar0` system library), and EXIF metadata extraction with GPS coordinate
+  flagging (optional; all three require `[enrichment]`)
 - **Archive extraction** — sandboxed extraction via
   [SFlock2](https://github.com/doomedraven/sflock2) (zipjail usermode sandbox)
   covering ZIP, 7z, RAR, TAR/TGZ/TBZ2, CAB, ACE, ISO, EML, MSG, MSO, lzip,
@@ -104,7 +110,7 @@ pip install xspct_scan
 |-------|----------|----------|
 | `uvloop` | `uvloop` | Higher-throughput async event loop |
 | `redis` | `redis[asyncio]` | Persistent result cache across restarts |
-| `enrichment` | `Pillow`, `pytesseract`, `pyzbar`, `jsbeautifier`, `quickjs` | Image OCR/barcode/EXIF, JS deobfuscation (QuickJS sandbox opt-in via config) |
+| `enrichment` | `Pillow`, `pytesseract`, `pyzbar`, `clamd`, `jsbeautifier`, `quickjs`, `tree-sitter` | Image OCR/barcode/EXIF, ClamAV integration, JS deobfuscation (QuickJS sandbox opt-in via config) |
 | `openapi` | `pydantic>=2.0` | OpenAPI 3.0 spec + ReDoc UI |
 | `advanced` | `yara-python`, `yara-x`, `iocsearcher`, `py7zr`, `SFlock2` | YARA scanning, extended IOCs, sandboxed archive extraction (ZIP/RAR/7z/EML/MSG/…) |
 
@@ -280,6 +286,101 @@ With SFlock2 installed, the following formats are extracted in-sandbox:
 ZIP, 7z, RAR, TAR, TAR.GZ, TBZ2, CAB, ACE, ISO, EML, MSG, MSO, lzip, ZPAQ.
 **EML and MSG** files are routed through the archive pipeline automatically
 so that email attachments are extracted and analysed.
+
+## Image OCR and QR/barcode scanning
+
+When `[enrichment]` is installed, raster images (JPEG, PNG, GIF, BMP, TIFF,
+WebP, ICO) are passed through two additional analysis steps:
+
+1. **OCR** — Tesseract extracts embedded text, which is then included in the
+   IOC extraction pipeline (URLs, IPs, domains, etc.).
+2. **QR / barcode decode** — pyzbar decodes any QR codes or 1-D barcodes found
+   in the image; decoded payloads are surfaced in `qr_codes` and added to the
+   IOC results.
+
+### System dependencies
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install tesseract-ocr libzbar0
+
+# RHEL / Fedora
+sudo dnf install tesseract zbar
+```
+
+### Enabling / disabling
+
+```yaml
+xspct_analyzers:
+  image:
+    enabled: true   # set to false to skip OCR and QR decode entirely
+```
+
+## SVG analysis
+
+SVG files are XML-based vector graphics that can embed `<script>` tags, inline
+event handlers (`onload`, `onclick`, …), and external references — making them
+a phishing and malware delivery vector.
+
+xspct_scan detects SVG by MIME type (`image/svg+xml`) and `.svg` extension and
+routes the file through the **HTML analyzer** rather than the image pipeline.
+All HTML checks apply: script extraction, CSS-hiding detection, external
+resource tracking, and IOC extraction.
+
+No additional configuration or packages are required; SVG analysis is active
+whenever the HTML analyzer is enabled.
+
+## ClamAV integration
+
+xspct_scan can forward every scanned file (and individual archive members) to a
+running `clamd` daemon for antivirus signature matching.
+
+### Requirements
+
+```bash
+# Python library
+pip install "xspct_scan[enrichment]"
+
+# ClamAV daemon (Debian / Ubuntu)
+sudo apt-get install clamav-daemon
+sudo systemctl enable --now clamav-daemon
+```
+
+### Configuration
+
+```yaml
+xspct_clamav:
+  enabled: true
+  socket: /var/run/clamav/clamd.ctl   # Unix socket (preferred); set to '' to use TCP
+  host: 127.0.0.1                      # TCP host (used when socket is empty)
+  port: 3310                           # TCP port
+  timeout: 60                          # per-scan timeout in seconds
+  max_size: 26214400                   # skip files larger than this (bytes; default 25 MB)
+  scan_members: true                   # also scan individual archive members
+```
+
+When `socket` is non-empty, a Unix domain socket is used; otherwise a TCP
+connection is made to `host`:`port`.
+
+### Response fields
+
+ClamAV results appear in the scan response under `clamav`:
+
+```json
+{
+  "clamav": {
+    "status": "infected",
+    "signature": "Win.Trojan.Agent-12345"
+  }
+}
+```
+
+Possible `status` values: `clean`, `infected`, `error`, `skipped` (file
+exceeds `max_size`), `disabled`.
+
+Prometheus counters `xspct_clamav_clean`, `xspct_clamav_infected`,
+`xspct_clamav_errors`, and `xspct_clamav_timeouts` track ClamAV scan outcomes
+at `/metrics`.
 
 ## Systemd unit
 
