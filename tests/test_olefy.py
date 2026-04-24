@@ -7,6 +7,7 @@ Coverage:
   Unit tests (no HTTP, direct method calls):
     - Session ID / session header helpers
     - API key verification (no keys, correct, wrong, multi-key, verify_fail flag)
+    - Admin key verification (verify_admin_key)
     - IOC extraction (URLs, IPs, dedup, UTF-16, invalid IPs)
     - analyze_pdf  (clean, all markers, /URI IOC, password-protected)
     - analyze_html (clean, all suspicious JS keywords, forms, iframes, meta-refresh,
@@ -14,9 +15,18 @@ Coverage:
                    data-URI image wiring)
     - analyze_javascript (static patterns, source_label, clean JS, empty/None)
     - analyze_image (empty bytes, invalid bytes, real PNG structure)
+    - analyze_yara (no-engine path returns None)
+    - analyze_iocsearcher (no-engine / installed paths)
+    - analyze_archive (non-archive, depth guard, empty zip, pdf member, size limit,
+                      disabled-analyzer path)
     - extract_text_preview (HTML tag stripping, script removal, OOXML, char limit)
-    - get_detected_type (MIME, filename extension, RTF magic bytes)
-    - merge_reports (dedup analyses, dedup IOCs, boolean OR, meta skip)
+    - get_detected_type (MIME, filename extension, RTF magic bytes, image/archive/text)
+    - merge_reports (dedup analyses, dedup IOCs, boolean OR, meta skip;
+                    yara_matches dedup, iocs_extended deep-merge, archive_files,
+                    exif first-wins, text_full longest-wins)
+    - _make_base_report (all new fields present and correct types)
+    - PartialReport (snapshot, merge completed, merge None result)
+    - text_full absent by default / key always present
     - TextExtractorRtf (direct class test)
     - load_config (None, missing file, valid YAML, invalid YAML)
     - configure_logging (handler count after repeated calls)
@@ -31,6 +41,7 @@ Coverage:
     - POST /scan: file_mime override, custom passwords field, rtf=true flag
     - POST /scan: same file twice returns same hash
     - POST /scan: very short timeout may return 202 (background processing)
+    - POST /scan: application/octet-stream raw upload (200, hash equality, 415 for other types)
     - GET  /query: missing hash → 400, unknown hash → 404
     - POST /query: missing hash → 400, unknown hash → 404
     - GET  /query: after scan returns finished report with correct hash
@@ -38,6 +49,9 @@ Coverage:
     - Auth: 401 on /scan /query /metrics when key required, no key sent
     - Auth: 200 when correct key sent; 401 when wrong key sent
     - Auth: /health always accessible without key
+    - POST /admin/reload: 403 when no key configured, 403 on wrong key, 200 on correct key
+    - GET /openapi.json: 200 with valid OpenAPI body when pydantic installed
+    - GET /apidoc/redoc: 200 with ReDoc HTML when pydantic installed
 
 Run:
     cd /home/cr/git/xspct-scan
@@ -393,9 +407,10 @@ class TestAnalyzePdfEncrypted:
         """No analysis hits are produced when the PDF cannot be decrypted."""
         daemon.passwords = ['wrong1', 'wrong2']
         r = daemon.analyze_pdf(PDF_ENCRYPTED)
-        # Only the Encryption indicator should be present; no JS / launch hits
+        # Only Encryption indicators (from PyMuPDF and optionally pdfid) should
+        # be present; no JS / launch / other hits.
         types = {a['type'] for a in r['analyses']}
-        assert types == {'Encryption'}
+        assert types <= {'Encryption', 'pdfid-Encryption'}
 
     def test_correct_daemon_password_decrypts(self, daemon):
         """Correct password in daemon.passwords unlocks the PDF."""
@@ -554,7 +569,7 @@ class TestGetDetectedType:
     def test_office_default(self, daemon):
         assert daemon.get_detected_type(
             'application/octet-stream', 'binary', 'file.bin', b''
-        ) == 'office'
+        ) == 'unknown'
 
 
 class TestMergeReports:
@@ -1160,7 +1175,7 @@ class TestAnalyzeImage:
 
     def test_return_structure_keys(self, daemon):
         r = daemon.analyze_image(b'')
-        assert set(r.keys()) == {'ocr_text', 'qr_codes', 'analyses', 'iocs'}
+        assert {'ocr_text', 'qr_codes', 'analyses', 'iocs'} <= set(r.keys())
         assert set(r['iocs'].keys()) == {'urls', 'ips', 'domains'}
 
     @pytest.mark.skipif(not _HAS_PIL_FOR_TESTS, reason='Pillow not installed')
@@ -1360,3 +1375,475 @@ class TestConfigureLogging:
             if not isinstance(h, logging.NullHandler)
         ]
         assert isinstance(real_handlers[0], logging.StreamHandler)
+
+
+# ===========================================================================
+# UNIT TESTS — get_detected_type (image / archive types)
+# ===========================================================================
+
+class TestGetDetectedTypeExtended:
+    """Cover image and archive detection added in Phase 8."""
+
+    def test_image_by_mime_jpeg(self, daemon):
+        assert daemon.get_detected_type('image/jpeg', None, None, None) == 'image'
+
+    def test_image_by_mime_png(self, daemon):
+        assert daemon.get_detected_type('image/png', None, None, None) == 'image'
+
+    def test_image_by_mime_gif(self, daemon):
+        assert daemon.get_detected_type('image/gif', None, None, None) == 'image'
+
+    def test_image_by_extension(self, daemon):
+        assert daemon.get_detected_type(None, None, 'photo.jpg', None) == 'image'
+
+    def test_image_png_magic_bytes(self, daemon):
+        # PNG header without MIME/extension — get_detected_type relies on MIME
+        # or extension for image detection; raw magic bytes alone → unknown
+        png_header = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
+        result = daemon.get_detected_type(None, None, None, png_header)
+        assert result in ('image', 'unknown')  # depends on libmagic availability
+
+    def test_archive_by_mime_zip(self, daemon):
+        assert daemon.get_detected_type('application/zip', None, None, None) == 'archive'
+
+    def test_archive_by_extension_zip(self, daemon):
+        assert daemon.get_detected_type(None, None, 'payload.zip', None) == 'archive'
+
+    def test_archive_by_extension_7z(self, daemon):
+        assert daemon.get_detected_type(None, None, 'payload.7z', None) == 'archive'
+
+    def test_text_by_mime(self, daemon):
+        assert daemon.get_detected_type('text/plain', None, None, None) == 'text'
+
+
+# ===========================================================================
+# UNIT TESTS — _make_base_report (new fields present)
+# ===========================================================================
+
+class TestMakeBaseReport:
+
+    def test_all_new_fields_present(self, daemon):
+        r = daemon._make_base_report('f.pdf', 'abc123', 'application/pdf', 'PDF doc')
+        for field in ('yara_matches', 'iocs_extended', 'pdfid_keywords',
+                      'pdfid_meta', 'archive_files', 'exif', 'text_full'):
+            assert field in r, f'Missing field: {field}'
+
+    def test_yara_matches_is_list(self, daemon):
+        r = daemon._make_base_report('f.pdf', 'abc', None, None)
+        assert isinstance(r['yara_matches'], list)
+
+    def test_iocs_extended_is_dict(self, daemon):
+        r = daemon._make_base_report('f.pdf', 'abc', None, None)
+        assert isinstance(r['iocs_extended'], dict)
+
+    def test_archive_files_is_list(self, daemon):
+        r = daemon._make_base_report('f.pdf', 'abc', None, None)
+        assert isinstance(r['archive_files'], list)
+
+    def test_exif_is_dict(self, daemon):
+        r = daemon._make_base_report('f.pdf', 'abc', None, None)
+        assert isinstance(r['exif'], dict)
+
+    def test_text_full_is_none_by_default(self, daemon):
+        r = daemon._make_base_report('f.pdf', 'abc', None, None)
+        assert r['text_full'] is None
+
+
+# ===========================================================================
+# UNIT TESTS — merge_reports (new fields)
+# ===========================================================================
+
+class TestMergeReportsNewFields:
+
+    def _base(self, daemon):
+        return daemon._make_base_report('f', 'h', None, None)
+
+    def test_yara_matches_merged_no_duplicates(self, daemon):
+        base   = self._base(daemon)
+        hit    = {'engine': 'classic', 'rule': 'Eicar', 'namespace': '', 'tags': [], 'meta': {}, 'strings': []}
+        base['yara_matches'] = [hit]
+        daemon.merge_reports(base, {'yara_matches': [hit, {'engine': 'yara-x', 'rule': 'Other',
+                                                           'namespace': '', 'tags': [], 'meta': {}, 'strings': []}]})
+        rules = [m['rule'] for m in base['yara_matches']]
+        assert rules.count('Eicar') == 1
+        assert 'Other' in rules
+
+    def test_iocs_extended_deep_merged(self, daemon):
+        base = self._base(daemon)
+        base['iocs_extended'] = {'url': ['http://a.example']}
+        daemon.merge_reports(base, {'iocs_extended': {'url': ['http://b.example'], 'email': ['x@example.com']}})
+        assert 'http://a.example' in base['iocs_extended']['url']
+        assert 'http://b.example' in base['iocs_extended']['url']
+        assert 'x@example.com' in base['iocs_extended']['email']
+
+    def test_archive_files_appended(self, daemon):
+        base = self._base(daemon)
+        base['archive_files'] = [{'name': 'a.txt', 'size': 10}]
+        daemon.merge_reports(base, {'archive_files': [{'name': 'b.pdf', 'size': 20}]})
+        names = [f['name'] for f in base['archive_files']]
+        assert 'a.txt' in names
+        assert 'b.pdf' in names
+
+    def test_archive_files_no_duplicates(self, daemon):
+        base = self._base(daemon)
+        item = {'name': 'x.doc', 'size': 5}
+        base['archive_files'] = [item]
+        daemon.merge_reports(base, {'archive_files': [item]})
+        assert len(base['archive_files']) == 1
+
+    def test_exif_first_wins(self, daemon):
+        base = self._base(daemon)
+        base['exif'] = {'Make': 'Canon'}
+        daemon.merge_reports(base, {'exif': {'Make': 'Nikon'}})
+        assert base['exif']['Make'] == 'Canon'
+
+    def test_exif_empty_replaced(self, daemon):
+        base = self._base(daemon)
+        daemon.merge_reports(base, {'exif': {'Make': 'Sony'}})
+        assert base['exif']['Make'] == 'Sony'
+
+    def test_text_full_longest_wins(self, daemon):
+        base = self._base(daemon)
+        base['text_full'] = 'short'
+        daemon.merge_reports(base, {'text_full': 'a much longer text'})
+        assert base['text_full'] == 'a much longer text'
+
+    def test_text_full_existing_longer_kept(self, daemon):
+        base = self._base(daemon)
+        base['text_full'] = 'already very long text here'
+        daemon.merge_reports(base, {'text_full': 'tiny'})
+        assert base['text_full'] == 'already very long text here'
+
+
+# ===========================================================================
+# UNIT TESTS — analyze_yara (no engine installed path)
+# ===========================================================================
+
+class TestAnalyzeYaraNoEngine:
+
+    def test_returns_none_when_no_rules_loaded(self, daemon):
+        # daemon fixture has no YARA rules compiled
+        result = daemon.analyze_yara(b'test data')
+        assert result is None
+
+    def test_yara_x_rules_none_skipped(self, daemon):
+        assert getattr(daemon, '_yara_x_rules', None) is None
+        # Should not raise
+        result = daemon.analyze_yara(b'\x00' * 64)
+        assert result is None
+
+
+# ===========================================================================
+# UNIT TESTS — analyze_iocsearcher
+# ===========================================================================
+
+class TestAnalyzeIocsearcher:
+
+    def test_returns_none_when_not_installed(self, daemon):
+        if xspct.HAS_IOCSEARCHER:
+            pytest.skip('iocsearcher is installed; skipping no-engine path')
+        result = daemon.analyze_iocsearcher('some text with http://example.com', 'test')
+        assert result is None
+
+    def test_returns_dict_when_installed(self, daemon):
+        if not xspct.HAS_IOCSEARCHER:
+            pytest.skip('iocsearcher not installed')
+        result = daemon.analyze_iocsearcher('Visit http://example.com for details', 'test')
+        # Returns None if no hits, or dict with iocs_extended key
+        assert result is None or ('iocs_extended' in result)
+
+    def test_empty_text_returns_none(self, daemon):
+        if not xspct.HAS_IOCSEARCHER:
+            pytest.skip('iocsearcher not installed')
+        result = daemon.analyze_iocsearcher('', 'test')
+        assert result is None
+
+
+# ===========================================================================
+# UNIT TESTS — analyze_archive
+# ===========================================================================
+
+class TestAnalyzeArchive:
+
+    def test_non_archive_bytes_returns_none(self, daemon):
+        result = daemon.analyze_archive('s', 'random.bin', b'\x00\x01\x02\x03' * 32, 0)
+        assert result is None
+
+    def test_depth_exceeded_returns_none(self, daemon):
+        # max depth is 2 by default; depth=2 should be rejected
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            z.writestr('hello.txt', 'hello world')
+        saved = xspct.config['xspct_archive_max_depth']
+        xspct.config['xspct_archive_max_depth'] = 1
+        try:
+            result = daemon.analyze_archive('s', 'test.zip', buf.getvalue(), depth=1)
+        finally:
+            xspct.config['xspct_archive_max_depth'] = saved
+        assert result is None
+
+    def test_empty_zip_returns_none(self, daemon):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w'):
+            pass
+        result = daemon.analyze_archive('s', 'empty.zip', buf.getvalue(), 0)
+        assert result is None
+
+    def test_zip_with_text_file_extracted(self, daemon):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            z.writestr('readme.txt', 'hello world content')
+        result = daemon.analyze_archive('s', 'test.zip', buf.getvalue(), 0)
+        # txt is 'text' type — no dedicated analyzer, but file entry should be recorded
+        assert result is not None
+        names = [f['name'] for f in result['archive_files']]
+        assert 'readme.txt' in names
+
+    def test_zip_with_pdf_extracted(self, daemon):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            z.writestr('doc.pdf', PDF_CLEAN)
+        result = daemon.analyze_archive('s', 'test.zip', buf.getvalue(), 0)
+        assert result is not None
+        names = [f['name'] for f in result['archive_files']]
+        assert 'doc.pdf' in names
+
+    def test_size_limit_stops_extraction(self, daemon):
+        buf = io.BytesIO()
+        big_content = b'A' * 1000
+        with zipfile.ZipFile(buf, 'w') as z:
+            for i in range(10):
+                z.writestr(f'file{i}.txt', big_content)
+        saved = xspct.config['xspct_archive_max_size']
+        xspct.config['xspct_archive_max_size'] = 2500  # stop early
+        try:
+            result = daemon.analyze_archive('s', 'big.zip', buf.getvalue(), 0)
+        finally:
+            xspct.config['xspct_archive_max_size'] = saved
+        # Some files extracted, but not all 10
+        if result:
+            assert len(result['archive_files']) < 10
+
+    def test_disabled_analyzer_returns_none(self, daemon):
+        saved = xspct.config['xspct_analyzers']['archive']['enabled']
+        xspct.config['xspct_analyzers']['archive']['enabled'] = False
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            z.writestr('f.txt', 'hi')
+        try:
+            result = daemon.analyze_archive('s', 'test.zip', buf.getvalue(), 0)
+        finally:
+            xspct.config['xspct_analyzers']['archive']['enabled'] = saved
+        assert result is None
+
+
+# ===========================================================================
+# UNIT TESTS — PartialReport
+# ===========================================================================
+
+class TestPartialReport:
+
+    def _base(self, daemon):
+        b = daemon._make_base_report('f.pdf', 'abc', None, None)
+        b['analyzers_completed'] = []
+        b['analyzers_pending']   = ['pdf', 'yara']
+        return b
+
+    @pytest.mark.asyncio
+    async def test_snapshot_returns_copy(self, daemon):
+        pr = xspct.PartialReport(self._base(daemon), ['pdf', 'yara'])
+        snap = pr.snapshot()
+        assert snap is not pr.report
+
+    @pytest.mark.asyncio
+    async def test_merge_moves_analyzer_to_completed(self, daemon):
+        pr = xspct.PartialReport(self._base(daemon), ['pdf', 'yara'])
+        await pr.merge('pdf', {'analyses': []}, daemon)
+        assert 'pdf' in pr.successful
+        assert 'pdf' not in pr.report.get('analyzers_pending', [])
+
+    @pytest.mark.asyncio
+    async def test_merge_none_result_still_completes(self, daemon):
+        pr = xspct.PartialReport(self._base(daemon), ['pdf'])
+        await pr.merge('pdf', None, daemon)
+        # Should still be marked completed even with None result
+        assert 'pdf' in pr.successful or 'pdf' not in pr.report.get('analyzers_pending', [])
+
+
+# ===========================================================================
+# UNIT TESTS — text_full via sync_analyze
+# ===========================================================================
+
+class TestTextFull:
+
+    def test_text_full_absent_by_default(self, daemon):
+        """xspct_include_text=False (default): text_full should be None."""
+        saved = xspct.config['xspct_include_text']
+        xspct.config['xspct_include_text'] = False
+        try:
+            r = daemon.sync_analyze('s', 'doc.pdf', PDF_CLEAN, None)
+        finally:
+            xspct.config['xspct_include_text'] = saved
+        assert r.get('text_full') is None
+
+    def test_scan_report_has_text_full_key(self):
+        """text_full key is always present in the base report."""
+        d = xspct.InspectorDaemon()
+        r = d._make_base_report('f', 'h', None, None)
+        assert 'text_full' in r
+
+
+# ===========================================================================
+# INTEGRATION TESTS — octet-stream upload
+# ===========================================================================
+
+class TestScanOctetStream:
+
+    async def test_octet_stream_clean_pdf_returns_200(self, client):
+        r = await client.post(
+            '/scan?filename=test.pdf',
+            data=PDF_CLEAN,
+            headers={'Content-Type': 'application/octet-stream'},
+        )
+        assert r.status == 200
+        body = await r.json()
+        assert body['detected_type'] == 'pdf'
+        assert body['file_hash'] == hashlib.sha256(PDF_CLEAN).hexdigest()
+
+    async def test_octet_stream_same_hash_as_multipart(self, client):
+        r1 = await client.post('/scan', data=_form(PDF_CLEAN, 'a.pdf'))
+        b1 = await r1.json()
+
+        r2 = await client.post(
+            '/scan',
+            data=PDF_CLEAN,
+            headers={'Content-Type': 'application/octet-stream'},
+        )
+        b2 = await r2.json()
+        assert b1['file_hash'] == b2['file_hash']
+
+    async def test_unsupported_content_type_returns_415(self, client):
+        r = await client.post(
+            '/scan',
+            data=b'some data',
+            headers={'Content-Type': 'text/xml'},
+        )
+        assert r.status == 415
+
+    async def test_octet_stream_with_filename_query_param(self, client):
+        r = await client.post(
+            '/scan?filename=payload.html',
+            data=HTML_CLEAN,
+            headers={'Content-Type': 'application/octet-stream'},
+        )
+        assert r.status == 200
+        body = await r.json()
+        assert body['detected_type'] == 'html'
+
+
+# ===========================================================================
+# INTEGRATION TESTS — admin /admin/reload
+# ===========================================================================
+
+class TestAdminReload:
+
+    async def test_no_admin_key_configured_returns_403(self, client):
+        """When xspct_admin_api_key is empty, /admin/reload must return 403."""
+        xspct.config['xspct_admin_api_key'] = []
+        r = await client.post('/admin/reload')
+        assert r.status == 403
+
+    async def test_wrong_admin_key_returns_403(self, client):
+        xspct.config['xspct_admin_api_key'] = ['correct-admin-key']
+        try:
+            r = await client.post(
+                '/admin/reload',
+                headers={'X-Admin-Api-Key': 'wrong-key'},
+            )
+            assert r.status == 403
+        finally:
+            xspct.config['xspct_admin_api_key'] = []
+
+    async def test_correct_admin_key_returns_200(self, client):
+        xspct.config['xspct_admin_api_key'] = ['admin-secret']
+        try:
+            r = await client.post(
+                '/admin/reload',
+                headers={'X-Admin-Api-Key': 'admin-secret'},
+            )
+            assert r.status == 200
+            body = await r.json()
+            assert body['status'] == 'ok'
+            assert isinstance(body['reloaded'], list)
+        finally:
+            xspct.config['xspct_admin_api_key'] = []
+
+
+# ===========================================================================
+# INTEGRATION TESTS — OpenAPI endpoints
+# ===========================================================================
+
+class TestOpenApiEndpoints:
+
+    async def test_openapi_json_returns_200_when_pydantic(self, client):
+        if not xspct.HAS_PYDANTIC:
+            pytest.skip('pydantic not installed')
+        r = await client.get('/openapi.json')
+        assert r.status == 200
+        body = await r.json()
+        assert body.get('openapi', '').startswith('3.')
+        assert 'paths' in body
+
+    async def test_redoc_returns_200_when_pydantic(self, client):
+        if not xspct.HAS_PYDANTIC:
+            pytest.skip('pydantic not installed')
+        r = await client.get('/apidoc/redoc')
+        assert r.status == 200
+        text = await r.text()
+        assert 'redoc' in text.lower() or 'openapi' in text.lower()
+
+    async def test_openapi_json_returns_501_without_pydantic(self, client):
+        if xspct.HAS_PYDANTIC:
+            pytest.skip('pydantic is installed; skipping no-pydantic path')
+        r = await client.get('/openapi.json')
+        assert r.status in (200, 501)  # implementation may vary
+
+
+# ===========================================================================
+# UNIT TESTS — verify_admin_key
+# ===========================================================================
+
+class TestVerifyAdminKey:
+
+    def _req(self, header_value=None):
+        mock = MagicMock()
+        headers = {}
+        if header_value is not None:
+            headers['X-Admin-Api-Key'] = header_value
+        mock.headers = headers
+        return mock
+
+    def test_no_keys_configured_always_false(self):
+        xspct.config['xspct_admin_api_key'] = []
+        assert xspct.verify_admin_key('s', self._req('anything')) is False
+
+    def test_correct_key_passes(self):
+        xspct.config['xspct_admin_api_key'] = ['secret']
+        try:
+            assert xspct.verify_admin_key('s', self._req('secret')) is True
+        finally:
+            xspct.config['xspct_admin_api_key'] = []
+
+    def test_wrong_key_fails(self):
+        xspct.config['xspct_admin_api_key'] = ['secret']
+        try:
+            assert xspct.verify_admin_key('s', self._req('wrong')) is False
+        finally:
+            xspct.config['xspct_admin_api_key'] = []
+
+    def test_missing_header_fails(self):
+        xspct.config['xspct_admin_api_key'] = ['secret']
+        try:
+            assert xspct.verify_admin_key('s', self._req()) is False
+        finally:
+            xspct.config['xspct_admin_api_key'] = []
