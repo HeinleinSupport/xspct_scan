@@ -1,9 +1,11 @@
 # xspct_scan
 
-**xspct_scan** is an async HTTP daemon that scans Office, PDF, and HTML documents
-for malware indicators using [oletools](https://github.com/decalage2/oletools),
-[msoffcrypto-tool](https://github.com/nolze/msoffcrypto-tool), and
-[python-magic](https://github.com/ahupp/python-magic).
+**xspct_scan** is an async HTTP daemon that analyses Office, PDF, HTML, image,
+and archive files for malware indicators using
+[oletools](https://github.com/decalage2/oletools),
+[msoffcrypto-tool](https://github.com/nolze/msoffcrypto-tool),
+[PyMuPDF](https://pymupdf.readthedocs.io/), and optional enrichment libraries
+(YARA, iocsearcher, pytesseract, pyzbar, py7zr).
 
 It exposes a simple HTTP API designed to integrate with
 [Rspamd](https://rspamd.com/) and other mail-security pipelines.

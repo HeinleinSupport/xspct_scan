@@ -90,3 +90,51 @@ Requires the `redis` extra (`pip install "xspct_scan[redis]"`).
 | Key | Default | Description |
 |-----|---------|-------------|
 | `xspct_password_file` | `10k-most-common.txt` | Path to a newline-delimited password list used when attempting to decrypt encrypted Office documents. Lines starting with `#` are ignored. |
+
+### Analyzer toggles
+
+Each analyzer can be individually enabled or disabled. YARA requires the
+`advanced` extra and a `rules_path`.
+
+```yaml
+xspct_analyzers:
+  pdf:        { enabled: true }
+  html:       { enabled: true }
+  office:     { enabled: true }
+  image:      { enabled: true }
+  archive:    { enabled: true }
+  iocs:       { enabled: true }
+  javascript: { enabled: true }
+  yara:       { enabled: false, rules_path: '' }
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `xspct_analyzers.<name>.enabled` | `true` | Enable/disable the named analyzer. |
+| `xspct_analyzers.yara.rules_path` | `` | Path to a YARA rules file or directory. Required when `yara.enabled` is `true`. |
+
+### Text extraction
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `xspct_include_text` | `false` | When `true`, the `text_full` field is included in scan reports. |
+| `xspct_text_max_length` | `2000` | Maximum characters returned in `text_full` (also caps `text_preview`). |
+
+### Archive analysis
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `xspct_archive_max_depth` | `2` | Maximum recursion depth when extracting nested archives. Set to `0` to disable. |
+| `xspct_archive_max_size` | `52428800` | Maximum total bytes to extract from a single archive (default 50 MiB). |
+
+### Partial / in-progress reports
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `xspct_cache_partial` | `false` | When `true`, partial (in-progress) reports are written to the Redis cache so that polling clients see incremental results. |
+
+### Admin API
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `xspct_admin_api_key` | `[]` | API key(s) required for `POST /admin/reload`. Empty = admin API disabled. Accept a string or a YAML list. |

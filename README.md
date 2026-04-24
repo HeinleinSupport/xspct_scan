@@ -2,26 +2,52 @@
 
 [[_TOC_]]
 
-**xspct_scan** is an async HTTP daemon that scans Office, PDF, and HTML documents
-for malware indicators. It is designed to integrate with
-[Rspamd](https://rspamd.com/) and other mail-security pipelines.
+**xspct_scan** is an async HTTP daemon that analyses Office, PDF, HTML, image,
+and archive files for malware indicators. It is designed to integrate with
+[Rspamd](https://rspamd.com/) and other mail-security pipelines, and exposes
+a simple HTTP API for on-demand scanning.
 
 ## Features
 
-- **Office / OLE2** — VBA macro extraction and keyword analysis via
-  [oletools](https://github.com/decalage2/oletools); decrypts password-protected
-  files with [msoffcrypto-tool](https://github.com/nolze/msoffcrypto-tool)
-- **PDF** — deep content analysis via [PyMuPDF](https://pymupdf.readthedocs.io/);
-  extracts embedded JavaScript, URIs, and document metadata; decrypts
-  password-protected PDFs using the same password list as Office files
-- **HTML** — script extraction, CSS hiding detection, external resource analysis
+### Document analysis
+- **Office / OLE2 + OOXML** — VBA macro extraction and keyword analysis via
+  [oletools](https://github.com/decalage2/oletools); automatic decryption of
+  password-protected files with
+  [msoffcrypto-tool](https://github.com/nolze/msoffcrypto-tool)
+- **PDF** — deep content analysis via [PyMuPDF](https://pymupdf.readthedocs.io/)
+  (JavaScript, URIs, document metadata, encryption) plus structural keyword
+  counts via vendored [pdfid](https://github.com/DidierStevens/DidierStevensSuite)
+- **HTML** — script extraction, CSS-hiding detection, external resource tracking
 - **RTF** — embedded object extraction via `rtfobj` (opt-in per request)
-- **Dynamic JS emulation** — optional sandboxed execution with
+- **Dynamic JS emulation** — sandboxed execution with
   [quickjs](https://github.com/PetterS/quickjs) and deobfuscation with
-  [jsbeautifier](https://github.com/beautify-web/js-beautify)
-- **IOC extraction** — URLs, IPs, and domains harvested from all document types
+  [jsbeautifier](https://github.com/beautify-web/js-beautify) (optional)
+
+### Enrichment
+- **IOC extraction** — URLs, IPs, and domains from all document types
+- **Extended IOCs** — email addresses, file hashes, CVE IDs, and more via
+  [iocsearcher](https://github.com/malicialab/iocsearcher) (optional)
+- **YARA scanning** — static signature matching via
+  [yara-python](https://github.com/VirusTotal/yara-python) (classic engine,
+  optional Hyperscan acceleration) and/or
+  [yara-x](https://github.com/VirusTotal/yara-x) (Rust rewrite); both engines
+  can run simultaneously for comparison
+- **Image analysis** — OCR via [pytesseract](https://github.com/madmaze/pytesseract),
+  QR/barcode decode via [pyzbar](https://github.com/NaturalHistoryMuseum/pyzbar),
+  EXIF metadata extraction with GPS flagging (optional)
+- **Archive extraction** — ZIP and 7z with configurable depth/size limits,
+  password loop for encrypted archives, recursive sub-file analysis
+
+### Infrastructure
+- **Parallel pipeline** — analyzers run as concurrent asyncio tasks; partial
+  results returned on timeout (`202 Accepted`) with `analyzers_completed` /
+  `analyzers_pending` fields
 - **Redis result cache** — optional; survives restarts, shared across instances
 - **Prometheus metrics** — exposed at `/metrics`
+- **OpenAPI 3.0** — spec at `/openapi.json`; ReDoc UI at `/apidoc/redoc`
+- **Admin API** — live reload of config / passwords / YARA rules via
+  `POST /admin/reload`
+- **API key auth** — per-header key with rotation support; separate admin key
 
 ## Quick start
 
@@ -34,6 +60,15 @@ Scan a document:
 
 ```bash
 curl -s -F "doc=@invoice.docx" http://localhost:8080/scan | python3 -m json.tool
+```
+
+Or upload raw bytes:
+
+```bash
+curl -s -X POST http://localhost:8080/scan \
+  --data-binary @invoice.docx \
+  -H "Content-Type: application/octet-stream" \
+  | python3 -m json.tool
 ```
 
 ## Requirements
@@ -62,11 +97,13 @@ pip install xspct_scan
 | Extra | Installs | Use when |
 |-------|----------|----------|
 | `uvloop` | `uvloop` | Higher-throughput async event loop |
-| `redis` | `redis[asyncio]` | Persistent result cache |
-| `enrichment` | `jsbeautifier`, `quickjs`, `Pillow`, `pytesseract`, `pyzbar` | Dynamic JS analysis, image OCR/barcode |
+| `redis` | `redis[asyncio]` | Persistent result cache across restarts |
+| `enrichment` | `Pillow`, `pytesseract`, `pyzbar`, `jsbeautifier`, `quickjs` | Image OCR/barcode/EXIF, dynamic JS analysis |
+| `openapi` | `pydantic>=2.0` | OpenAPI 3.0 spec + ReDoc UI |
+| `advanced` | `yara-python`, `yara-x`, `iocsearcher`, `py7zr` | YARA scanning, extended IOCs, 7z archives |
 
 ```bash
-pip install "xspct_scan[uvloop,redis,enrichment]"
+pip install "xspct_scan[uvloop,redis,enrichment,openapi,advanced]"
 ```
 
 ### From source
@@ -74,7 +111,7 @@ pip install "xspct_scan[uvloop,redis,enrichment]"
 ```bash
 git clone https://github.com/heinlein-support/xspct_scan.git
 cd xspct_scan
-pip install -e ".[uvloop,redis,enrichment]"
+pip install -e ".[uvloop,redis,enrichment,openapi,advanced]"
 ```
 
 ## Configuration
@@ -93,8 +130,12 @@ Key settings:
 | `xspct_listen_address` | `0.0.0.0` | Bind address(es) |
 | `xspct_listen_port` | `8080` | Listen port |
 | `xspct_api_key` | _(empty)_ | Shared secret for `X-Api-Key` auth |
+| `xspct_admin_api_key` | _(empty)_ | Key for `POST /admin/reload` |
 | `xspct_redis_cache.enabled` | `false` | Enable Redis result cache |
-| `xspct_password_file` | | Path to wordlist for decrypting Office files |
+| `xspct_password_file` | | Path to wordlist for decrypting encrypted files |
+| `xspct_analyzers` | _(all enabled)_ | Per-analyzer enable/disable + options |
+| `xspct_include_text` | `false` | Include full extracted text in reports |
+| `xspct_archive_max_depth` | `2` | Recursion limit for archive extraction |
 
 See [docs/configuration.md](docs/configuration.md) for the full reference.
 
@@ -102,13 +143,23 @@ See [docs/configuration.md](docs/configuration.md) for the full reference.
 
 ### `POST /scan`
 
-Submit a document for analysis (`multipart/form-data`, field `doc`).
+Submit a document for analysis.
+
+**multipart/form-data** (field `doc`):
 
 ```bash
 curl -s -F "doc=@malware.xlsm" http://localhost:8080/scan
 ```
 
-Returns a JSON report:
+**application/octet-stream** (raw bytes, metadata as query params):
+
+```bash
+curl -s -X POST "http://localhost:8080/scan?filename=malware.xlsm" \
+  --data-binary @malware.xlsm \
+  -H "Content-Type: application/octet-stream"
+```
+
+Example response:
 
 ```json
 {
@@ -116,30 +167,40 @@ Returns a JSON report:
   "file_hash": "sha256...",
   "detected_type": "office",
   "has_macro": true,
-  "analyses": [
-    {"type": "AutoExec", "keyword": "AutoOpen", "description": "..."}
-  ],
+  "analyses": [{"type": "AutoExec", "keyword": "AutoOpen", "description": "..."}],
   "iocs": {"urls": ["https://evil.example/payload"], "ips": [], "domains": []},
-  "meta_document": {"author": "John Doe", "creation_date": "2026-01-15"},
+  "iocs_extended": {"url": ["https://evil.example/payload"], "email": []},
+  "yara_matches": [{"engine": "classic", "rule": "Eicar_Test", "tags": [], ...}],
+  "pdfid_keywords": null,
+  "archive_files": [],
+  "exif": {},
+  "text_preview": "...",
+  "analyzers_completed": ["office", "yara", "iocs"],
+  "analyzers_pending": [],
   "status": "finished",
   "time_taken": 0.18
 }
 ```
 
-Returns `202 Accepted` when analysis exceeds the timeout; poll with:
+Returns `202 Accepted` when analysis exceeds the configured timeout.
+Poll `/query?hash=<sha256>` for the result:
 
 ```bash
 curl "http://localhost:8080/query?hash=sha256..."
 ```
 
-### Other endpoints
+### Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | `{"status":"ok"}` — for load-balancer checks |
-| `/ping` | GET | Returns `pong` |
+| `/scan` | POST | Submit file for analysis |
 | `/query` | GET / POST | Retrieve result by SHA-256 hash |
+| `/health` | GET | `{"status":"ok"}` — load-balancer check |
+| `/ping` | GET | Returns `pong` |
 | `/metrics` | GET | Prometheus metrics |
+| `/openapi.json` | GET | OpenAPI 3.0 spec (requires `[openapi]`) |
+| `/apidoc/redoc` | GET | ReDoc UI (requires `[openapi]`) |
+| `/admin/reload` | POST | Live-reload config/passwords/YARA rules |
 
 See [docs/api-http.md](docs/api-http.md) for full request/response details.
 
@@ -148,7 +209,7 @@ See [docs/api-http.md](docs/api-http.md) for full request/response details.
 xspct_scan automatically tries to decrypt encrypted **Office and PDF** documents
 using a password list loaded at startup.
 
-### Global password list (config)
+### Global password list
 
 Point `xspct_password_file` at a newline-delimited file of candidate passwords
 (lines starting with `#` are ignored):
@@ -157,46 +218,39 @@ Point `xspct_password_file` at a newline-delimited file of candidate passwords
 xspct_password_file: /etc/xspct_scan/passwords.txt
 ```
 
-The file is loaded once on startup. If the file is not found, a small set of
-built-in defaults (`infected`, `virus`, `malware`, …) is used instead.
-
-For PDFs, PyMuPDF's `authenticate()` API is used; for Office files,
-`msoffcrypto-tool` handles decryption. Both use the same password list.
+The file is reloaded on `POST /admin/reload`. If not found, a small set of
+built-in defaults (`infected`, `virus`, `malware`, …) is used.
 
 ### Per-request passwords
 
-Extra passwords can be supplied with each `/scan` request via the `passwords`
-field. They are tried **before** the global list and work for both Office and PDF files:
+Extra passwords supplied with the request are tried **before** the global list:
 
 ```bash
-# comma-separated
 curl -s \
   -F "doc=@protected.xlsx" \
   -F "passwords=Secret123,CompanyPass" \
   http://localhost:8080/scan
-
-# PDF example
-curl -s \
-  -F "doc=@invoice.pdf" \
-  -F "passwords=Secret123,CompanyPass" \
-  http://localhost:8080/scan
-
-# newline-separated (useful for many passwords)
-curl -s \
-  -F "doc=@protected.xlsx" \
-  -F $'passwords=Secret123\nCompanyPass\nQ1-2026' \
-  http://localhost:8080/scan
 ```
 
-When decryption succeeds, the response includes:
+When decryption succeeds the response includes `"decrypted": true` and
+`"decryption_password": "Secret123"`.
 
-```json
-{
-  "decrypted": true,
-  "decryption_password": "Secret123",
-  ...
-}
+## YARA scanning
+
+Two YARA engines can run in parallel for comparison or redundancy:
+
+```yaml
+xspct_analyzers:
+  yara:
+    enabled: true
+    rules_path: /etc/xspct_scan/rules/       # classic yara-python
+  yara_x:
+    enabled: true
+    rules_path: /etc/xspct_scan/rules/       # yara-x (Rust)
 ```
+
+Each match in `yara_matches` carries an `"engine"` field (`"classic"` or
+`"yara-x"`). Reload rules without restart with `POST /admin/reload`.
 
 ## Systemd unit
 

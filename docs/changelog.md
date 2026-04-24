@@ -1,8 +1,8 @@
 # Changelog
 
-## 2.0.0 — 2026-04-18
+## 2.0.0 — 2026-04-24
 
-Initial public release of xspct_scan.
+Initial public release of xspct_scan (renamed from olefy_v2).
 
 ### Features
 
@@ -19,3 +19,23 @@ Initial public release of xspct_scan.
 - Optional TLS termination
 - Optional [uvloop](https://github.com/MagicStack/uvloop) event loop
 - REUSE / SPDX licence compliance (EUPL-1.2)
+- **Parallel pipeline** — analyzers run concurrently; partial results returned
+  on timeout via `202 Accepted` with `analyzers_completed` / `analyzers_pending`
+- **`application/octet-stream` upload** — raw bytes can be POSTed directly
+  to `/scan` without multipart encoding
+- **OpenAPI 3.0** specification at `/openapi.json`; ReDoc UI at `/apidoc/redoc`
+  (requires `[openapi]` extra)
+- **YARA scanning** — optional static signature matching on raw file bytes;
+  supports Hyperscan acceleration (requires `[advanced]` extra)
+- **iocsearcher** — extended IOC types (email, hash, CVE, …) extracted from
+  document text (requires `[advanced]` extra)
+- **PDF enrichment** — vendored pdfid v0.2.10 adds keyword counts and metadata
+  to PDF scan reports
+- **Image analysis** — OCR via pytesseract, QR/barcode decode via pyzbar,
+  EXIF metadata extraction (GPS hits flagged), embedded OOXML images scanned
+- **Archive analysis** — ZIP and 7z extraction with configurable depth/size
+  limits and password loop; nested documents recursively analysed
+- **`text_full` field** — full-text extraction included in reports when
+  `xspct_include_text: true`
+- **Admin reload** — `POST /admin/reload` reloads config/passwords/YARA
+  without restart (requires `xspct_admin_api_key`)

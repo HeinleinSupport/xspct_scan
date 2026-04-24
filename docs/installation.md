@@ -25,9 +25,12 @@ pip install xspct_scan
 |-------|----------|----------|
 | `uvloop` | `uvloop` | Higher-throughput async event loop |
 | `redis` | `redis[asyncio]` | Persistent result cache across restarts |
+| `enrichment` | `Pillow`, `pytesseract`, `pyzbar`, `jsbeautifier`, `quickjs` | Image OCR / barcode / EXIF, dynamic JS analysis |
+| `openapi` | `pydantic>=2.0` | OpenAPI 3.0 spec at `/openapi.json` + ReDoc UI |
+| `advanced` | `yara-python`, `yara-x`, `iocsearcher`, `py7zr` | YARA scanning (classic + Rust engines), extended IOC extraction, 7z archive support |
 
 ```bash
-pip install "xspct_scan[uvloop,redis]"
+pip install "xspct_scan[uvloop,redis,enrichment,openapi,advanced]"
 ```
 
 ## Install from source
@@ -35,7 +38,7 @@ pip install "xspct_scan[uvloop,redis]"
 ```bash
 git clone https://github.com/heinlein-support/xspct_scan.git
 cd xspct_scan
-pip install -e ".[uvloop,redis]"
+pip install -e ".[uvloop,redis,enrichment,openapi,advanced]"
 ```
 
 ## Running
