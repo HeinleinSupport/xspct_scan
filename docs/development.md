@@ -111,7 +111,7 @@ Several tests are skipped when optional libraries are not installed:
 | `Pillow` not installed | `TestAnalyzeImage::test_blank_png_does_not_raise` |
 | `iocsearcher` not installed | `TestAnalyzeIocsearcher::test_returns_dict_when_installed` |
 | `pydantic` not installed | `TestOpenApiEndpoints::test_openapi_json_*`, `test_redoc_*` |
-| `yara-python` / `yara-x` not installed | `TestAnalyzeYaraNoEngine` is always active; rule-hit tests require a compiled ruleset |
+| `yara-python` / `yara-x` not installed | `TestAnalyzeYaraNoEngine` is always active; `TestSyncAnalyzeYara::test_yara_called_when_rules_loaded` uses `monkeypatch` and runs unconditionally |
 
 Install all extras to minimise skips:
 
@@ -147,8 +147,10 @@ tests/
 | `TestAnalyzeJavascript` | unit | JS keyword detection |
 | `TestAnalyzeImage` | unit | Image analyzer (empty, invalid, PNG) |
 | `TestAnalyzeYaraNoEngine` | unit | YARA — no-engine path |
+| `TestSyncAnalyzeYara` | unit | YARA called from `sync_analyze` when rules are loaded |
 | `TestAnalyzeIocsearcher` | unit | iocsearcher integration |
-| `TestAnalyzeArchive` | unit | ZIP extraction, depth/size guards |
+| `TestAnalyzeArchive` | unit | ZIP extraction, depth/size guards, YARA on members |
+| `TestAnalyzeText` | unit | `analyze_text()` — decode, preview, IOCs, limits |
 | `TestExtractTextPreview` | unit | Text extraction strategies |
 | `TestGetDetectedType` | unit | MIME / extension / magic-byte detection |
 | `TestGetDetectedTypeExtended` | unit | Image / archive / text types |
@@ -157,6 +159,7 @@ tests/
 | `TestMergeReportsNewFields` | unit | `yara_matches`, `iocs_extended`, `archive_files`, `exif`, `text_full` |
 | `TestPartialReport` | unit | `PartialReport` snapshot + merge |
 | `TestTextFull` | unit | `text_full` presence / absence |
+| `TestTextTypePipeline` | integration | `text` detected type flows through `/scan` |
 | `TestEvictTasks` | unit | In-memory task eviction |
 | `TestSyncAnalyze` | unit | Full sync pipeline |
 | `TestTextExtractorRtf` | unit | RTF text extractor |

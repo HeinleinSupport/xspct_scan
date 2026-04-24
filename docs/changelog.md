@@ -39,3 +39,17 @@ Initial public release of xspct_scan (renamed from olefy_v2).
   `xspct_include_text: true`
 - **Admin reload** — `POST /admin/reload` reloads config/passwords/YARA
   without restart (requires `xspct_admin_api_key`)
+- **`text` analyzer** — plain-text and script files (`text/plain`, ASCII,
+  UTF-8, Unicode) are now a first-class type: `analyze_text()` decodes the
+  content, populates `text_preview`, and extracts baseline IOCs; YARA and
+  iocsearcher run over the same bytes in parallel
+- **YARA on all types** — YARA now runs on every file regardless of type
+  (PDFs, images, archives, text, unknown).  In the synchronous pipeline
+  (`sync_analyze`) YARA is called after the primary analyzer and merged into
+  the report.  Inside archive extraction every member — including images and
+  unknown blobs — is individually YARA-scanned.
+- **Archive member coverage** — `_analyse_member` now handles `text` and
+  `unknown` members (previously ignored), and image members are passed
+  through both `analyze_image` and YARA.  `merge_reports` is used throughout
+  so `yara_matches`, `iocs_extended`, `pdfid_*`, and `rtf_objects` from
+  sub-files are correctly propagated to the top-level archive report.

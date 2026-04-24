@@ -53,6 +53,11 @@ Pass optional metadata as query parameters (`filename`, `file_mime`, `file_type`
 | `timeout` | `10` | Max seconds to wait for analysis before returning `202`. |
 | `rtf` | `false` | Set to `true` to enable RTF object extraction via `rtfobj`. |
 
+`detected_type` in the response will be one of: `pdf`, `html`, `office`,
+`image`, `archive`, `text`, or `unknown`.  For the `text` type the daemon
+decodes the content, runs YARA on the raw bytes, and passes the full text to
+iocsearcher.
+
 **Response `200 OK`** — analysis finished within timeout.
 
 ```json
@@ -103,11 +108,11 @@ New report fields (v2.0.0+):
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `yara_matches` | list | YARA rule matches (name, tags, meta, strings). Requires `[advanced]` + `xspct_analyzers.yara.enabled: true`. |
+| `yara_matches` | list | YARA rule matches (name, tags, meta, strings). Requires `[advanced]` + `xspct_analyzers.yara.enabled: true`. Populated for **all** file types including images and archive members. |
 | `iocs_extended` | dict | Extended IOC types from [iocsearcher](https://github.com/malicialab/iocsearcher) keyed by IOC type (`url`, `email`, `md5`, …). Requires `[advanced]`. |
 | `pdfid_keywords` | dict/null | Raw pdfid keyword counts for PDF files. |
 | `pdfid_meta` | dict/null | pdfid metadata record for PDF files. |
-| `archive_files` | list | Files extracted from ZIP/7z archives (`{name, size, detected_type}`). |
+| `archive_files` | list | Files extracted from ZIP/7z archives (`{name, size}`). All member types — PDF, HTML, Office, text, image, unknown — are individually analysed and their results merged into the top-level report. |
 | `exif` | dict | EXIF metadata extracted from image files. |
 | `text_full` | str/null | Full text extraction up to `xspct_text_max_length`. Only populated when `xspct_include_text: true`. |
 | `analyzers_completed` | list | Analyzer names that finished. |

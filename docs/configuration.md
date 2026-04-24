@@ -119,7 +119,14 @@ xspct_analyzers:
 The **`text`** analyzer handles files detected as `text/plain`, ASCII, UTF-8, or any
 script not matched by the other analyzers.  It decodes the content, populates
 `text_preview`, and extracts baseline IOCs.  YARA and iocsearcher then run on
-the same bytes/text in Group 1 and Group 2 respectively.
+the same bytes/text in parallel.
+
+When YARA rules are loaded, YARA runs on **every** file regardless of type —
+PDFs, images, Office documents, plain text, and unknown blobs.  In the
+synchronous sub-pipeline (used for files inside archives), YARA is invoked
+after the primary type-specific analyzer and its hits are merged into the
+report.  Each archive member is individually YARA-scanned, including images
+and unknown blobs.
 
 ### Text extraction
 
@@ -135,6 +142,13 @@ the same bytes/text in Group 1 and Group 2 respectively.
 |-----|---------|-------------|
 | `xspct_archive_max_depth` | `2` | Maximum recursion depth when extracting nested archives. Set to `0` to disable. |
 | `xspct_archive_max_size` | `52428800` | Maximum total bytes to extract from a single archive (default 50 MiB). |
+
+Each extracted member is routed through the same type-detection logic as a
+top-level file.  All member types — PDF, HTML, Office, text, image, and
+unknown — are individually analysed.  When YARA rules are loaded every
+member is YARA-scanned regardless of type.  Results are merged into the
+top-level archive report via `yara_matches`, `iocs`, `iocs_extended`, and
+`analyses`.
 
 ### Partial / in-progress reports
 

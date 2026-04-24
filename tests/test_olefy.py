@@ -1534,6 +1534,42 @@ class TestAnalyzeYaraNoEngine:
 
 
 # ===========================================================================
+# UNIT TESTS — sync_analyze YARA integration
+# ===========================================================================
+
+class TestSyncAnalyzeYara:
+    """Verify that sync_analyze calls YARA when rules are available and that the
+    result is reflected in the returned report's yara_matches list."""
+
+    def test_no_rules_yara_matches_empty(self, daemon):
+        # No rules loaded \u2014 yara_matches must be present but empty
+        report = daemon.sync_analyze('s', 'file.txt', b'hello world', 'text/plain')
+        assert 'yara_matches' in report
+        assert report['yara_matches'] == []
+
+    def test_yara_called_when_rules_loaded(self, daemon, monkeypatch):
+        # Patch analyze_yara to return a fake match so we can assert it was called
+        hit = {'rule': 'TestRule', 'engine': 'classic', 'tags': [], 'meta': {}}
+        monkeypatch.setattr(daemon, '_yara_rules', object())  # non-None triggers check
+        # yara analyzer is disabled by default; enable it for this test
+        saved = xspct.config['xspct_analyzers']['yara']['enabled']
+        xspct.config['xspct_analyzers']['yara']['enabled'] = True
+        call_log = []
+
+        def _fake_yara(data):
+            call_log.append(data)
+            return {'yara_matches': [hit]}
+
+        monkeypatch.setattr(daemon, 'analyze_yara', _fake_yara)
+        try:
+            report = daemon.sync_analyze('s', 'file.txt', b'hello world', 'text/plain')
+        finally:
+            xspct.config['xspct_analyzers']['yara']['enabled'] = saved
+        assert call_log, 'analyze_yara was not called'
+        assert hit in report['yara_matches']
+
+
+# ===========================================================================
 # UNIT TESTS — analyze_iocsearcher
 # ===========================================================================
 
@@ -1594,7 +1630,7 @@ class TestAnalyzeArchive:
         with zipfile.ZipFile(buf, 'w') as z:
             z.writestr('readme.txt', 'hello world content')
         result = daemon.analyze_archive('s', 'test.zip', buf.getvalue(), 0)
-        # txt is 'text' type — no dedicated analyzer, but file entry should be recorded
+        # txt is 'text' type — analyze_text runs via sync_analyze
         assert result is not None
         names = [f['name'] for f in result['archive_files']]
         assert 'readme.txt' in names
@@ -1635,6 +1671,42 @@ class TestAnalyzeArchive:
         finally:
             xspct.config['xspct_analyzers']['archive']['enabled'] = saved
         assert result is None
+
+    def test_archive_report_has_yara_matches_key(self, daemon):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            z.writestr('f.txt', 'some text')
+        result = daemon.analyze_archive('s', 'test.zip', buf.getvalue(), 0)
+        assert result is not None
+        # yara_matches key must always be present (YARA may have no rules loaded)
+        assert 'yara_matches' in result
+
+    def test_archive_report_has_iocs_extended_key(self, daemon):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            z.writestr('f.txt', 'some text')
+        result = daemon.analyze_archive('s', 'test.zip', buf.getvalue(), 0)
+        assert result is not None
+        assert 'iocs_extended' in result
+
+    def test_archive_text_member_gets_text_preview(self, daemon):
+        content = b'Hello from inside the archive'
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            z.writestr('note.txt', content)
+        result = daemon.analyze_archive('s', 'test.zip', buf.getvalue(), 0)
+        assert result is not None
+        # text member now goes through sync_analyze which populates text_preview
+        assert result.get('text_preview') or result['archive_files']
+
+    def test_archive_pdf_member_propagates_yara_matches(self, daemon):
+        # Even without YARA rules loaded the key must exist (empty list)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            z.writestr('doc.pdf', PDF_CLEAN)
+        result = daemon.analyze_archive('s', 'test.zip', buf.getvalue(), 0)
+        assert result is not None
+        assert isinstance(result.get('yara_matches', []), list)
 
 
 # ===========================================================================

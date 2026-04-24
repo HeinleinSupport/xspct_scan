@@ -1607,7 +1607,10 @@ class InspectorDaemon:
         report: dict = {
             'archive_files': [],
             'analyses':      [],
+            'rtf_objects':   [],
             'iocs':          {'urls': [], 'ips': [], 'domains': []},
+            'yara_matches':  [],
+            'iocs_extended': {},
         }
         total_extracted = 0
 
@@ -1618,32 +1621,36 @@ class InspectorDaemon:
                 'name': name,
                 'size': len(member_data),
             })
+            _yara_ok = (
+                ('yara'   in enabled and getattr(self, '_yara_rules',   None) is not None) or
+                ('yara_x' in enabled and getattr(self, '_yara_x_rules', None) is not None)
+            )
             # Recursively analyse (nested archives + documents)
             detected = self.get_detected_type(None, None, name, member_data[:4096])
             if detected == 'archive' and depth + 1 < max_depth:
                 sub = self.analyze_archive(s, name, member_data, depth + 1)
                 if sub:
                     self.merge_reports(report, sub)
-            elif detected in ('pdf', 'html', 'office'):
+            elif detected in ('pdf', 'html', 'office', 'text'):
+                # sync_analyze internally calls YARA when rules are loaded
                 sub = self.sync_analyze(s, name, member_data, None)
                 if sub:
-                    for k in ('analyses', 'rtf_objects'):
-                        for item in sub.get(k, []):
-                            if item not in report[k]:
-                                report[k].append(item)
-                    for ik in ('urls', 'ips', 'domains'):
-                        report['iocs'][ik] = sorted(
-                            set(report['iocs'][ik] + sub.get('iocs', {}).get(ik, []))
-                        )
-            elif (HAS_OCR or HAS_PYZBAR) and detected == 'image':
-                img_result = self.analyze_image(member_data, label=name)
-                for hit in img_result.get('analyses', []):
-                    if hit not in report['analyses']:
-                        report['analyses'].append(hit)
-                for ik in ('urls', 'ips', 'domains'):
-                    report['iocs'][ik] = sorted(
-                        set(report['iocs'][ik] + img_result['iocs'][ik])
-                    )
+                    self.merge_reports(report, sub)
+            elif detected == 'image':
+                # analyze_image handles OCR/QR/EXIF; YARA scans raw bytes separately
+                sub = self.analyze_image(member_data, label=name)
+                if sub:
+                    self.merge_reports(report, sub)
+                if _yara_ok:
+                    yr = self.analyze_yara(member_data)
+                    if yr:
+                        self.merge_reports(report, yr)
+            else:
+                # 'unknown' — YARA on raw bytes only
+                if _yara_ok:
+                    yr = self.analyze_yara(member_data)
+                    if yr:
+                        self.merge_reports(report, yr)
 
         try:
             if is_zip:
@@ -2923,6 +2930,15 @@ class InspectorDaemon:
         )
         if not report['text_preview']:
             report['text_preview'] = self.extract_text_preview(data, file_mime)
+        # YARA — always scan raw bytes when rules are loaded, regardless of file type
+        _yara_ok = (
+            ('yara'   in enabled and getattr(self, '_yara_rules',   None) is not None) or
+            ('yara_x' in enabled and getattr(self, '_yara_x_rules', None) is not None)
+        )
+        if _yara_ok:
+            yara_res = self.analyze_yara(data)
+            if yara_res:
+                self.merge_reports(report, yara_res)
         # Image OCR / QR analysis for OOXML (contains media/ entries in ZIP)
         if (HAS_OCR or HAS_PYZBAR) and file_mime and 'openxmlformats' in file_mime.lower():
             self._extract_ooxml_images(s, data, report)
