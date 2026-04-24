@@ -2052,59 +2052,97 @@ class InspectorDaemon:
                 _add('Encryption', '/Encrypt', 'PDF is encrypted')
 
             # -- Document-level metadata / trailer -------------------------
-            trailer = doc.pdf_trailer()
-            if isinstance(trailer, dict):
-                if 'Encrypt' in trailer:
-                    report['is_encrypted'] = True
-                    _add('Encryption', '/Encrypt', 'PDF is encrypted')
+            # pdf_trailer() returns a raw-object string in PyMuPDF ≥ 1.25.
+            trailer_str = doc.pdf_trailer()
+            if isinstance(trailer_str, str) and '/Encrypt' in trailer_str:
+                report['is_encrypted'] = True
+                _add('Encryption', '/Encrypt', 'PDF is encrypted')
 
-            # -- Document-level JavaScript (doc.get_js_code) ---------------
-            js_blocks = []
+            # -- Document-level JavaScript + OpenAction / AA / AcroForm -----
+            # PyMuPDF ≥ 1.25 changed pdf_catalog() to return an xref int.
+            # Use xref_get_keys/xref_get_key to walk the catalog dictionary.
             try:
-                js_blocks = doc.get_js_code()  # list of JS strings
-            except AttributeError:
-                pass
-            if js_blocks:
-                report['has_javascript'] = True
-                _add('JavaScript', '/JavaScript',
-                     f'Document-level JavaScript found ({len(js_blocks)} block(s))')
-                for i, js_src in enumerate(js_blocks):
-                    for hit in self.analyze_javascript(js_src, f'PDF /JavaScript block {i+1}'):
-                        if hit not in report['analyses']:
-                            report['analyses'].append(hit)
+                cat_xref  = doc.pdf_catalog()
+                cat_keys  = doc.xref_get_keys(cat_xref)
 
-            # -- OpenAction / AA (auto-execute) ----------------------------
-            try:
-                root = doc.pdf_catalog()
-                if isinstance(root, dict):
-                    if 'OpenAction' in root:
-                        report['has_openaction'] = True
-                        action = root['OpenAction']
-                        action_type = action.get('S', '') if isinstance(action, dict) else ''
-                        _add('AutoExecute', '/OpenAction',
-                             f'OpenAction found (type: {action_type or "unknown"})')
-                        if action_type == 'JavaScript':
+                # /Names/JavaScript — standard JS registry used by Acrobat
+                if 'Names' in cat_keys:
+                    names_ref = doc.xref_get_key(cat_xref, 'Names')
+                    if names_ref[0] == 'xref':
+                        names_xref = int(names_ref[1].split()[0])
+                        if 'JavaScript' in doc.xref_get_keys(names_xref):
                             report['has_javascript'] = True
-                            js_src_oa = action.get('JS', '')
-                            if js_src_oa:
-                                _add('JavaScript', '/OpenAction/JS',
-                                     'JavaScript in OpenAction')
-                                for hit in self.analyze_javascript(js_src_oa, 'PDF /OpenAction'):
+                            _add('JavaScript', '/JavaScript',
+                                 'JavaScript in /Names/JavaScript dictionary')
+                            # Extract string values from the names-tree leaves
+                            js_ref = doc.xref_get_key(names_xref, 'JavaScript')
+                            js_obj_str = ''
+                            if js_ref[0] == 'xref':
+                                js_obj_str = doc.xref_object(int(js_ref[1].split()[0]))
+                            else:
+                                js_obj_str = doc.xref_object(names_xref)
+                            # Pull plain-string values (JS code) out of the tree
+                            js_strings = re.findall(
+                                r'\(([^()]{20,})\)', js_obj_str
+                            )
+                            for i, js_src in enumerate(js_strings):
+                                for hit in self.analyze_javascript(
+                                    js_src, f'PDF /JavaScript #{i+1}'
+                                ):
                                     if hit not in report['analyses']:
                                         report['analyses'].append(hit)
-                    if 'AA' in root:
-                        _add('AutoExecute', '/AA',
-                             'Additional Actions (AA) on document level found')
-                    # AcroForm / XFA
-                    if 'AcroForm' in root:
-                        acro = root['AcroForm']
-                        if isinstance(acro, dict) and 'XFA' in acro:
+
+                # /OpenAction
+                if 'OpenAction' in cat_keys:
+                    report['has_openaction'] = True
+                    oa_ref = doc.xref_get_key(cat_xref, 'OpenAction')
+                    action_type = ''
+                    js_src_oa   = ''
+                    if oa_ref[0] == 'xref':
+                        act_xref = int(oa_ref[1].split()[0])
+                        act_keys = doc.xref_get_keys(act_xref)
+                        if 'S' in act_keys:
+                            s_ref = doc.xref_get_key(act_xref, 'S')
+                            # value is ('name', '/JavaScript')
+                            action_type = s_ref[1].lstrip('/')
+                        if 'JS' in act_keys:
+                            js_ref2 = doc.xref_get_key(act_xref, 'JS')
+                            if js_ref2[0] == 'string':
+                                js_src_oa = js_ref2[1]
+                    _add('AutoExecute', '/OpenAction',
+                         f'OpenAction found (type: {action_type or "unknown"})')
+                    if action_type == 'JavaScript':
+                        report['has_javascript'] = True
+                        _add('JavaScript', '/OpenAction/JS',
+                             'JavaScript in OpenAction')
+                        if js_src_oa:
+                            for hit in self.analyze_javascript(
+                                js_src_oa, 'PDF /OpenAction'
+                            ):
+                                if hit not in report['analyses']:
+                                    report['analyses'].append(hit)
+
+                # /AA (Additional Actions at document level)
+                if 'AA' in cat_keys:
+                    _add('AutoExecute', '/AA',
+                         'Additional Actions (AA) on document level found')
+
+                # /AcroForm
+                if 'AcroForm' in cat_keys:
+                    acro_ref = doc.xref_get_key(cat_xref, 'AcroForm')
+                    if acro_ref[0] == 'xref':
+                        acro_keys = doc.xref_get_keys(int(acro_ref[1].split()[0]))
+                        if 'XFA' in acro_keys:
                             report['has_forms'] = True
                             _add('XFA', '/XFA',
                                  'XML Forms Architecture (XFA) found — can contain scripts')
                         else:
                             report['has_forms'] = True
                             _add('AcroForm', '/AcroForm', 'PDF AcroForm found')
+                    else:
+                        report['has_forms'] = True
+                        _add('AcroForm', '/AcroForm', 'PDF AcroForm found')
+
             except Exception as exc:
                 logger.debug('PDF catalog inspection failed: %s', exc)
 
@@ -2769,8 +2807,16 @@ class InspectorDaemon:
                 or 'tar archive' in desc):
             return 'archive'
 
-        # Plain text / scripts
-        if mime.startswith('text/') or 'ascii' in desc or 'utf-8' in desc or 'unicode' in desc:
+        # Plain text / scripts — check both MIME/magic and common file extensions
+        _TEXT_EXTS = (
+            '.txt', '.csv', '.log', '.md', '.rst', '.ini', '.cfg', '.conf',
+            '.sh', '.bash', '.zsh', '.fish', '.py', '.rb', '.pl', '.php',
+            '.js', '.ts', '.jsx', '.tsx', '.json', '.xml', '.yaml', '.yml',
+            '.toml', '.bat', '.ps1', '.vbs', '.sql',
+        )
+        if (mime.startswith('text/')
+                or any(kw in desc for kw in ('ascii', 'utf-8', 'unicode'))
+                or any(filename.endswith(e) for e in _TEXT_EXTS)):
             return 'text'
 
         return 'unknown'

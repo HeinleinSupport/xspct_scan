@@ -90,6 +90,31 @@ Integration tests that exercise real Office and RTF documents use files in
 | `autostart-encrypt-standardpassword.xls` | `TestSyncAnalyze`, `TestScanEndpoint` — encrypted OLE macro document |
 | `RTF-Spec-1.7.rtf` | `TestSyncAnalyze`, `TestScanEndpoint` — RTF document |
 | `passwords.txt` | All tests — password wordlist loaded by the daemon fixture |
+| `pdf_javascript.pdf` | `TestPdfJavascriptFixture` — PDF with `/OpenAction` JS, `eval`, `launchURL` |
+| `pdf_embedded.pdf` | `TestPdfEmbeddedFileFixture` — PDF with embedded file attachment |
+| `pdf_uri.pdf` | `TestPdfUriFixture` — PDF with external URI hyperlink |
+| `html_phishing.html` | `TestHtmlPhishingFixture` — form, iframe, meta-refresh, eval, CSS hiding |
+| `archive_mixed.zip` | `TestArchiveMixedFixture` — ZIP with text, JS, and nested PDF members |
+| `email_with_attachment.eml` | `TestEmlFixture` — RFC 2822 e-mail with a PDF attachment |
+| `qr_code.png` | `TestQrCodeFixture` — PNG QR code (→ run `create_fixtures.py` with `qrcode` or `segno`) |
+
+### Generating fixture files
+
+The script `tests/create_fixtures.py` creates all the generated fixtures:
+
+```bash
+python tests/create_fixtures.py
+```
+
+Fixtures are deterministic and safe to commit.  Re-running the script
+overwrites them with identical content.  The PDF fixtures require
+PyMuPDF (a mandatory project dependency).  The QR code PNG additionally
+requires either `qrcode` or `segno`:
+
+```bash
+pip install qrcode   # or: pip install segno
+python tests/create_fixtures.py
+```
 
 If these files are absent the dependent tests are **automatically skipped**
 (guarded by `@pytest.mark.skipif(not os.path.exists(...))`).
@@ -151,6 +176,13 @@ tests/
 | `TestAnalyzeArchive` | unit | ZIP extraction, depth/size guards, YARA on members |
 | `TestAnalyzeArchiveSflock` | unit | sflock2 extraction path: success, empty result, password retry, size pre-check, nested tree walk, decryption password in report, exception recovery |
 | `TestGetDetectedTypeSflockFormats` | unit | New archive format detection: RAR, EML, MSG, CAB, ACE, ISO, TGZ, TBZ2 |
+| `TestPdfJavascriptFixture` | unit + integration | `pdf_javascript.pdf`: `has_javascript`, `has_openaction`, JS analyses, eval/launchURL detection, IOC URL, `/scan` endpoint |
+| `TestPdfEmbeddedFileFixture` | unit | `pdf_embedded.pdf`: `has_embedded_files`, analyses mention filename |
+| `TestPdfUriFixture` | unit | `pdf_uri.pdf`: URI extracted into `iocs.urls` |
+| `TestHtmlPhishingFixture` | unit + integration | `html_phishing.html`: form, iframe, meta-refresh, eval, CSS hiding, base64 smuggling blob, `/scan` endpoint |
+| `TestArchiveMixedFixture` | unit + integration | `archive_mixed.zip`: members extracted, IOCs from text member, nested PDF present, `/scan` endpoint |
+| `TestEmlFixture` | unit | `email_with_attachment.eml`: EML/MSG → archive routing; sflock2 attachment extraction (skipped without sflock2) |
+| `TestQrCodeFixture` | unit | `qr_code.png`: image detection, QR decode + IOC URL (skipped without pyzbar/qrcode) |
 | `TestAnalyzeText` | unit | `analyze_text()` — decode, preview, IOCs, limits |
 | `TestExtractTextPreview` | unit | Text extraction strategies |
 | `TestGetDetectedType` | unit | MIME / extension / magic-byte detection |

@@ -78,7 +78,11 @@ except ImportError:
     _HAS_FITZ = False
 
 import xspct_scan.daemon as xspct
-from tests.conftest import OLE_FILE, RTF_FILE, PASSWD_FILE
+from tests.conftest import (
+    OLE_FILE, RTF_FILE, PASSWD_FILE,
+    PDF_JS_FILE, PDF_EMBEDDED_FILE, PDF_URI_FILE,
+    HTML_PHISHING_FILE, ARCHIVE_MIXED_FILE, EML_FILE, QR_FILE,
+)
 
 # ---------------------------------------------------------------------------
 # Synthetic byte-level fixtures
@@ -2298,3 +2302,318 @@ class TestTextTypePipeline:
             assert resp.status == 200
         finally:
             xspct.config['xspct_analyzers']['text']['enabled'] = saved
+
+
+# ===========================================================================
+# FIXTURE-FILE TESTS — PDF with JavaScript
+# ===========================================================================
+
+@pytest.mark.skipif(
+    not os.path.exists(PDF_JS_FILE),
+    reason='pdf_javascript.pdf not present — run tests/create_fixtures.py',
+)
+class TestPdfJavascriptFixture:
+    """Tests using the generated pdf_javascript.pdf fixture."""
+
+    @pytest.fixture(autouse=True)
+    def _data(self):
+        self.data = open(PDF_JS_FILE, 'rb').read()
+
+    def test_has_javascript_true(self, daemon):
+        r = daemon.analyze_pdf(self.data)
+        assert r is not None
+        assert r['has_javascript'] is True
+
+    def test_has_openaction_true(self, daemon):
+        r = daemon.analyze_pdf(self.data)
+        assert r is not None
+        assert r['has_openaction'] is True
+
+    def test_analyses_contains_javascript_entry(self, daemon):
+        r = daemon.analyze_pdf(self.data)
+        types = [a['type'] for a in r['analyses']]
+        assert 'JavaScript' in types
+
+    def test_analyses_contains_suspicious_js(self, daemon):
+        r = daemon.analyze_pdf(self.data)
+        # analyze_javascript should fire for eval / launchURL / document.write
+        keywords = [a['keyword'] for a in r['analyses']]
+        assert any('eval' in kw or 'launchURL' in kw or 'document.write' in kw
+                   for kw in keywords)
+
+    def test_iocs_contains_evil_url(self, daemon):
+        r = daemon.analyze_pdf(self.data)
+        assert any('evil.example.com' in u for u in r['iocs']['urls'])
+
+    def test_text_preview_present(self, daemon):
+        r = daemon.analyze_pdf(self.data)
+        assert isinstance(r.get('text_preview'), str)
+
+    @pytest.mark.asyncio
+    async def test_scan_endpoint_detects_javascript(self, client):
+        data = open(PDF_JS_FILE, 'rb').read()
+        form = aiohttp.FormData()
+        form.add_field('doc', data, filename='malware.pdf',
+                       content_type='application/pdf')
+        resp = await client.post('/scan', data=form)
+        assert resp.status == 200
+        body = await resp.json()
+        assert body['detected_type'] == 'pdf'
+        assert body['has_javascript'] is True
+
+
+# ===========================================================================
+# FIXTURE-FILE TESTS — PDF with embedded file
+# ===========================================================================
+
+@pytest.mark.skipif(
+    not os.path.exists(PDF_EMBEDDED_FILE),
+    reason='pdf_embedded.pdf not present — run tests/create_fixtures.py',
+)
+class TestPdfEmbeddedFileFixture:
+    """Tests using the generated pdf_embedded.pdf fixture."""
+
+    @pytest.fixture(autouse=True)
+    def _data(self):
+        self.data = open(PDF_EMBEDDED_FILE, 'rb').read()
+
+    def test_has_embedded_files_true(self, daemon):
+        r = daemon.analyze_pdf(self.data)
+        assert r is not None
+        assert r['has_embedded_files'] is True
+
+    def test_analyses_contains_embedded_file_entry(self, daemon):
+        r = daemon.analyze_pdf(self.data)
+        types = [a['type'] for a in r['analyses']]
+        assert 'EmbeddedFile' in types
+
+    def test_analyses_mentions_payload_filename(self, daemon):
+        r = daemon.analyze_pdf(self.data)
+        descriptions = ' '.join(a['description'] for a in r['analyses'])
+        assert 'payload' in descriptions.lower()
+
+
+# ===========================================================================
+# FIXTURE-FILE TESTS — PDF with external URI
+# ===========================================================================
+
+@pytest.mark.skipif(
+    not os.path.exists(PDF_URI_FILE),
+    reason='pdf_uri.pdf not present — run tests/create_fixtures.py',
+)
+class TestPdfUriFixture:
+    """Tests using the generated pdf_uri.pdf fixture."""
+
+    @pytest.fixture(autouse=True)
+    def _data(self):
+        self.data = open(PDF_URI_FILE, 'rb').read()
+
+    def test_iocs_contains_uri(self, daemon):
+        r = daemon.analyze_pdf(self.data)
+        assert r is not None
+        assert any('evil.example.com' in u for u in r['iocs']['urls'])
+
+    def test_is_not_encrypted(self, daemon):
+        r = daemon.analyze_pdf(self.data)
+        assert r['is_encrypted'] is False
+
+
+# ===========================================================================
+# FIXTURE-FILE TESTS — HTML phishing page
+# ===========================================================================
+
+@pytest.mark.skipif(
+    not os.path.exists(HTML_PHISHING_FILE),
+    reason='html_phishing.html not present — run tests/create_fixtures.py',
+)
+class TestHtmlPhishingFixture:
+    """Tests using the generated html_phishing.html fixture."""
+
+    @pytest.fixture(autouse=True)
+    def _data(self):
+        self.data = open(HTML_PHISHING_FILE, 'rb').read()
+
+    def test_has_forms(self, daemon):
+        r = daemon.analyze_html(self.data)
+        assert r is not None
+        assert r['has_forms'] is True
+
+    def test_has_iframes(self, daemon):
+        r = daemon.analyze_html(self.data)
+        assert r['has_iframes'] is True
+
+    def test_has_meta_refresh(self, daemon):
+        r = daemon.analyze_html(self.data)
+        assert r['has_meta_refresh'] is True
+
+    def test_has_scripts(self, daemon):
+        r = daemon.analyze_html(self.data)
+        assert r['has_scripts'] is True
+
+    def test_css_hiding_detected(self, daemon):
+        r = daemon.analyze_html(self.data)
+        types = [a['type'] for a in r['analyses']]
+        # display:none / visibility:hidden / position:absolute should fire
+        assert any(t in ('CSSHiding', 'SuspiciousCSSHiding') or 'CSS' in t
+                   for t in types), f'No CSS hiding found, types={types}'
+
+    def test_analyses_contains_eval(self, daemon):
+        r = daemon.analyze_html(self.data)
+        keywords = [a['keyword'] for a in r['analyses']]
+        assert any('eval' in kw for kw in keywords)
+
+    def test_iocs_contain_phishing_url(self, daemon):
+        r = daemon.analyze_html(self.data)
+        all_urls = ' '.join(r['iocs']['urls'])
+        assert 'example.com' in all_urls
+
+    def test_base64_blob_detected(self, daemon):
+        r = daemon.analyze_html(self.data)
+        types = [a['type'] for a in r['analyses']]
+        assert 'HTMLSmuggling' in types
+
+    @pytest.mark.asyncio
+    async def test_scan_endpoint_phishing_html(self, client):
+        data = open(HTML_PHISHING_FILE, 'rb').read()
+        form = aiohttp.FormData()
+        form.add_field('doc', data, filename='invoice.html',
+                       content_type='text/html')
+        resp = await client.post('/scan', data=form)
+        assert resp.status == 200
+        body = await resp.json()
+        assert body['detected_type'] == 'html'
+        assert body['has_forms'] is True
+        assert body['has_iframes'] is True
+
+
+# ===========================================================================
+# FIXTURE-FILE TESTS — Mixed ZIP archive
+# ===========================================================================
+
+@pytest.mark.skipif(
+    not os.path.exists(ARCHIVE_MIXED_FILE),
+    reason='archive_mixed.zip not present — run tests/create_fixtures.py',
+)
+class TestArchiveMixedFixture:
+    """Tests using the generated archive_mixed.zip fixture."""
+
+    @pytest.fixture(autouse=True)
+    def _data(self):
+        self.data = open(ARCHIVE_MIXED_FILE, 'rb').read()
+
+    def test_archive_files_extracted(self, daemon):
+        r = daemon.analyze_archive('s', 'archive_mixed.zip', self.data)
+        assert r is not None
+        assert len(r['archive_files']) >= 3
+
+    def test_readme_txt_in_archive_files(self, daemon):
+        r = daemon.analyze_archive('s', 'archive_mixed.zip', self.data)
+        names = [f['name'] for f in r['archive_files']]
+        assert 'readme.txt' in names
+
+    def test_nested_pdf_in_archive_files(self, daemon):
+        r = daemon.analyze_archive('s', 'archive_mixed.zip', self.data)
+        names = [f['name'] for f in r['archive_files']]
+        assert any(n.endswith('.pdf') for n in names)
+
+    def test_ioc_extracted_from_text_member(self, daemon):
+        r = daemon.analyze_archive('s', 'archive_mixed.zip', self.data)
+        all_urls = ' '.join(r['iocs']['urls'])
+        assert 'ioc-from-archive.example.com' in all_urls
+
+    def test_report_has_required_keys(self, daemon):
+        r = daemon.analyze_archive('s', 'archive_mixed.zip', self.data)
+        assert r is not None
+        for key in ('archive_files', 'analyses', 'iocs', 'yara_matches', 'iocs_extended'):
+            assert key in r
+
+    def test_detected_as_archive_type(self, daemon):
+        t = daemon.get_detected_type('application/zip', None, 'archive_mixed.zip', None)
+        assert t == 'archive'
+
+    @pytest.mark.asyncio
+    async def test_scan_endpoint_archive(self, client):
+        data = open(ARCHIVE_MIXED_FILE, 'rb').read()
+        form = aiohttp.FormData()
+        form.add_field('doc', data, filename='archive_mixed.zip',
+                       content_type='application/zip')
+        resp = await client.post('/scan', data=form)
+        assert resp.status == 200
+        body = await resp.json()
+        assert body['detected_type'] == 'archive'
+        assert isinstance(body['archive_files'], list)
+        assert len(body['archive_files']) >= 1
+
+
+# ===========================================================================
+# FIXTURE-FILE TESTS — EML e-mail with attachment
+# ===========================================================================
+
+@pytest.mark.skipif(
+    not os.path.exists(EML_FILE),
+    reason='email_with_attachment.eml not present — run tests/create_fixtures.py',
+)
+class TestEmlFixture:
+    """Tests using the generated email_with_attachment.eml fixture."""
+
+    @pytest.fixture(autouse=True)
+    def _data(self):
+        self.data = open(EML_FILE, 'rb').read()
+
+    def test_eml_detected_as_archive(self, daemon):
+        # EML routes to 'archive' so sflock2 can extract attachments
+        t = daemon.get_detected_type('message/rfc822', None, 'test.eml', None)
+        assert t == 'archive'
+
+    def test_eml_extension_detected_as_archive(self, daemon):
+        t = daemon.get_detected_type(None, None, 'email_with_attachment.eml', None)
+        assert t == 'archive'
+
+    def test_msg_extension_detected_as_archive(self, daemon):
+        t = daemon.get_detected_type(None, None, 'outlook_item.msg', None)
+        assert t == 'archive'
+
+    def test_eml_bytes_are_non_empty(self):
+        # Sanity: fixture file was created successfully
+        assert len(self.data) > 100
+
+    @pytest.mark.skipif(not xspct.HAS_SFLOCK, reason='sflock2 not installed')
+    def test_sflock_extracts_eml_attachment(self, daemon):
+        """Integration test: sflock2 extracts the attachment from the EML."""
+        r = daemon.analyze_archive('s', 'email_with_attachment.eml', self.data)
+        assert r is not None
+        names = [f['name'] for f in r['archive_files']]
+        assert any('invoice' in n.lower() or 'pdf' in n.lower() for n in names)
+
+
+# ===========================================================================
+# FIXTURE-FILE TESTS — QR code image
+# ===========================================================================
+
+@pytest.mark.skipif(
+    not os.path.exists(QR_FILE),
+    reason='qr_code.png not present — install qrcode or segno and run tests/create_fixtures.py',
+)
+class TestQrCodeFixture:
+    """Tests using the generated qr_code.png fixture."""
+
+    @pytest.fixture(autouse=True)
+    def _data(self):
+        self.data = open(QR_FILE, 'rb').read()
+
+    def test_detected_as_image(self, daemon):
+        t = daemon.get_detected_type('image/png', None, 'qr_code.png', None)
+        assert t == 'image'
+
+    @pytest.mark.skipif(not xspct.HAS_PYZBAR, reason='pyzbar not installed')
+    def test_qr_code_decoded(self, daemon):
+        r = daemon.analyze_image(self.data, label='qr_code.png')
+        assert r is not None
+        assert len(r['qr_codes']) >= 1
+        assert any('qr-malware.example.com' in v for v in r['qr_codes'])
+
+    @pytest.mark.skipif(not xspct.HAS_PYZBAR, reason='pyzbar not installed')
+    def test_qr_ioc_url_extracted(self, daemon):
+        r = daemon.analyze_image(self.data, label='qr_code.png')
+        all_urls = r['iocs']['urls']
+        assert any('qr-malware.example.com' in u for u in all_urls)

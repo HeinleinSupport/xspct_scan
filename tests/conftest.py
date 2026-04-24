@@ -35,6 +35,15 @@ OLE_FILE:    str = ''
 RTF_FILE:    str = ''
 PASSWD_FILE: str = ''
 
+# Generated fixtures (created by tests/create_fixtures.py)
+PDF_JS_FILE:       str = str(FIXTURES_DIR / 'pdf_javascript.pdf')
+PDF_EMBEDDED_FILE: str = str(FIXTURES_DIR / 'pdf_embedded.pdf')
+PDF_URI_FILE:      str = str(FIXTURES_DIR / 'pdf_uri.pdf')
+HTML_PHISHING_FILE:str = str(FIXTURES_DIR / 'html_phishing.html')
+ARCHIVE_MIXED_FILE:str = str(FIXTURES_DIR / 'archive_mixed.zip')
+EML_FILE:          str = str(FIXTURES_DIR / 'email_with_attachment.eml')
+QR_FILE:           str = str(FIXTURES_DIR / 'qr_code.png')
+
 
 def pytest_addoption(parser):
     parser.addoption(
