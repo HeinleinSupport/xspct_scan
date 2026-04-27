@@ -56,10 +56,10 @@ a simple HTTP API for on-demand scanning.
   results returned on timeout (`202 Accepted`) with `analyzers_completed` /
   `analyzers_pending` fields
 - **Redis result cache** — optional; survives restarts, shared across instances
-- **Prometheus metrics** — exposed at `/metrics`
-- **OpenAPI 3.0** — spec at `/openapi.json`; ReDoc UI at `/apidoc/redoc`
+- **Prometheus metrics** — exposed at `/v1/metrics`
+- **OpenAPI 3.0** — spec at `/v1/openapi.json`; ReDoc UI at `/v1/apidoc/redoc`
 - **Admin API** — live reload of config / passwords / YARA rules via
-  `POST /admin/reload`
+  `POST /v1/admin/reload`
 - **API key auth** — per-header key with rotation support; separate admin key
 
 ## Quick start
@@ -72,13 +72,13 @@ xspct_scan /etc/xspct_scan/config.yml
 Scan a document:
 
 ```bash
-curl -s -F "doc=@invoice.docx" http://localhost:8080/scan | python3 -m json.tool
+curl -s -F "doc=@invoice.docx" http://localhost:8080/v1/scan | python3 -m json.tool
 ```
 
 Or upload raw bytes:
 
 ```bash
-curl -s -X POST http://localhost:8080/scan \
+curl -s -X POST http://localhost:8080/v1/scan \
   --data-binary @invoice.docx \
   -H "Content-Type: application/octet-stream" \
   | python3 -m json.tool
@@ -143,7 +143,7 @@ Key settings:
 | `xspct_listen_address` | `0.0.0.0` | Bind address(es) |
 | `xspct_listen_port` | `8080` | Listen port |
 | `xspct_api_key` | _(empty)_ | Shared secret for `X-Api-Key` auth |
-| `xspct_admin_api_key` | _(empty)_ | Key for `POST /admin/reload` |
+| `xspct_admin_api_key` | _(empty)_ | Key for `POST /v1/admin/reload` |
 | `xspct_redis_cache.enabled` | `false` | Enable Redis result cache |
 | `xspct_password_file` | | Path to wordlist for decrypting encrypted files |
 | `xspct_analyzers` | _(all enabled)_ | Per-analyzer enable/disable + options |
@@ -157,20 +157,20 @@ See [docs/configuration.md](docs/configuration.md) for the full reference.
 
 ## HTTP API
 
-### `POST /scan`
+### `POST /v1/scan`
 
 Submit a document for analysis.
 
 **multipart/form-data** (field `doc`):
 
 ```bash
-curl -s -F "doc=@malware.xlsm" http://localhost:8080/scan
+curl -s -F "doc=@malware.xlsm" http://localhost:8080/v1/scan
 ```
 
 **application/octet-stream** (raw bytes, metadata as query params):
 
 ```bash
-curl -s -X POST "http://localhost:8080/scan?filename=malware.xlsm" \
+curl -s -X POST "http://localhost:8080/v1/scan?filename=malware.xlsm" \
   --data-binary @malware.xlsm \
   -H "Content-Type: application/octet-stream"
 ```
@@ -199,24 +199,24 @@ Example response:
 ```
 
 Returns `202 Accepted` when analysis exceeds the configured timeout.
-Poll `/query?hash=<sha256>` for the result:
+Poll `/v1/query?hash=<sha256>` for the result:
 
 ```bash
-curl "http://localhost:8080/query?hash=sha256..."
+curl "http://localhost:8080/v1/query?hash=sha256..."
 ```
 
 ### Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/scan` | POST | Submit file for analysis |
-| `/query` | GET / POST | Retrieve result by SHA-256 hash |
-| `/health` | GET | `{"status":"ok"}` — load-balancer check |
-| `/ping` | GET | Returns `pong` |
-| `/metrics` | GET | Prometheus metrics |
-| `/openapi.json` | GET | OpenAPI 3.0 spec (requires `[openapi]`) |
-| `/apidoc/redoc` | GET | ReDoc UI (requires `[openapi]`) |
-| `/admin/reload` | POST | Live-reload config/passwords/YARA rules |
+| `/v1/scan` | POST | Submit file for analysis |
+| `/v1/query` | GET / POST | Retrieve result by SHA-256 hash |
+| `/health` | GET | `{"status":"ok"}` — load-balancer check (unversioned) |
+| `/ping` | GET | Returns `pong` (unversioned) |
+| `/v1/metrics` | GET | Prometheus metrics |
+| `/v1/openapi.json` | GET | OpenAPI 3.0 spec (requires `[openapi]`) |
+| `/v1/apidoc/redoc` | GET | ReDoc UI (requires `[openapi]`) |
+| `/v1/admin/reload` | POST | Live-reload config/passwords/YARA rules |
 
 See [docs/api-http.md](docs/api-http.md) for full request/response details.
 
@@ -234,7 +234,7 @@ Point `xspct_password_file` at a newline-delimited file of candidate passwords
 xspct_password_file: /etc/xspct_scan/passwords.txt
 ```
 
-The file is reloaded on `POST /admin/reload`. If not found, a small set of
+The file is reloaded on `POST /v1/admin/reload`. If not found, a small set of
 built-in defaults (`infected`, `virus`, `malware`, …) is used.
 
 ### Per-request passwords
@@ -245,7 +245,7 @@ Extra passwords supplied with the request are tried **before** the global list:
 curl -s \
   -F "doc=@protected.xlsx" \
   -F "passwords=Secret123,CompanyPass" \
-  http://localhost:8080/scan
+  http://localhost:8080/v1/scan
 ```
 
 When decryption succeeds the response includes `"decrypted": true` and
@@ -268,7 +268,7 @@ xspct_analyzers:
 ```
 
 Each match in `yara_matches` carries an `"engine"` field (`"classic"` or
-`"yara-x"`). Reload rules without restart with `POST /admin/reload`.
+`"yara-x"`). Reload rules without restart with `POST /v1/admin/reload`.
 
 ## Sandboxed archive extraction
 
@@ -383,7 +383,7 @@ exceeds `max_size`), `disabled`.
 
 Prometheus counters `xspct_clamav_clean`, `xspct_clamav_infected`,
 `xspct_clamav_errors`, and `xspct_clamav_timeouts` track ClamAV scan outcomes
-at `/metrics`.
+at `/v1/metrics`.
 
 ## Systemd unit
 

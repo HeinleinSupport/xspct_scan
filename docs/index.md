@@ -46,7 +46,7 @@ xspct_scan /etc/xspct_scan/config.yml
 Then scan a document:
 
 ```bash
-curl -s -F "doc=@invoice.docx" http://localhost:8080/scan | python3 -m json.tool
+curl -s -F "doc=@invoice.docx" http://localhost:8080/v1/scan | python3 -m json.tool
 ```
 
 ## Licence
