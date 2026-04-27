@@ -66,7 +66,7 @@ import logging
 import os
 import tempfile
 import zipfile
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import pytest
@@ -76,6 +76,12 @@ try:
     _HAS_FITZ = True
 except ImportError:
     _HAS_FITZ = False
+
+try:
+    import fakeredis
+    _HAS_FAKEREDIS = True
+except ImportError:
+    _HAS_FAKEREDIS = False
 
 import xspct_scan.daemon as xspct
 from tests.conftest import (
@@ -897,7 +903,7 @@ class TestHealthPingRoot:
 class TestMetricsEndpoint:
 
     async def test_metrics_returns_prometheus_text(self, client):
-        r = await client.get('/metrics')
+        r = await client.get('/v1/metrics')
         assert r.status == 200
         text = await r.text()
         for metric in (
@@ -912,20 +918,20 @@ class TestMetricsEndpoint:
             assert metric in text
 
     async def test_metrics_request_counter_increments(self, client):
-        await client.post('/scan', data=_form(PDF_CLEAN, 'a.pdf'))
-        r = await client.get('/metrics')
+        await client.post('/v1/scan', data=_form(PDF_CLEAN, 'a.pdf'))
+        r = await client.get('/v1/metrics')
         text = await r.text()
         assert 'xspct_requests_total 1' in text
 
     async def test_metrics_finished_counter_increments(self, client):
-        await client.post('/scan', data=_form(PDF_CLEAN, 'b.pdf'))
-        r = await client.get('/metrics')
+        await client.post('/v1/scan', data=_form(PDF_CLEAN, 'b.pdf'))
+        r = await client.get('/v1/metrics')
         text = await r.text()
         assert 'xspct_requests_finished 1' in text
 
     async def test_metrics_tasks_in_memory_increases(self, client):
-        await client.post('/scan', data=_form(PDF_CLEAN, 'c.pdf'))
-        r = await client.get('/metrics')
+        await client.post('/v1/scan', data=_form(PDF_CLEAN, 'c.pdf'))
+        r = await client.get('/v1/metrics')
         text = await r.text()
         assert 'xspct_tasks_in_memory 0' not in text or 'xspct_tasks_in_memory 1' in text
 
@@ -935,11 +941,11 @@ class TestScanEndpoint:
     async def test_missing_doc_part_returns_400(self, client):
         form = aiohttp.FormData()
         form.add_field('not_doc', b'irrelevant', filename='x.bin')
-        r = await client.post('/scan', data=form)
+        r = await client.post('/v1/scan', data=form)
         assert r.status == 400
 
     async def test_scan_clean_pdf(self, client):
-        r = await client.post('/scan', data=_form(PDF_CLEAN, 'clean.pdf'))
+        r = await client.post('/v1/scan', data=_form(PDF_CLEAN, 'clean.pdf'))
         assert r.status == 200
         body = await r.json()
         assert body['status']         == 'finished'
@@ -948,7 +954,7 @@ class TestScanEndpoint:
         assert body['has_openaction'] is False
 
     async def test_scan_malicious_pdf_flags(self, client):
-        r = await client.post('/scan', data=_form(PDF_ALL_MARKERS, 'malware.pdf'))
+        r = await client.post('/v1/scan', data=_form(PDF_ALL_MARKERS, 'malware.pdf'))
         assert r.status == 200
         body = await r.json()
         assert body['has_javascript'] is True
@@ -956,7 +962,7 @@ class TestScanEndpoint:
         assert body['is_encrypted']   is True
 
     async def test_scan_malicious_html_flags(self, client):
-        r = await client.post('/scan', data=_form(HTML_MALICIOUS, 'phish.html'))
+        r = await client.post('/v1/scan', data=_form(HTML_MALICIOUS, 'phish.html'))
         assert r.status == 200
         body = await r.json()
         assert body['detected_type'] == 'html'
@@ -965,7 +971,7 @@ class TestScanEndpoint:
         assert body['has_iframes']   is True
 
     async def test_scan_ooxml_returns_200(self, client):
-        r = await client.post('/scan', data=_form(OOXML_DATA, 'doc.docx'))
+        r = await client.post('/v1/scan', data=_form(OOXML_DATA, 'doc.docx'))
         assert r.status == 200
         body = await r.json()
         assert 'file_hash' in body
@@ -975,7 +981,7 @@ class TestScanEndpoint:
         form = aiohttp.FormData()
         form.add_field('doc',       HTML_CLEAN, filename='noext')
         form.add_field('file_mime', 'text/html')
-        r = await client.post('/scan', data=form)
+        r = await client.post('/v1/scan', data=form)
         assert r.status == 200
         body = await r.json()
         assert body['detected_type'] == 'html'
@@ -984,7 +990,7 @@ class TestScanEndpoint:
         form = aiohttp.FormData()
         form.add_field('doc',       PDF_CLEAN, filename='doc.pdf')
         form.add_field('passwords', 'pw1,pw2,TopSecret')
-        r = await client.post('/scan', data=form)
+        r = await client.post('/v1/scan', data=form)
         assert r.status == 200
 
     @pytest.mark.skipif(not _HAS_FITZ, reason='PyMuPDF not installed')
@@ -993,7 +999,7 @@ class TestScanEndpoint:
         form = aiohttp.FormData()
         form.add_field('doc',       PDF_ENCRYPTED, filename='enc.pdf')
         form.add_field('passwords', 'wrong1,wrong2')
-        r = await client.post('/scan', data=form)
+        r = await client.post('/v1/scan', data=form)
         assert r.status == 200
         body = await r.json()
         assert body['is_encrypted'] is True
@@ -1005,7 +1011,7 @@ class TestScanEndpoint:
         form = aiohttp.FormData()
         form.add_field('doc',       PDF_ENCRYPTED, filename='enc.pdf')
         form.add_field('passwords', f'wrong1,{_PDF_ENC_PASSWORD},wrong2')
-        r = await client.post('/scan', data=form)
+        r = await client.post('/v1/scan', data=form)
         assert r.status == 200
         body = await r.json()
         assert body['detected_type'] == 'pdf'
@@ -1013,42 +1019,42 @@ class TestScanEndpoint:
         assert body['decryption_password'] == _PDF_ENC_PASSWORD
 
     async def test_scan_time_taken_present(self, client):
-        r = await client.post('/scan', data=_form(PDF_CLEAN, 'timed.pdf'))
+        r = await client.post('/v1/scan', data=_form(PDF_CLEAN, 'timed.pdf'))
         body = await r.json()
         assert 'time_taken' in body
         assert body['time_taken'] >= 0
 
     async def test_scan_report_has_iocs_key(self, client):
-        r = await client.post('/scan', data=_form(PDF_WITH_URI, 'ioc.pdf'))
+        r = await client.post('/v1/scan', data=_form(PDF_WITH_URI, 'ioc.pdf'))
         body = await r.json()
         assert 'iocs' in body
         assert 'urls' in body['iocs']
 
     async def test_scan_same_file_produces_same_hash(self, client):
         """Same bytes always produce the same SHA-256 file_hash."""
-        r1 = await client.post('/scan', data=_form(PDF_CLEAN, 'a.pdf'))
+        r1 = await client.post('/v1/scan', data=_form(PDF_CLEAN, 'a.pdf'))
         b1 = await r1.json()
-        r2 = await client.post('/scan', data=_form(PDF_CLEAN, 'b.pdf'))
+        r2 = await client.post('/v1/scan', data=_form(PDF_CLEAN, 'b.pdf'))
         b2 = await r2.json()
         assert b1['file_hash'] == b2['file_hash']
         assert b1['file_hash'] == hashlib.sha256(PDF_CLEAN).hexdigest()
 
     async def test_scan_short_timeout_may_return_202(self, client):
         """Very short timeout → 200 (fast path) or 202 (background). Both valid."""
-        r = await client.post('/scan?timeout=0.00001', data=_form(PDF_ALL_MARKERS, 'slow.pdf'))
+        r = await client.post('/v1/scan?timeout=0.00001', data=_form(PDF_ALL_MARKERS, 'slow.pdf'))
         assert r.status in (200, 202)
         body = await r.json()
         assert 'file_hash' in body or 'status' in body
 
     async def test_scan_rtf_flag_accepted(self, client):
-        r = await client.post('/scan?rtf=true', data=_form(PDF_CLEAN, 'test.pdf'))
+        r = await client.post('/v1/scan?rtf=true', data=_form(PDF_CLEAN, 'test.pdf'))
         assert r.status == 200
 
     @pytest.mark.skipif(not os.path.exists(OLE_FILE), reason='OLE sample not present')
     async def test_scan_real_ole_analysis(self, client):
         with open(OLE_FILE, 'rb') as f:
             data = f.read()
-        r = await client.post('/scan', data=_form(data, 'autostart-encrypt-standardpassword.xls'))
+        r = await client.post('/v1/scan', data=_form(data, 'autostart-encrypt-standardpassword.xls'))
         assert r.status == 200
         body = await r.json()
         assert body['decrypted'] is True or body['has_macro'] is True or len(body['analyses']) > 0
@@ -1057,7 +1063,7 @@ class TestScanEndpoint:
     async def test_scan_real_ole_has_ioc_urls(self, client):
         with open(OLE_FILE, 'rb') as f:
             data = f.read()
-        r = await client.post('/scan', data=_form(data, 'autostart-encrypt-standardpassword.xls'))
+        r = await client.post('/v1/scan', data=_form(data, 'autostart-encrypt-standardpassword.xls'))
         body = await r.json()
         iocs = body['iocs']
         # No real network IOCs in this sample — internal Office object references
@@ -1073,7 +1079,7 @@ class TestScanEndpoint:
         form = aiohttp.FormData()
         form.add_field('doc',       data,                             filename='autostart-encrypt-standardpassword.xls')
         form.add_field('passwords', 'wrongpw1,wrongpw2,123456,VelvetSweatshop')
-        r = await client.post('/scan', data=form)
+        r = await client.post('/v1/scan', data=form)
         assert r.status == 200
         body = await r.json()
         assert body['status'] == 'finished'
@@ -1082,7 +1088,7 @@ class TestScanEndpoint:
     async def test_scan_real_rtf(self, client):
         with open(RTF_FILE, 'rb') as f:
             data = f.read()
-        r = await client.post('/scan?rtf=true', data=_form(data, 'sample.rtf'))
+        r = await client.post('/v1/scan?rtf=true', data=_form(data, 'sample.rtf'))
         assert r.status == 200
         body = await r.json()
         assert 'file_hash' in body
@@ -1091,27 +1097,27 @@ class TestScanEndpoint:
 class TestQueryEndpoint:
 
     async def test_get_missing_hash_returns_400(self, client):
-        r = await client.get('/query')
+        r = await client.get('/v1/query')
         assert r.status == 400
 
     async def test_get_unknown_hash_returns_404(self, client):
-        r = await client.get('/query?hash=deadbeef1234')
+        r = await client.get('/v1/query?hash=deadbeef1234')
         assert r.status == 404
 
     async def test_post_missing_hash_returns_400(self, client):
-        r = await client.post('/query', json={})
+        r = await client.post('/v1/query', json={})
         assert r.status == 400
 
     async def test_post_unknown_hash_returns_404(self, client):
-        r = await client.post('/query', json={'hash': 'deadbeef1234'})
+        r = await client.post('/v1/query', json={'hash': 'deadbeef1234'})
         assert r.status == 404
 
     async def test_get_after_scan_returns_finished(self, client):
-        scan_r  = await client.post('/scan', data=_form(PDF_CLEAN, 'q.pdf'))
+        scan_r  = await client.post('/v1/scan', data=_form(PDF_CLEAN, 'q.pdf'))
         scan_b  = await scan_r.json()
         fhash   = scan_b['file_hash']
 
-        query_r = await client.get(f'/query?hash={fhash}')
+        query_r = await client.get(f'/v1/query?hash={fhash}')
         assert query_r.status == 200
         query_b = await query_r.json()
         assert query_b['status']                  == 'finished'
@@ -1119,11 +1125,11 @@ class TestQueryEndpoint:
         assert query_b['report']['detected_type'] == 'pdf'
 
     async def test_post_after_scan_returns_finished(self, client):
-        scan_r = await client.post('/scan', data=_form(HTML_CLEAN, 'q.html'))
+        scan_r = await client.post('/v1/scan', data=_form(HTML_CLEAN, 'q.html'))
         scan_b = await scan_r.json()
         fhash  = scan_b['file_hash']
 
-        query_r = await client.post('/query', json={'hash': fhash})
+        query_r = await client.post('/v1/query', json={'hash': fhash})
         assert query_r.status == 200
         query_b = await query_r.json()
         assert query_b['status'] == 'finished'
@@ -1133,11 +1139,11 @@ class TestQueryEndpoint:
     async def test_get_ole_report_after_scan(self, client):
         with open(OLE_FILE, 'rb') as f:
             data = f.read()
-        scan_r = await client.post('/scan', data=_form(data, 'autostart-encrypt-standardpassword.xls'))
+        scan_r = await client.post('/v1/scan', data=_form(data, 'autostart-encrypt-standardpassword.xls'))
         scan_b = await scan_r.json()
         fhash  = scan_b['file_hash']
 
-        query_r = await client.get(f'/query?hash={fhash}')
+        query_r = await client.get(f'/v1/query?hash={fhash}')
         assert query_r.status == 200
         query_b = await query_r.json()
         assert query_b['status'] == 'finished'
@@ -1152,24 +1158,24 @@ class TestAuthentication:
         assert r.status == 200
 
     async def test_scan_no_key_returns_401(self, auth_client):
-        r = await auth_client.post('/scan', data=_form(PDF_CLEAN, 'auth.pdf'))
+        r = await auth_client.post('/v1/scan', data=_form(PDF_CLEAN, 'auth.pdf'))
         assert r.status == 401
 
     async def test_query_get_no_key_returns_401(self, auth_client):
-        r = await auth_client.get('/query?hash=abc')
+        r = await auth_client.get('/v1/query?hash=abc')
         assert r.status == 401
 
     async def test_query_post_no_key_returns_401(self, auth_client):
-        r = await auth_client.post('/query', json={'hash': 'abc'})
+        r = await auth_client.post('/v1/query', json={'hash': 'abc'})
         assert r.status == 401
 
     async def test_metrics_no_key_returns_401(self, auth_client):
-        r = await auth_client.get('/metrics')
+        r = await auth_client.get('/v1/metrics')
         assert r.status == 401
 
     async def test_scan_correct_key_returns_200(self, auth_client):
         r = await auth_client.post(
-            '/scan',
+            '/v1/scan',
             headers={'X-Api-Key': 'test-secret-key'},
             data=_form(PDF_CLEAN, 'auth.pdf'),
         )
@@ -1177,7 +1183,7 @@ class TestAuthentication:
 
     async def test_scan_wrong_key_returns_401(self, auth_client):
         r = await auth_client.post(
-            '/scan',
+            '/v1/scan',
             headers={'X-Api-Key': 'totally-wrong'},
             data=_form(PDF_CLEAN, 'auth.pdf'),
         )
@@ -1186,14 +1192,14 @@ class TestAuthentication:
     async def test_query_correct_key_returns_404_not_401(self, auth_client):
         """After auth passes, unknown hash → 404 (not 401)."""
         r = await auth_client.get(
-            '/query?hash=deadbeef',
+            '/v1/query?hash=deadbeef',
             headers={'X-Api-Key': 'test-secret-key'},
         )
         assert r.status == 404
 
     async def test_metrics_correct_key_returns_200(self, auth_client):
         r = await auth_client.get(
-            '/metrics',
+            '/v1/metrics',
             headers={'X-Api-Key': 'test-secret-key'},
         )
         assert r.status == 200
@@ -2096,7 +2102,7 @@ class TestScanOctetStream:
 
     async def test_octet_stream_clean_pdf_returns_200(self, client):
         r = await client.post(
-            '/scan?filename=test.pdf',
+            '/v1/scan?filename=test.pdf',
             data=PDF_CLEAN,
             headers={'Content-Type': 'application/octet-stream'},
         )
@@ -2106,11 +2112,11 @@ class TestScanOctetStream:
         assert body['file_hash'] == hashlib.sha256(PDF_CLEAN).hexdigest()
 
     async def test_octet_stream_same_hash_as_multipart(self, client):
-        r1 = await client.post('/scan', data=_form(PDF_CLEAN, 'a.pdf'))
+        r1 = await client.post('/v1/scan', data=_form(PDF_CLEAN, 'a.pdf'))
         b1 = await r1.json()
 
         r2 = await client.post(
-            '/scan',
+            '/v1/scan',
             data=PDF_CLEAN,
             headers={'Content-Type': 'application/octet-stream'},
         )
@@ -2119,7 +2125,7 @@ class TestScanOctetStream:
 
     async def test_unsupported_content_type_returns_415(self, client):
         r = await client.post(
-            '/scan',
+            '/v1/scan',
             data=b'some data',
             headers={'Content-Type': 'text/xml'},
         )
@@ -2127,7 +2133,7 @@ class TestScanOctetStream:
 
     async def test_octet_stream_with_filename_query_param(self, client):
         r = await client.post(
-            '/scan?filename=payload.html',
+            '/v1/scan?filename=payload.html',
             data=HTML_CLEAN,
             headers={'Content-Type': 'application/octet-stream'},
         )
@@ -2179,7 +2185,7 @@ class TestTwoTierConcurrency:
     # --- Normal scan finishes within timeout (foreground slot released) ---
 
     async def test_normal_scan_releases_fg_slot(self, client):
-        r = await client.post('/scan', data=_form(PDF_CLEAN, 'test.pdf'))
+        r = await client.post('/v1/scan', data=_form(PDF_CLEAN, 'test.pdf'))
         assert r.status == 200
         body = await r.json()
         assert body['status'] == 'finished'
@@ -2200,7 +2206,7 @@ class TestTwoTierConcurrency:
         before = xspct.stats['foreground_overloaded']
         try:
             r = await client.post(
-                '/scan?timeout=0.05',
+                '/v1/scan?timeout=0.05',
                 data=_form(PDF_CLEAN, 'test.pdf'),
             )
             assert r.status == 503
@@ -2237,7 +2243,7 @@ class TestTwoTierConcurrency:
         before = xspct.stats['background_rejected']
         try:
             r = await client.post(
-                '/scan?timeout=0.1',
+                '/v1/scan?timeout=0.1',
                 data=_form(PDF_CLEAN, 'slow.pdf'),
             )
             assert r.status == 202
@@ -2253,7 +2259,7 @@ class TestTwoTierConcurrency:
     # --- /metrics exposes new counters -----------------------------------
 
     async def test_metrics_contains_concurrency_lines(self, client):
-        r = await client.get('/metrics')
+        r = await client.get('/v1/metrics')
         assert r.status == 200
         text = await r.text()
         for key in ('xspct_foreground_overloaded', 'xspct_background_rejected',
@@ -2270,14 +2276,14 @@ class TestAdminReload:
 
     async def test_no_admin_key_configured_returns_403(self, client):
         xspct.config['xspct_admin_api_key'] = []
-        r = await client.post('/admin/reload')
+        r = await client.post('/v1/admin/reload')
         assert r.status == 403
 
     async def test_wrong_admin_key_returns_403(self, client):
         xspct.config['xspct_admin_api_key'] = ['correct-admin-key']
         try:
             r = await client.post(
-                '/admin/reload',
+                '/v1/admin/reload',
                 headers={'X-Admin-Api-Key': 'wrong-key'},
             )
             assert r.status == 403
@@ -2288,7 +2294,7 @@ class TestAdminReload:
         xspct.config['xspct_admin_api_key'] = ['admin-secret']
         try:
             r = await client.post(
-                '/admin/reload',
+                '/v1/admin/reload',
                 headers={'X-Admin-Api-Key': 'admin-secret'},
             )
             assert r.status == 200
@@ -2308,7 +2314,7 @@ class TestOpenApiEndpoints:
     async def test_openapi_json_returns_200_when_pydantic(self, client):
         if not xspct.HAS_PYDANTIC:
             pytest.skip('pydantic not installed')
-        r = await client.get('/openapi.json')
+        r = await client.get('/v1/openapi.json')
         assert r.status == 200
         body = await r.json()
         assert body.get('openapi', '').startswith('3.')
@@ -2317,7 +2323,7 @@ class TestOpenApiEndpoints:
     async def test_redoc_returns_200_when_pydantic(self, client):
         if not xspct.HAS_PYDANTIC:
             pytest.skip('pydantic not installed')
-        r = await client.get('/apidoc/redoc')
+        r = await client.get('/v1/apidoc/redoc')
         assert r.status == 200
         text = await r.text()
         assert 'redoc' in text.lower() or 'openapi' in text.lower()
@@ -2325,7 +2331,7 @@ class TestOpenApiEndpoints:
     async def test_openapi_json_returns_501_without_pydantic(self, client):
         if xspct.HAS_PYDANTIC:
             pytest.skip('pydantic is installed; skipping no-pydantic path')
-        r = await client.get('/openapi.json')
+        r = await client.get('/v1/openapi.json')
         assert r.status in (200, 501)  # implementation may vary
 
 
@@ -2439,7 +2445,7 @@ class TestTextTypePipeline:
     async def test_text_file_detected_and_analysed(self, client):
         payload = b'Hello from a plain text file with no special structure.'
         resp = await client.post(
-            '/scan',
+            '/v1/scan',
             data=payload,
             headers={
                 'Content-Type': 'application/octet-stream',
@@ -2462,7 +2468,7 @@ class TestTextTypePipeline:
         try:
             payload = b'Plain text content for scan.'
             resp = await client.post(
-                '/scan',
+                '/v1/scan',
                 data=payload,
                 headers={
                     'Content-Type': 'application/octet-stream',
@@ -2525,7 +2531,7 @@ class TestPdfJavascriptFixture:
         form = aiohttp.FormData()
         form.add_field('doc', data, filename='malware.pdf',
                        content_type='application/pdf')
-        resp = await client.post('/scan', data=form)
+        resp = await client.post('/v1/scan', data=form)
         assert resp.status == 200
         body = await resp.json()
         assert body['detected_type'] == 'pdf'
@@ -2648,7 +2654,7 @@ class TestHtmlPhishingFixture:
         form = aiohttp.FormData()
         form.add_field('doc', data, filename='invoice.html',
                        content_type='text/html')
-        resp = await client.post('/scan', data=form)
+        resp = await client.post('/v1/scan', data=form)
         assert resp.status == 200
         body = await resp.json()
         assert body['detected_type'] == 'html'
@@ -2707,7 +2713,7 @@ class TestArchiveMixedFixture:
         form = aiohttp.FormData()
         form.add_field('doc', data, filename='archive_mixed.zip',
                        content_type='application/zip')
-        resp = await client.post('/scan', data=form)
+        resp = await client.post('/v1/scan', data=form)
         assert resp.status == 200
         body = await resp.json()
         assert body['detected_type'] == 'archive'
@@ -2787,3 +2793,100 @@ class TestQrCodeFixture:
         r = daemon.analyze_image(self.data, label='qr_code.png')
         all_urls = r['iocs']['urls']
         assert any('qr-malware.example.com' in u for u in all_urls)
+
+
+# ===========================================================================
+# UNIT TESTS — Redis cache (fakeredis)
+# ===========================================================================
+
+@pytest.mark.skipif(not _HAS_FAKEREDIS, reason='fakeredis not installed')
+class TestRedisCache:
+    """Tests for get_cached_report / cache_report using a fakeredis backend."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, daemon):
+        self.daemon = daemon
+        saved = dict(xspct.config['xspct_redis_cache'])
+        xspct.config['xspct_redis_cache']['enabled'] = True
+        xspct.config['xspct_redis_cache']['expire'] = 3600
+        xspct.config['xspct_redis_cache']['prefix'] = 'xspct:'
+        xspct.config['xspct_redis_cache']['max_errors'] = 3
+        self.daemon.redis_pool = fakeredis.FakeAsyncRedis(decode_responses=True)
+        self.daemon._redis_error_count = 0
+        yield
+        xspct.config['xspct_redis_cache'].update(saved)
+        self.daemon.redis_pool = None
+
+    async def test_cache_miss_returns_none(self):
+        result = await self.daemon.get_cached_report('s', 'a' * 64)
+        assert result is None
+
+    async def test_cache_hit_returns_report(self):
+        report = {'hash': 'a' * 64, 'verdict': 'clean'}
+        await self.daemon.cache_report('s', 'a' * 64, report)
+        result = await self.daemon.get_cached_report('s', 'a' * 64)
+        assert result == report
+
+    async def test_cache_report_sets_ttl(self):
+        report = {'hash': 'b' * 64}
+        await self.daemon.cache_report('s', 'b' * 64, report)
+        ttl = await self.daemon.redis_pool.ttl('xspct:' + 'b' * 64)
+        assert 0 < ttl <= 3600
+
+    async def test_cache_report_also_stored_in_tasks(self):
+        report = {'hash': 'c' * 64}
+        await self.daemon.cache_report('s', 'c' * 64, report)
+        assert 'c' * 64 in self.daemon.tasks
+
+    async def test_cache_miss_increments_stat(self):
+        initial = xspct.stats['redis_misses']
+        await self.daemon.get_cached_report('s', 'd' * 64)
+        assert xspct.stats['redis_misses'] == initial + 1
+
+    async def test_cache_hit_increments_stat(self):
+        report = {'hash': 'e' * 64}
+        await self.daemon.cache_report('s', 'e' * 64, report)
+        initial = xspct.stats['redis_hits']
+        await self.daemon.get_cached_report('s', 'e' * 64)
+        assert xspct.stats['redis_hits'] == initial + 1
+
+    async def test_disabled_skips_lookup(self):
+        xspct.config['xspct_redis_cache']['enabled'] = False
+        result = await self.daemon.get_cached_report('s', 'f' * 64)
+        assert result is None
+
+    async def test_disabled_skips_store(self):
+        xspct.config['xspct_redis_cache']['enabled'] = False
+        await self.daemon.cache_report('s', 'g' * 64, {'hash': 'g' * 64})
+        # key must not exist in fake redis
+        raw = await self.daemon.redis_pool.get('xspct:' + 'g' * 64)
+        assert raw is None
+
+    async def test_circuit_breaker_open_returns_none(self):
+        self.daemon._redis_error_count = 10  # exceeds max_errors (3)
+        result = await self.daemon.get_cached_report('s', 'h' * 64)
+        assert result is None
+
+    async def test_circuit_breaker_resets_after_success(self):
+        self.daemon._redis_error_count = 1
+        report = {'hash': 'i' * 64}
+        await self.daemon.cache_report('s', 'i' * 64, report)
+        await self.daemon.get_cached_report('s', 'i' * 64)
+        assert self.daemon._redis_error_count == 0
+
+    async def test_get_error_increments_error_count(self):
+        broken = AsyncMock()
+        broken.get = AsyncMock(side_effect=ConnectionError('redis down'))
+        self.daemon.redis_pool = broken
+        result = await self.daemon.get_cached_report('s', 'j' * 64)
+        assert result is None
+        assert self.daemon._redis_error_count == 1
+        assert xspct.stats['redis_errors'] == 1
+
+    async def test_set_error_increments_error_count(self):
+        broken = AsyncMock()
+        broken.setex = AsyncMock(side_effect=ConnectionError('redis down'))
+        self.daemon.redis_pool = broken
+        await self.daemon.cache_report('s', 'k' * 64, {'hash': 'k' * 64})
+        assert self.daemon._redis_error_count == 1
+        assert xspct.stats['redis_errors'] == 1
