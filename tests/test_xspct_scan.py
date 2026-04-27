@@ -1323,14 +1323,14 @@ class TestAnalyzeImage:
 
     def test_empty_bytes_returns_empty_structure(self, daemon):
         r = daemon.analyze_image(b'')
-        assert r['ocr_text'] == ''
+        assert r['ocr_text'] == '' or r['ocr_text'] == []
         assert r['qr_codes'] == []
         assert r['analyses'] == []
         assert r['iocs'] == {'urls': [], 'ips': [], 'domains': []}
 
     def test_invalid_bytes_returns_empty_structure(self, daemon):
         r = daemon.analyze_image(b'this is not an image at all XXXX')
-        assert r['ocr_text'] == ''
+        assert r['ocr_text'] == '' or r['ocr_text'] == []
         assert r['qr_codes'] == []
 
     def test_return_structure_keys(self, daemon):
@@ -1342,7 +1342,8 @@ class TestAnalyzeImage:
     def test_blank_png_does_not_raise(self, daemon):
         png = _make_png()
         r = daemon.analyze_image(png, label='test blank')
-        assert isinstance(r['ocr_text'], str)
+        # ocr_text is now list[dict] (one entry per OCR engine) or [] when skipped
+        assert isinstance(r['ocr_text'], (str, list))
         assert isinstance(r['qr_codes'], list)
         assert isinstance(r['analyses'], list)
 
@@ -1737,7 +1738,7 @@ class TestSyncAnalyzeYara:
         xspct.config['xspct_analyzers']['yara']['enabled'] = True
         call_log = []
 
-        def _fake_yara(data, filename='', file_mime=''):
+        def _fake_yara(data, filename='', file_mime='', s=''):
             call_log.append(data)
             return {'yara_matches': [hit]}
 
@@ -2078,13 +2079,13 @@ class TestPartialReport:
 class TestTextFull:
 
     def test_text_full_absent_by_default(self, daemon):
-        """xspct_include_text=False (default): text_full should be None."""
-        saved = xspct.config['xspct_include_text']
-        xspct.config['xspct_include_text'] = False
+        """xspct_include_text_full=False (default): text_full should be None."""
+        saved = xspct.config['xspct_include_text_full']
+        xspct.config['xspct_include_text_full'] = False
         try:
             r = daemon.sync_analyze('s', 'doc.pdf', PDF_CLEAN, None)
         finally:
-            xspct.config['xspct_include_text'] = saved
+            xspct.config['xspct_include_text_full'] = saved
         assert r.get('text_full') is None
 
     def test_scan_report_has_text_full_key(self):

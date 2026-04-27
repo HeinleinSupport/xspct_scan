@@ -5116,7 +5116,10 @@ async def make_app() -> web.Application:
     app.router.add_post('/v1/admin/reload',  daemon.handle_admin_reload)
     app.router.add_get('/v1/openapi.json',   daemon.handle_openapi_json)
     app.router.add_get('/v1/apidoc/redoc',   daemon.handle_redoc)
-    app.router.add_get('/health',  lambda r: web.Response(text='OK'))
-    app.router.add_get('/ping',    lambda r: web.Response(text='pong'))
-    app.router.add_get('/',        lambda r: web.Response(text='xspct-scan'))
+    async def _health(r: web.Request) -> web.Response: return web.Response(text='OK')
+    async def _ping(r: web.Request) -> web.Response: return web.Response(text='pong')
+    async def _root(r: web.Request) -> web.Response: return web.Response(text='xspct-scan')
+    app.router.add_get('/health', _health)
+    app.router.add_get('/ping',   _ping)
+    app.router.add_get('/',       _root)
     return app

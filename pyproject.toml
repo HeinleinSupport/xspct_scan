@@ -94,6 +94,17 @@ packages = ["src/xspct_scan"]
 asyncio_mode = "auto"
 testpaths   = ["tests"]
 addopts     = "-v --tb=short"
+filterwarnings = [
+    # oletools uses the pre-3.0 pyparsing camelCase API
+    "ignore::pyparsing.exceptions.PyparsingDeprecationWarning",
+    # clamd still imports pkg_resources
+    "ignore:pkg_resources is deprecated:DeprecationWarning:clamd",
+    # sphinxcontrib namespace package uses legacy pkg_resources.declare_namespace
+    "ignore:Deprecated call to `pkg_resources.declare_namespace:DeprecationWarning:pkg_resources",
+    # easyocr / torch quantization API scheduled for removal in torch 2.10
+    "ignore:.*torch.ao.quantization.*:DeprecationWarning",
+    "ignore:.*torch.quantization.*:DeprecationWarning",
+]
 
 [tool.coverage.run]
 source = ["src/xspct_scan"]
