@@ -35,6 +35,7 @@ docs/_build/
 *.swp
 *~
 .DS_Store
+
 tests/fixtures/archive_mixed.zip
 tests/fixtures/email_with_attachment.eml
 tests/fixtures/html_phishing.html
@@ -42,3 +43,6 @@ tests/fixtures/pdf_embedded.pdf
 tests/fixtures/pdf_javascript.pdf
 tests/fixtures/pdf_uri.pdf
 tests/fixtures/qr_code.png
+
+.github/copilot-instructions.md
+CLAUDE.md

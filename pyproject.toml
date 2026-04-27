@@ -1,14 +1,35 @@
 # SPDX-License-Identifier: EUPL-1.2
-# Copyright (C) 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
+# SPDX-FileCopyrightText: 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "xspct-scan"
 version = "2.0.0"
 description = "Async HTTP daemon for scanning Office/PDF/HTML documents for malware indicators"
+readme = "README.md"
+license = { text = "EUPL-1.2" }
+authors = [
+  { name = "Carsten Rosenberg", email = "c.rosenberg@heinlein-support.de" },
+]
 requires-python = ">=3.10"
+keywords = ["rspamd", "malware", "pdf", "office", "oletools", "aiohttp", "scanner"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Environment :: No Input/Output (Daemon)",
+  "Framework :: AsyncIO",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: European Union Public Licence 1.2 (EUPL 1.2)",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Communications :: Email :: Filters",
+  "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+  "Topic :: Security",
+]
 dependencies = [
     "aiohttp>=3.9",
     "oletools>=0.60",
@@ -30,11 +51,13 @@ enrichment = [
     "Pillow>=10",
     "pytesseract>=0.3",
     "pyzbar>=0.1",
+    "easyocr>=1.7",
 ]
 dev    = [
     "pytest>=9",
     "pytest-asyncio>=1.0",
     "pytest-aiohttp>=1.0",
+    "pytest-cov>=5.0",
 ]
 openapi = [
     "pydantic>=2.0",
@@ -43,6 +66,7 @@ advanced = [
     "yara-python>=4.3",
     "yara-x>=0.9",
     "iocsearcher>=0.5",
+    "tldextract>=5.0",
     "py7zr>=0.20",
     "SFlock2>=0.3",
 ]
@@ -54,13 +78,26 @@ docs   = [
     "sphinxcontrib-redoc>=1.6",
 ]
 
+[project.urls]
+Repository = "https://github.com/heinlein-support/xspct_scan"
+Issues = "https://github.com/heinlein-support/xspct_scan/issues"
+
 [project.scripts]
 xspct-scan    = "xspct_scan.__main__:main"
 xspct-client  = "xspct_scan.client:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.hatch.build.targets.wheel]
+packages = ["src/xspct_scan"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths   = ["tests"]
+addopts     = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["src/xspct_scan"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

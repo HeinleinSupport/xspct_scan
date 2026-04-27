@@ -12,14 +12,28 @@ It exposes a simple HTTP API designed to integrate with
 
 ```{toctree}
 :maxdepth: 2
-:caption: Contents
+:caption: User Guide
 
-installation
-configuration
-api-http
-api-python
-development
+guide/installation
+guide/configuration
+guide/api-http
+guide/api-python
+guide/development
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: API Reference
+
+reference/index
+```
+
+```{toctree}
+:maxdepth: 1
+:caption: Project
+
 changelog
+license
 ```
 
 ## Quick start

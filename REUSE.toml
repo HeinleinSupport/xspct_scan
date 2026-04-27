@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: EUPL-1.2
-# Copyright (C) 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
+# SPDX-FileCopyrightText: 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
 
 version = 1
 
@@ -24,6 +24,7 @@ path = [
     ".github/agents/xspct-feature.agent.md",
     ".gitignore",
     ".reuseignore",
+    "CLAUDE.md",
     "docs/**",
 ]
 SPDX-FileCopyrightText = "2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>"

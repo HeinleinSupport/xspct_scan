@@ -1,2 +1,25 @@
-# Sphinx build output - exclude from REUSE scanning
-docs/_build
+# SPDX-License-Identifier: EUPL-1.2
+# SPDX-FileCopyrightText: 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
+
+# Virtual environment
+.venv/
+
+# Editor / IDE
+.idea/
+.vscode/
+
+# Python caches (covered by REUSE.toml annotations, but exclude from lint)
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Build artefacts
+dist/
+build/
+*.egg-info/
+
+# Sphinx build output
+docs/_build/
+
+# pytest cache
+.pytest_cache/

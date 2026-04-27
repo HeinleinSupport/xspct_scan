@@ -38,11 +38,12 @@ a simple HTTP API for on-demand scanning.
   [yara-x](https://github.com/VirusTotal/yara-x) (Rust rewrite); both engines
   can run simultaneously for comparison
 - **Image analysis** — OCR text extraction via
-  [pytesseract](https://github.com/madmaze/pytesseract) (wraps Tesseract),
-  QR-code and barcode decoding via
+  [pytesseract](https://github.com/madmaze/pytesseract) (wraps Tesseract) and
+  [EasyOCR](https://github.com/JaidedAI/EasyOCR) (both run in parallel; results
+  are merged and deduplicated), QR-code and barcode decoding via
   [pyzbar](https://github.com/NaturalHistoryMuseum/pyzbar) (requires the
   `libzbar0` system library), and EXIF metadata extraction with GPS coordinate
-  flagging (optional; all three require `[enrichment]`)
+  flagging (optional; all require `[enrichment]`)
 - **Archive extraction** — sandboxed extraction via
   [SFlock2](https://github.com/doomedraven/sflock2) (zipjail usermode sandbox)
   covering ZIP, 7z, RAR, TAR/TGZ/TBZ2, CAB, ACE, ISO, EML, MSG, MSO, lzip,
@@ -110,7 +111,7 @@ pip install xspct_scan
 |-------|----------|----------|
 | `uvloop` | `uvloop` | Higher-throughput async event loop |
 | `redis` | `redis[asyncio]` | Persistent result cache across restarts |
-| `enrichment` | `Pillow`, `pytesseract`, `pyzbar`, `clamd`, `jsbeautifier`, `quickjs`, `tree-sitter` | Image OCR/barcode/EXIF, ClamAV integration, JS deobfuscation (QuickJS sandbox opt-in via config) |
+| `enrichment` | `Pillow`, `pytesseract`, `pyzbar`, `easyocr`, `clamd`, `jsbeautifier`, `quickjs`, `tree-sitter` | Image OCR/barcode/EXIF (Tesseract + EasyOCR), ClamAV integration, JS deobfuscation (QuickJS sandbox opt-in via config) |
 | `openapi` | `pydantic>=2.0` | OpenAPI 3.0 spec + ReDoc UI |
 | `advanced` | `yara-python`, `yara-x`, `iocsearcher`, `py7zr`, `SFlock2` | YARA scanning, extended IOCs, sandboxed archive extraction (ZIP/RAR/7z/EML/MSG/…) |
 
@@ -292,8 +293,10 @@ so that email attachments are extracted and analysed.
 When `[enrichment]` is installed, raster images (JPEG, PNG, GIF, BMP, TIFF,
 WebP, ICO) are passed through two additional analysis steps:
 
-1. **OCR** — Tesseract extracts embedded text, which is then included in the
-   IOC extraction pipeline (URLs, IPs, domains, etc.).
+1. **OCR** — Tesseract and EasyOCR both run in parallel and extract embedded
+   text, which is then included in the IOC extraction pipeline (URLs, IPs,
+   domains, etc.). EasyOCR tries a normal and an inverted variant and stops
+   as soon as text is found.
 2. **QR / barcode decode** — pyzbar decodes any QR codes or 1-D barcodes found
    in the image; decoded payloads are surfaced in `qr_codes` and added to the
    IOC results.

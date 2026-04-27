@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: EUPL-1.2
-# Copyright (C) 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
+# SPDX-FileCopyrightText: 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
 """
 xspct-client — command-line client for the xspct-scan HTTP API.
 
@@ -14,7 +14,7 @@ Options::
     --timeout SECS      Analysis timeout in seconds passed to the daemon (default: 30)
     --passwords LIST    Comma-separated passwords to try for encrypted files
     --rtf               Enable RTF object extraction (passes ?rtf=true)
-    --poll              Poll /query after a 202 response until the result is ready
+    --poll              Poll /v1/query after a 202 response until the result is ready
     --poll-interval N   Seconds between poll attempts (default: 2)
     --json              Output raw JSON instead of a human-readable summary
     --output FILE       Write JSON result(s) to FILE (single result or JSON array)
@@ -201,7 +201,7 @@ async def _poll_result(
         await asyncio.sleep(interval)
         try:
             async with session.get(
-                f"{base_url}/query",
+                f"{base_url}/v1/query",
                 params={"hash": file_hash},
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=15),
@@ -227,7 +227,7 @@ async def scan_file(
     poll_interval: float,
     no_color: bool,
 ) -> dict[str, Any] | None:
-    """POST *path* to /scan. Returns the result dict or None on error."""
+    """POST *path* to /v1/scan. Returns the result dict or None on error."""
     headers: dict[str, str] = {}
     if api_key:
         headers["X-Api-Key"] = api_key
@@ -245,7 +245,7 @@ async def scan_file(
             if passwords:
                 form.add_field("passwords", passwords)
             async with session.post(
-                f"{base_url}/scan",
+                f"{base_url}/v1/scan",
                 data=form,
                 headers=headers,
                 params=params,
@@ -412,7 +412,7 @@ def main() -> None:
     parser.add_argument(
         "--poll",
         action="store_true",
-        help="Poll /query until the result is ready when a 202 is returned",
+        help="Poll /v1/query until the result is ready when a 202 is returned",
     )
     parser.add_argument(
         "--poll-interval",

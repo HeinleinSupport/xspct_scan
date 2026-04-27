@@ -12,7 +12,7 @@ xspct_listen_port: 8080
 xspct_listen_backlog: 256
 
 # Logging: 10=DEBUG  20=INFO  30=WARNING  40=ERROR
-xspct_log_level: 20
+xspct_log_level: 10
 xspct_log_prefix: 'xspct-scan'
 
 # API key authentication (leave empty to disable)
@@ -41,7 +41,7 @@ xspct_tls:
 #
 # Rule of thumb: set xspct_foreground_slots + xspct_background_slots ≤ clamd MaxThreads.
 xspct_clamav:
-  enabled: false
+  enabled: true
   socket: /var/run/clamav/clamd.ctl   # non-empty → Unix socket; empty → TCP
   host: 127.0.0.1
   port: 3310
@@ -77,28 +77,24 @@ xspct_analyzers:
   pdf:        {enabled: true}
   html:       {enabled: true}
   office:     {enabled: true}
-  yara:       {enabled: false, rules_path: ''}   # classic yara-python engine
-  yara_x:     {enabled: false, rules_path: ''}   # modern yara-x (Rust) engine — enable both for comparison
+  yara:       {enabled: true, rules_path: '/home/cr/git/xspct_scan/yara'}   # classic yara-python engine
+  yara_x:     {enabled: true, rules_path: '/home/cr/git/xspct_scan/yara'}   # modern yara-x (Rust) engine — enable both for comparison
   image:      {enabled: true}
   archive:    {enabled: true}
   iocs:       {enabled: true}
   javascript: {enabled: true, quickjs: false}  # set quickjs: true to enable sandboxed JS emulation
   text:       {enabled: true}   # plain-text / script files (feeds YARA + iocsearcher)
 
-# When true (default), 'text_preview' (a short truncated excerpt) is included in
-# every response. Set to false to reduce response size.
-xspct_include_text_preview: true
-
 # When true, the full extracted document text is returned as 'text_full'.
-# When false (default), 'text_full' is omitted from the response.
-xspct_include_text_full: false
+# When false (default), only the truncated 'text_preview' is included.
+xspct_include_text: false
 
 # Maximum characters for 'text_preview' (the short excerpt included in every
 # response). Keep this small for low-latency API consumers.
 xspct_text_preview_length: 2000
 
 # Maximum characters for internal full-text extraction used by iocsearcher
-# and (when xspct_include_text_full is true) for the 'text_full' report field.
+# and (when xspct_include_text is true) for the 'text_full' report field.
 # Set higher to improve IOC recall on long documents.
 xspct_text_max_length: 50000
 
@@ -107,12 +103,6 @@ xspct_archive_max_depth: 2
 
 # Maximum total bytes extracted from a single archive (default 50 MB).
 xspct_archive_max_size: 52428800
-
-# Fall back to stdlib zipfile / py7zr when sflock2 is unavailable or fails.
-# Disabled by default: the stdlib extractors run without a sandbox so they
-# should only be enabled in trusted environments or when sflock2 cannot be
-# installed.
-xspct_archive_stdlib_fallback: false
 
 # When true, partial reports (from timed-out requests) are also cached.
 xspct_cache_partial: false

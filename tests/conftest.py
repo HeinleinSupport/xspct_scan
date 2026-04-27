@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: EUPL-1.2
-# Copyright (C) 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
+# SPDX-FileCopyrightText: 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
 """
 Pytest configuration for the xspct_scan test suite.
 

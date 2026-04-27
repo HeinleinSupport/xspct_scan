@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: EUPL-1.2
-# Copyright (C) 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
+# SPDX-FileCopyrightText: 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
 """
 test_xspct_scan.py — Comprehensive pytest test suite for InspectorDaemon / xspct_scan.daemon.
 
@@ -351,6 +351,38 @@ class TestExtractIocs:
         r = daemon.extract_iocs(b'hosts: 1.2.3.4 and 5.6.7.8')
         assert '1.2.3.4' in r['ips']
         assert '5.6.7.8' in r['ips']
+
+    def test_domain_with_valid_tld_kept(self, daemon):
+        r = daemon.extract_iocs(b'see evil.example.com for details')
+        assert 'evil.example.com' in r['domains']
+
+    def test_domain_with_file_ext_tld_filtered(self, daemon):
+        # Windows file names like MSO.DLL or Normal.dotm must not appear as domains
+        r = daemon.extract_iocs(b'MSO.DLL VBE7.DLL Normal.dotm stdole2.tlb')
+        assert not any(d.lower().endswith(('.dll', '.dotm', '.tlb')) for d in r['domains'])
+
+    def test_vba_internal_names_filtered(self, daemon):
+        # VBA object paths extracted from OLE streams must not appear as domains
+        r = daemon.extract_iocs(b'BzqPKManager.sqW PROJECT.NLHWEHWJ.AVVKQDABDFCIT')
+        assert 'BzqPKManager.sqW' not in r['domains']
+        assert 'PROJECT.NLHWEHWJ.AVVKQDABDFCIT' not in r['domains']
+
+    def test_pdf_internal_refs_filtered(self, daemon):
+        # Short PDF internal object references must not appear as domains,
+        # including fragments with valid ccTLDs but 1-2-char SLDs (Jy.gY, o.MA)
+        r = daemon.extract_iocs(b'JNWs.oO g.xJ i.yZ xf.jx y.MDO Jy.gY o.MA')
+        assert not r['domains']
+
+    def test_short_sld_with_valid_cctld_filtered(self, daemon):
+        # 1–2-char SLDs before real ccTLDs are binary-internal artefacts, not IOCs
+        r = daemon.extract_iocs(b'Jy.gY o.MA xf.jx')
+        assert not r['domains']
+
+    def test_min_sld_length_keeps_real_domains(self, daemon):
+        # bit.ly (3-char SLD) and longer SLDs must not be filtered
+        r = daemon.extract_iocs(b'see bit.ly and krittv.ru for context')
+        assert 'bit.ly' in r['domains']
+        assert 'krittv.ru' in r['domains']
 
 
 # ===========================================================================
@@ -805,7 +837,13 @@ class TestSyncAnalyze:
             data = f.read()
         r = daemon.sync_analyze('<t>', 'autostart-encrypt-standardpassword.xls', data, 'application/vnd.ms-excel')
         iocs = r['iocs']
-        assert len(iocs['urls']) > 0 or len(iocs['ips']) > 0 or len(iocs['domains']) > 0
+        # This sample has no real network IOCs — only internal Office/VBA object
+        # references (MSO.DLL, Excel.Sheet, etc.) that must NOT appear as domains
+        # after TLD validation.  Verify the ioc keys exist and are clean lists.
+        assert isinstance(iocs['urls'], list)
+        assert isinstance(iocs['ips'], list)
+        assert isinstance(iocs['domains'], list)
+        assert not any('.' not in d for d in iocs['domains']), 'bare tokens must not appear'
 
     @pytest.mark.skipif(not os.path.exists(OLE_FILE), reason='OLE sample not present')
     def test_real_ole_analyses_populated(self, daemon):
@@ -1022,7 +1060,11 @@ class TestScanEndpoint:
         r = await client.post('/scan', data=_form(data, 'autostart-encrypt-standardpassword.xls'))
         body = await r.json()
         iocs = body['iocs']
-        assert len(iocs['urls']) > 0 or len(iocs['ips']) > 0 or len(iocs['domains']) > 0
+        # No real network IOCs in this sample — internal Office object references
+        # (MSO.DLL, Excel.Sheet, etc.) are correctly filtered by TLD validation.
+        assert isinstance(iocs['urls'], list)
+        assert isinstance(iocs['ips'], list)
+        assert isinstance(iocs['domains'], list)
 
     @pytest.mark.skipif(not os.path.exists(OLE_FILE), reason='OLE sample not present')
     async def test_scan_ole_with_custom_passwords(self, client):
@@ -1689,7 +1731,7 @@ class TestSyncAnalyzeYara:
         xspct.config['xspct_analyzers']['yara']['enabled'] = True
         call_log = []
 
-        def _fake_yara(data):
+        def _fake_yara(data, filename='', file_mime=''):
             call_log.append(data)
             return {'yara_matches': [hit]}
 

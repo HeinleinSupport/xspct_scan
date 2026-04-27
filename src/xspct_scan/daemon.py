@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: EUPL-1.2
-# Copyright (C) 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
+# SPDX-FileCopyrightText: 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
 """
 xspct-scan Daemon
 =================
@@ -122,6 +122,12 @@ except ImportError:
     HAS_OCR = False
 
 try:
+    import easyocr as _easyocr
+    HAS_EASYOCR = True
+except ImportError:
+    HAS_EASYOCR = False
+
+try:
     from pyzbar import pyzbar as _pyzbar
     HAS_PYZBAR = True
 except ImportError:
@@ -156,6 +162,15 @@ try:
 except Exception:
     _IOCSEARCHER = None
     HAS_IOCSEARCHER = False
+
+try:
+    import tldextract as _tldextract
+    # Bundled PSL only — no runtime network requests.
+    _TLDEXT = _tldextract.TLDExtract(suffix_list_urls=())
+    HAS_TLDEXTRACT = True
+except ImportError:
+    _TLDEXT = None
+    HAS_TLDEXTRACT = False
 
 try:
     import importlib.util as _ilu
@@ -277,19 +292,24 @@ config: dict = {
         'javascript': {'enabled': True, 'quickjs': False},
         'text':       {'enabled': True},
     },
-    # When True, the full extracted text is included in the report as
-    # 'text_full'. When False only 'text_preview' (truncated) is returned.
-    'xspct_include_text': False,
+    # When True, 'text_preview' (truncated excerpt) is included in the report.
+    # Enabled by default. Disable to reduce response size.
+    'xspct_include_text_preview': True,
+    # When True, the full extracted text is included in the report as 'text_full'.
+    'xspct_include_text_full': False,
     # Maximum characters for 'text_preview' (the short excerpt sent in every
     # response). Independent of xspct_text_max_length.
     'xspct_text_preview_length': 2000,
     # Maximum characters for internal full-text extraction used by iocsearcher
-    # and (when xspct_include_text is true) for the 'text_full' report field.
+    # and (when xspct_include_text_full is true) for the 'text_full' report field.
     'xspct_text_max_length': 50000,
     # Maximum archive recursion depth (0 = no extraction).
     'xspct_archive_max_depth': 2,
     # Maximum total bytes extracted from a single archive (default 50 MB).
     'xspct_archive_max_size': 52428800,
+    # When True, fall back to stdlib zipfile/py7zr when sflock2 is unavailable
+    # or raises an error. Disabled by default for security (no sandbox).
+    'xspct_archive_stdlib_fallback': False,
     # When True, partial (timeout) reports are also stored in the cache.
     'xspct_cache_partial': False,
     # Concurrency limits for the two-tier scan lifecycle.
@@ -349,7 +369,7 @@ stats: dict = {
 """Module-level runtime counters.
 
 All values are integers incremented by the request handlers.
-Exposed as Prometheus metrics via ``GET /metrics``.
+Exposed as Prometheus metrics via ``GET /v1/metrics``.
 """
 
 # ---------------------------------------------------------------------------
@@ -450,6 +470,35 @@ def _normalise_admin_key() -> None:
         config['xspct_admin_api_key'] = [key] if key else []
 
 
+class _SessionLogFormatter(logging.Formatter):
+    """Log formatter that places the session-ID token *before* the function name.
+
+    Output format::
+
+        prefix LEVEL <sid> funcName rest-of-message
+
+    When the message does not start with a ``<hex>`` session ID (e.g. startup
+    lines) the function name is still prepended::
+
+        prefix LEVEL funcName rest-of-message
+    """
+
+    _SID_RE = re.compile(r'^(<[0-9a-f]{6,8}>)\s?')
+
+    def format(self, record: logging.LogRecord) -> str:  # type: ignore[override]
+        msg = record.getMessage()
+        m = self._SID_RE.match(msg)
+        if m:
+            composed = f'{m.group(1)} {record.funcName} {msg[m.end():]}'
+        else:
+            composed = f'{record.funcName} {msg}'
+        saved_msg, saved_args = record.msg, record.args
+        record.msg, record.args = composed, None
+        result = super().format(record)
+        record.msg, record.args = saved_msg, saved_args
+        return result
+
+
 def configure_logging() -> None:
     """Attach a ``StreamHandler`` to the *xspct-scan* logger using current ``config``.
 
@@ -462,8 +511,8 @@ def configure_logging() -> None:
         if not isinstance(h, logging.NullHandler):
             logger.removeHandler(h)
     handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(logging.Formatter(
-        config['xspct_log_prefix'] + ' %(levelname)s %(funcName)s %(message)s'
+    handler.setFormatter(_SessionLogFormatter(
+        config['xspct_log_prefix'] + ' %(levelname)s %(message)s'
     ))
     logger.addHandler(handler)
 
@@ -731,7 +780,7 @@ if HAS_PYDANTIC:
                 ),
             },
             'paths': {
-                '/scan': {
+                '/v1/scan': {
                     'post': {
                         'summary': 'Submit a file for analysis',
                         'operationId': 'scan',
@@ -788,7 +837,7 @@ if HAS_PYDANTIC:
                         'security': [{'ApiKeyAuth': []}],
                     },
                 },
-                '/query': {
+                '/v1/query': {
                     'get': {
                         'summary': 'Poll scan result by file hash',
                         'operationId': 'queryGet',
@@ -814,7 +863,7 @@ if HAS_PYDANTIC:
                         'security': [{'ApiKeyAuth': []}],
                     },
                 },
-                '/metrics': {
+                '/v1/metrics': {
                     'get': {
                         'summary': 'Prometheus metrics',
                         'operationId': 'metrics',
@@ -824,7 +873,7 @@ if HAS_PYDANTIC:
                         'security': [{'ApiKeyAuth': []}],
                     },
                 },
-                '/health': {
+                '/v1/health': {
                     'get': {
                         'summary': 'Health check',
                         'operationId': 'health',
@@ -955,17 +1004,126 @@ class InspectorDaemon:
 
     The four HTTP endpoints are implemented as bound methods:
 
-    * :meth:`handle_scan`     — ``POST /scan``
-    * :meth:`handle_query`    — ``GET|POST /query``
-    * :meth:`handle_metrics`  — ``GET /metrics``
+    * :meth:`handle_scan`     — ``POST /v1/scan``
+    * :meth:`handle_query`    — ``GET|POST /v1/query``
+    * :meth:`handle_metrics`  — ``GET /v1/metrics``
     """
 
+    _TASKS_MAX_SIZE = 512
     _URL_RE = re.compile(r'https?://[a-zA-Z0-9\-\.\/\_\?\&\=\%\#\:]+')
     _IP_RE  = re.compile(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b')
     _DOM_RE = re.compile(
         r'\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b'
     )
-    _TASKS_MAX_SIZE = 512
+
+    # IANA root zone TLD snapshot — used to filter spurious domain matches that
+    # arise when _DOM_RE runs over binary Office/PDF streams.  Covers all ccTLDs
+    # (ISO 3166-1 alpha-2 delegated entries) and the most widely used gTLDs /
+    # new-gTLDs as of 2025.  False-negatives on very obscure new gTLDs are
+    # acceptable; false-positives from binary internals are not.
+    _VALID_TLDS: 'frozenset[str]' = frozenset({
+        # ccTLDs — ISO 3166-1 alpha-2
+        'ac','ad','ae','af','ag','ai','al','am','ao','aq','ar','as','at','au',
+        'aw','ax','az','ba','bb','bd','be','bf','bg','bh','bi','bj','bm','bn',
+        'bo','bq','br','bs','bt','bv','bw','by','bz','ca','cc','cd','cf','cg',
+        'ch','ci','ck','cl','cm','cn','co','cr','cu','cv','cw','cx','cy','cz',
+        'de','dj','dk','dm','do','dz','ec','ee','eg','eh','er','es','et','eu',
+        'fi','fj','fk','fm','fo','fr','ga','gb','gd','ge','gf','gg','gh','gi',
+        'gl','gm','gn','gp','gq','gr','gs','gt','gu','gw','gy','hk','hm','hn',
+        'hr','ht','hu','id','ie','il','im','in','io','iq','ir','is','it','je',
+        'jm','jo','jp','ke','kg','kh','ki','km','kn','kp','kr','kw','ky','kz',
+        'la','lb','lc','li','lk','lr','ls','lt','lu','lv','ly','ma','mc','md',
+        'me','mf','mg','mh','mk','ml','mm','mn','mo','mp','mq','mr','ms','mt',
+        'mu','mv','mw','mx','my','mz','na','nc','ne','nf','ng','ni','nl','no',
+        'np','nr','nu','nz','om','pa','pe','pf','pg','ph','pk','pl','pm','pn',
+        'pr','ps','pt','pw','py','qa','re','ro','rs','ru','rw','sa','sb','sc',
+        'sd','se','sg','sh','si','sj','sk','sl','sm','sn','so','sr','ss','st',
+        'su','sv','sx','sy','sz','tc','td','tf','tg','th','tj','tk','tl','tm',
+        'tn','to','tr','tt','tv','tw','tz','ua','ug','uk','um','us','uy','uz',
+        'va','vc','ve','vg','vi','vn','vu','wf','ws','ye','yt','za','zm','zw',
+        # Original / sponsored gTLDs
+        'com','net','org','edu','gov','mil','int','arpa',
+        'info','biz','name','pro','aero','coop','museum','jobs','mobi',
+        'tel','travel','cat','xxx','post',
+        # Popular new gTLDs (ICANN delegated)
+        'app','ai','cloud','co','dev','digital','email','io','live',
+        'media','news','online','shop','site','store','tech','web',
+        'academy','accountant','accountants','actor','adult','agency',
+        'airforce','apartments','art','associates','attorney','auction',
+        'audio','auto','band','bank','bar','bargains','beer','best',
+        'bid','bike','bingo','black','blog','blue','boutique','broker',
+        'build','builders','business','buzz','cab','camera','camp',
+        'capital','cards','care','careers','cash','casino','catering',
+        'center','chat','cheap','christmas','church','city','claims',
+        'cleaning','clinic','clothing','coach','codes','coffee','college',
+        'community','company','computer','condos','construction',
+        'consulting','contact','contractors','cooking','cool','credit',
+        'creditcard','cruises','dating','deals','degree','delivery',
+        'democrat','dental','design','diamonds','diet','direct',
+        'directory','discount','dog','domains','education','energy',
+        'engineering','enterprises','equipment','estate','events',
+        'exchange','expert','exposed','fail','farm','finance',
+        'financial','fitness','florist','football','foundation','fun',
+        'fund','furniture','gallery','gifts','glass','global','gold',
+        'graphics','gripe','group','guide','guitars','guru','haus',
+        'healthcare','help','hockey','holdings','holiday','homes','host',
+        'hosting','house','immo','industries','info','institute',
+        'insure','international','investments','jewelry','kitchen',
+        'land','lawyer','lease','legal','life','lighting','limited',
+        'limo','link','loans','management','marketing','mba','moda',
+        'money','mortgage','network','ninja','one','partners','parts',
+        'photography','photos','pictures','pink','pizza','place',
+        'plumbing','plus','press','productions','properties','property',
+        'recipes','red','rehab','reise','reisen','rentals','repair',
+        'report','republican','restaurant','reviews','rich','rocks',
+        'run','sale','salon','school','services','singles','social',
+        'software','solar','solutions','space','studio','style',
+        'supplies','supply','support','surgery','systems','tax','team',
+        'technology','tips','today','tools','tours','town','training',
+        'university','ventures','video','villas','vision','voyage',
+        'watch','website','wiki','works','world','wtf','zone',
+    })
+
+    @staticmethod
+    def _has_valid_tld(domain: str) -> bool:
+        """Return True when *domain* looks like a real hostname.
+
+        When ``tldextract`` is installed (recommended, part of the
+        ``advanced`` extras) the Mozilla Public Suffix List is used for
+        TLD recognition — it stays current with new gTLDs without code
+        changes.  Otherwise the built-in ``_VALID_TLDS`` snapshot is
+        used as a fallback.
+
+        Either way a minimum SLD length of 3 characters is enforced to
+        drop 1–2-char SLD fragments that appear in binary file internals
+        (e.g. PDF object refs like ``Jy.gY``, ``o.MA``) while keeping
+        real short-SLD domains such as ``bit.ly`` intact.
+        """
+        if HAS_TLDEXTRACT:
+            result = _TLDEXT(domain)
+            # The suffix must be all-lowercase — mixed-case TLDs (e.g. ".gT",
+            # ".cOm") are text fragments, not real DNS labels.
+            return (bool(result.suffix)
+                    and result.suffix == result.suffix.lower()
+                    and len(result.domain) >= 3)
+        # Fallback: static IANA TLD snapshot
+        parts = domain.rsplit('.', 2)
+        tld = parts[-1].lower()
+        if tld not in InspectorDaemon._VALID_TLDS:
+            return False
+        sld = parts[-2] if len(parts) >= 2 else ''
+        return len(sld) >= 3
+
+    # External variables pre-defined so that rule sets like signature-base
+    # (which reference filepath/filename/extension/filetype) compile without
+    # error.  Actual values are injected per-scan in analyze_yara().
+    _YARA_EXTERNALS: 'dict[str, str]' = {
+        'filepath':  '',
+        'filename':  '',
+        'extension': '',
+        'filetype':  '',
+    }
+
 
     def __init__(self) -> None:
         """Create a new daemon instance with empty state.
@@ -990,6 +1148,8 @@ class InspectorDaemon:
         # ClamAV client (None when disabled or library unavailable).
         self._clamd = None
         self._clamav_version: str = ''  # cached VERSION response
+        # EasyOCR reader — lazily initialised on first use (slow to load).
+        self._easyocr_reader = None
 
     # ------------------------------------------------------------------
     # Redis helpers
@@ -1103,6 +1263,7 @@ class InspectorDaemon:
             ('iocs',       'iocsearcher',    HAS_IOCSEARCHER,  _az.get('iocs',       {}).get('enabled', True),   'pip install "xspct-scan[advanced]"'),
             ('image',      'pyzbar',         HAS_PYZBAR,       _az.get('image',      {}).get('enabled', True),   'pip install "xspct-scan[enrichment]"  # also: apt install libzbar0'),
             ('image',      'tesseract-ocr',  HAS_OCR,          _az.get('image',      {}).get('enabled', True),   'pip install "xspct-scan[enrichment]"  # also: apt install tesseract-ocr'),
+            ('image',      'easyocr',        HAS_EASYOCR,      _az.get('image',      {}).get('enabled', True),   'pip install easyocr'),
             ('javascript', 'jsbeautifier',   HAS_JSBEAUTIFIER, _az.get('javascript', {}).get('enabled', True),   'pip install "xspct-scan[enrichment]"'),
             ('javascript', 'quickjs',        HAS_QUICKJS,      _az.get('javascript', {}).get('enabled', True) and _az.get('javascript', {}).get('quickjs', False),   'pip install "xspct-scan[enrichment]"'),
             ('javascript', 'tree-sitter-js', HAS_TREESITTER,   _az.get('javascript', {}).get('enabled', True),   'pip install "xspct-scan[enrichment]"'),
@@ -1248,6 +1409,64 @@ class InspectorDaemon:
             ]
         return []
 
+    # Pattern that extracts the undefined identifier name from yara-python and
+    # yara-x error messages so we can add it as an external and retry.
+    _YARA_UNDEF_RE = re.compile(
+        r'undefined identifier ["\`](\w+)["\`]'   # yara-python
+        r'|unknown identifier `(\w+)`'             # yara-x
+    )
+
+    def _compile_yara_classic(self, files: list):
+        """Compile *files* with yara-python, auto-adding unknown externals.
+
+        Retries up to 32 times, each time extracting the undefined identifier
+        from the error message and adding it with an empty-string default.
+        Raises on non-external errors or when the retry limit is reached.
+        """
+        ext = dict(self._YARA_EXTERNALS)
+        fps = {os.path.basename(f): f for f in files}
+        for _ in range(32):
+            try:
+                if len(files) == 1:
+                    return _yara.compile(filepath=files[0], externals=ext)
+                return _yara.compile(filepaths=fps, externals=ext)
+            except Exception as exc:
+                m = self._YARA_UNDEF_RE.search(str(exc))
+                if m:
+                    var = m.group(1) or m.group(2)
+                    if var and var not in ext:
+                        logger.debug('YARA (classic): adding external %r = ""', var)
+                        ext[var] = ''
+                        continue
+                raise
+        raise RuntimeError('YARA (classic): too many undefined external variables')
+
+    def _compile_yara_x(self, files: list):
+        """Compile *files* with yara-x, auto-adding unknown externals.
+
+        Same retry logic as :meth:`_compile_yara_classic`.
+        """
+        ext = dict(self._YARA_EXTERNALS)
+        for _ in range(32):
+            try:
+                compiler = _yara_x.Compiler()
+                for k, v in ext.items():
+                    compiler.define_global(k, v)
+                for fpath in files:
+                    with open(fpath, 'r', encoding='utf-8', errors='replace') as fh:
+                        compiler.add_source(fh.read())
+                return compiler.build()
+            except Exception as exc:
+                m = self._YARA_UNDEF_RE.search(str(exc))
+                if m:
+                    var = m.group(1) or m.group(2)
+                    if var and var not in ext:
+                        logger.debug('YARA-X: adding external %r = ""', var)
+                        ext[var] = ''
+                        continue
+                raise
+        raise RuntimeError('YARA-X: too many undefined external variables')
+
     def _compile_yara_rules(self) -> None:
         """Compile YARA rules for both the classic (yara-python) and modern
         (yara-x) engines based on ``xspct_analyzers.yara`` /
@@ -1269,7 +1488,8 @@ class InspectorDaemon:
             if not HAS_YARA:
                 logger.warning('YARA (classic) enabled in config but yara-python is not installed — no rules loaded')
             else:
-                rules_path = yara_cfg.get('rules_path', '')
+                rules_path = os.path.expandvars(
+                    os.path.expanduser(yara_cfg.get('rules_path', '')))
                 if not rules_path:
                     logger.warning('YARA (classic) enabled but rules_path is not set — no rules loaded')
                 else:
@@ -1278,11 +1498,7 @@ class InspectorDaemon:
                         logger.warning('YARA (classic): no *.yar/*.yara files found at %s', rules_path)
                     else:
                         try:
-                            if len(files) == 1:
-                                self._yara_rules = _yara.compile(filepath=files[0])
-                            else:
-                                filepaths = {os.path.basename(f): f for f in files}
-                                self._yara_rules = _yara.compile(filepaths=filepaths)
+                            self._yara_rules = self._compile_yara_classic(files)
                             logger.info('YARA (classic): compiled %d file(s) from %s%s',
                                         len(files), rules_path,
                                         ' [Hyperscan]' if HAS_YARA_HYPERSCAN else '')
@@ -1295,7 +1511,8 @@ class InspectorDaemon:
             if not HAS_YARA_X:
                 logger.warning('YARA-X enabled in config but yara-x is not installed — no rules loaded')
             else:
-                rules_path = yara_x_cfg.get('rules_path', '')
+                rules_path = os.path.expandvars(
+                    os.path.expanduser(yara_x_cfg.get('rules_path', '')))
                 if not rules_path:
                     logger.warning('YARA-X enabled but rules_path is not set — no rules loaded')
                 else:
@@ -1304,17 +1521,15 @@ class InspectorDaemon:
                         logger.warning('YARA-X: no *.yar/*.yara files found at %s', rules_path)
                     else:
                         try:
-                            compiler = _yara_x.Compiler()
-                            for fpath in files:
-                                with open(fpath, 'r', encoding='utf-8', errors='replace') as fh:
-                                    compiler.add_source(fh.read())
-                            self._yara_x_rules = compiler.build()
+                            self._yara_x_rules = self._compile_yara_x(files)
                             logger.info('YARA-X: compiled %d file(s) from %s',
                                         len(files), rules_path)
                         except Exception as exc:
                             logger.error('YARA-X compilation failed: %s', exc)
 
-    def analyze_yara(self, data: bytes) -> 'dict | None':
+    def analyze_yara(self, data: bytes,
+                     filename: str = '', file_mime: str = '',
+                     s: str = '') -> 'dict | None':
         """Run compiled YARA rules against *data* using any loaded engine(s).
 
         When both classic (yara-python) and modern (yara-x) engines are
@@ -1325,6 +1540,11 @@ class InspectorDaemon:
 
         Args:
             data: Raw file bytes to scan.
+            filename: Original filename — populates the ``filename``,
+                ``filepath``, and ``extension`` external variables so that
+                rules from sets like ``signature-base`` that reference them
+                compile and match correctly.
+            file_mime: MIME type string — populates the ``filetype`` external.
 
         Returns:
             A dict with key ``yara_matches`` (list of match dicts), or
@@ -1339,12 +1559,20 @@ class InspectorDaemon:
                 - **strings** (list[str]): Matched string identifiers.
         """
         results: list = []
+        ext = {
+            'filepath':  filename,
+            'filename':  os.path.basename(filename),
+            'extension': os.path.splitext(filename)[1].lstrip('.').lower(),
+            'filetype':  file_mime or '',
+        }
 
         # --- classic yara-python ---
         if HAS_YARA and getattr(self, '_yara_rules', None):
+            _t0 = time.monotonic()
+            classic_hits: list = []
             try:
-                for m in self._yara_rules.match(data=data):
-                    results.append({
+                for m in self._yara_rules.match(data=data, externals=ext):
+                    classic_hits.append({
                         'engine':    'classic',
                         'rule':      m.rule,
                         'namespace': m.namespace,
@@ -1353,14 +1581,24 @@ class InspectorDaemon:
                         'strings':   [str(s) for s in m.strings],
                     })
             except Exception as exc:
-                logger.error('YARA (classic) scan error: %s', exc)
+                logger.error('%s YARA (classic) scan error: %s', s, exc)
+            _ms = int((time.monotonic() - _t0) * 1000)
+            _rules = [h['rule'] for h in classic_hits]
+            logger.debug('%s yara-classic file=%s bytes=%d time=%dms hits=%d%s',
+                         s, filename, len(data), _ms, len(classic_hits),
+                         ' rules=' + ','.join(_rules) if _rules else '')
+            results.extend(classic_hits)
 
         # --- yara-x ---
         if HAS_YARA_X and getattr(self, '_yara_x_rules', None):
+            _t0 = time.monotonic()
+            yarax_hits: list = []
             try:
                 scanner = _yara_x.Scanner(self._yara_x_rules)
+                for k, v in ext.items():
+                    scanner.set_global(k, v)
                 for m in scanner.scan(data).matching_rules:
-                    results.append({
+                    yarax_hits.append({
                         'engine':    'yara-x',
                         'rule':      m.identifier,
                         'namespace': m.namespace,
@@ -1373,7 +1611,13 @@ class InspectorDaemon:
                         ],
                     })
             except Exception as exc:
-                logger.error('YARA-X scan error: %s', exc)
+                logger.error('%s YARA-X scan error: %s', s, exc)
+            _ms = int((time.monotonic() - _t0) * 1000)
+            _rules = [h['rule'] for h in yarax_hits]
+            logger.debug('%s yara-x     file=%s bytes=%d time=%dms hits=%d%s',
+                         s, filename, len(data), _ms, len(yarax_hits),
+                         ' rules=' + ','.join(_rules) if _rules else '')
+            results.extend(yarax_hits)
 
         return {'yara_matches': results} if results else None
 
@@ -1446,13 +1690,11 @@ class InspectorDaemon:
         )
 
         raw_domains = self._DOM_RE.findall(combined)
-        if exclude_suffixes:
-            domains = sorted({
-                d for d in raw_domains
-                if not self._ioc_excluded(d, exclude_suffixes)
-            })
-        else:
-            domains = sorted(set(raw_domains))
+        domains = sorted({
+            d for d in raw_domains
+            if self._has_valid_tld(d)
+            and (not exclude_suffixes or not self._ioc_excluded(d, exclude_suffixes))
+        })
 
         return {'urls': urls, 'ips': ips, 'domains': domains}
 
@@ -1504,6 +1746,17 @@ class InspectorDaemon:
                     host = normalized.lower()
                 if self._ioc_excluded(host, exclude_suffixes):
                     continue
+            # Filter low-quality FQDN/domain hits:
+            #   - TLD must be all-lowercase alpha (mixed-case TLDs are text
+            #     fragments, not real domains, e.g. "2HPZuVNKY.gT")
+            #   - SLD must be at least 2 characters (single-char SLDs like
+            #     "o.ma" are almost always false positives)
+            if ioc_type in ('fqdn', 'domain'):
+                _parts = normalized.rstrip('.').rsplit('.', 2)
+                _tld = _parts[-1]
+                _sld = _parts[-2] if len(_parts) >= 2 else ''
+                if not _tld.isalpha() or _tld != _tld.lower() or len(_sld) < 2:
+                    continue
             result.setdefault(ioc_type, set()).add(normalized)
         if not result:
             return None
@@ -1524,7 +1777,7 @@ class InspectorDaemon:
             return m.group(1) or '', m.group(2) or '', (m.group(3) or '').strip()
         return self._clamav_version, '', ''
 
-    def analyze_clamav(self, data: bytes, filename: str = '') -> dict:
+    def analyze_clamav(self, data: bytes, filename: str = '', s: str = '') -> dict:
         """Scan *data* with ClamAV via the clamd INSTREAM protocol.
 
         Always returns a dict with a ``clamav`` key so the field is present
@@ -1546,7 +1799,7 @@ class InspectorDaemon:
             return {'clamav': {
                 'status': status, 'viruses': [],
                 'engine_version': engine_ver, 'db_version': db_ver, 'db_date': db_date,
-                'scan_time_ms': 0,
+                'scan_time_s': 0.0,
                 **extra,
             }}
 
@@ -1557,7 +1810,7 @@ class InspectorDaemon:
         max_size = int(config['xspct_clamav'].get('max_size', 26214400))
         if len(data) > max_size:
             logger.debug(
-                'ClamAV scan skipped for %s: %d bytes > %d', filename, len(data), max_size
+                '%s ClamAV scan skipped for %s: %d bytes > %d', s, filename, len(data), max_size
             )
             return _meta('skipped')
 
@@ -1565,29 +1818,29 @@ class InspectorDaemon:
         try:
             result = self._clamd.instream(io.BytesIO(data))
         except (_clamd.ConnectionError, _clamd.ClamdError) as exc:
-            logger.error('ClamAV unreachable: %s', exc)
+            logger.error('%s ClamAV unreachable: %s', s, exc)
             stats['clamav_errors'] += 1
-            return _meta('error', scan_time_ms=int((time.monotonic() - t0) * 1000))
+            return _meta('error', scan_time_s=round(time.monotonic() - t0, 3))
         except Exception as exc:
-            logger.error('ClamAV scan error for %s: %s', filename, exc)
+            logger.error('%s ClamAV scan error for %s: %s', s, filename, exc)
             stats['clamav_errors'] += 1
-            return _meta('error', scan_time_ms=int((time.monotonic() - t0) * 1000))
+            return _meta('error', scan_time_s=round(time.monotonic() - t0, 3))
 
-        scan_time_ms = int((time.monotonic() - t0) * 1000)
+        scan_time_s = round(time.monotonic() - t0, 3)
         # result: {'stream': ('OK', None)} or {'stream': ('FOUND', 'Virus.Name')}
         status_str, virus_name = result.get('stream', ('ERROR', None))
 
         if status_str == 'ERROR':
             stats['clamav_errors'] += 1
-            return _meta('error', scan_time_ms=scan_time_ms)
+            return _meta('error', scan_time_s=scan_time_s)
 
         viruses = [virus_name] if status_str == 'FOUND' and virus_name else []
         if viruses:
             stats['clamav_infected'] += 1
-            logger.info('ClamAV FOUND in %s: %s (%d ms)', filename, viruses, scan_time_ms)
+            logger.info('%s ClamAV FOUND in %s: %s (%.3f s)', s, filename, viruses, scan_time_s)
         else:
             stats['clamav_clean'] += 1
-            logger.debug('ClamAV clean: %s (%d ms)', filename, scan_time_ms)
+            logger.debug('%s ClamAV clean: %s (%.3f s)', s, filename, scan_time_s)
 
         partial: dict = {'clamav': {
             'status': 'infected' if viruses else 'clean',
@@ -1595,7 +1848,7 @@ class InspectorDaemon:
             'engine_version': engine_ver,
             'db_version': db_ver,
             'db_date': db_date,
-            'scan_time_ms': scan_time_ms,
+            'scan_time_s': scan_time_s,
         }}
         if viruses:
             partial['analyses'] = [{
@@ -1902,7 +2155,7 @@ class InspectorDaemon:
     # Image analysis — OCR + QR/barcode
     # ------------------------------------------------------------------
 
-    def analyze_image(self, image_data: bytes, label: str = '') -> dict:
+    def analyze_image(self, image_data: bytes, label: str = '', s: str = '') -> dict:
         """Run OCR and QR/barcode decoding on raw image bytes.
 
         Uses ``pytesseract`` for OCR (English + German) and ``pyzbar`` for
@@ -1965,15 +2218,140 @@ class InspectorDaemon:
                 logger.debug('pyzbar decoding failed (%s): %s', label, exc)
 
         # -- OCR -------------------------------------------------------------
-        if HAS_OCR and img is not None:
+        class _OcrSkipped(Exception):
+            pass
+        if (HAS_OCR or HAS_EASYOCR) and img is not None:
             try:
-                ocr_text = _pytesseract.image_to_string(
-                    img, lang='eng+deu',
-                    config='--psm 3',
+                import numpy as _np
+
+                # Step 1: greyscale for Tesseract; RGB array for EasyOCR.
+                ocr_img = img.convert('L')
+
+                # Step 2: upscale — both engines work better with ≥150 DPI.
+                #         Target 1200 px on the long side.
+                w, h = ocr_img.size
+                min_side = 1200
+                if max(w, h) < min_side:
+                    scale = min_side / max(w, h)
+                    new_size = (int(w * scale), int(h * scale))
+                    ocr_img = ocr_img.resize(new_size, _PILImage.LANCZOS)
+
+                # Step 3: Pre-screen — skip OCR on images that cannot contain
+                #         readable text.  Two cheap numpy signals are computed on
+                #         a small thumbnail to keep this under ~1 ms:
+                #
+                #   pixel_std  — std-dev of pixel values.  Near-zero means a
+                #                solid-colour image (blank slide, transparent PNG).
+                #                Threshold: < 8  → skip.
+                #
+                #   edge_var   — variance of a Laplacian edge map.  Low variance
+                #                means smooth gradients / photos with no sharp
+                #                transitions; text always has sharp strokes.
+                #                Threshold: < 20 → skip.
+                #
+                # Both values are logged so thresholds can be tuned.
+                import PIL.ImageFilter as _ImageFilter
+                _thumb = ocr_img.resize((256, 256), _PILImage.LANCZOS)
+                _arr = _np.array(_thumb, dtype=_np.float32)
+                _pixel_std = float(_arr.std())
+                _edge_arr = _np.array(
+                    _thumb.filter(_ImageFilter.Kernel(
+                        size=(3, 3), kernel=[-1,-1,-1, -1,8,-1, -1,-1,-1], scale=1,
+                    )), dtype=_np.float32,
                 )
-                result['ocr_text'] = ocr_text.strip()
-                if ocr_text.strip():
-                    ocr_iocs = self.extract_iocs(ocr_text.encode('utf-8', 'ignore'))
+                _edge_var = float(_edge_arr.var())
+                logger.debug('%s OCR pre-screen (%s): pixel_std=%.1f edge_var=%.1f',
+                             s, label, _pixel_std, _edge_var)
+                if _pixel_std < 8 or _edge_var < 20:
+                    logger.debug('%s OCR skipped (%s): image unlikely to contain text',
+                                 s, label)
+                    result['ocr_text'] = []
+                    raise _OcrSkipped()
+
+                _ocr_texts: list[dict] = []
+                _ocr_timings: dict[str, float] = {}
+
+                # Prepare shared inputs up front so both engines can start
+                # as soon as they are submitted to the thread pool.
+                _rgb_img = img.resize(ocr_img.size, _PILImage.LANCZOS).convert('RGB')
+                from PIL import ImageOps as _ImageOps
+                import warnings as _warnings
+                import concurrent.futures as _cf
+
+                def _run_tesseract() -> 'tuple[float, str]':
+                    t0 = time.monotonic()
+                    raw = _pytesseract.image_to_string(
+                        ocr_img, lang='eng+deu',
+                        config='--oem 1 --psm 11 --dpi 300',
+                    ).strip()
+                    return round(time.monotonic() - t0, 3), raw
+
+                def _run_easyocr() -> 'tuple[float, str]':
+                    # Lazy-init is not thread-safe, so initialise before
+                    # submitting to the executor (we are still on the
+                    # caller thread at that point).
+                    _easy_variants = [
+                        ('normal',   _np.array(_rgb_img)),
+                        ('inverted', _np.array(_ImageOps.invert(_rgb_img))),
+                    ]
+                    all_text: list[str] = []
+                    t0 = time.monotonic()
+                    for _vname, _easy_arr in _easy_variants:
+                        logger.debug('%s easyocr starting (%s) variant=%s shape=%s',
+                                     s, label, _vname, _easy_arr.shape)
+                        with _warnings.catch_warnings():
+                            _warnings.filterwarnings('ignore', message='.*pin_memory.*', category=UserWarning)
+                            res = self._easyocr_reader.readtext(
+                                _easy_arr, detail=0, paragraph=False,
+                                contrast_ths=0.05, adjust_contrast=0.8,
+                            )
+                        logger.debug('%s easyocr variant=%s detections=%d raw=%r',
+                                     s, _vname, len(res), res[:5])
+                        all_text.extend(t.strip() for t in res if t.strip())
+                        if all_text:
+                            break  # normal variant found text — skip inverted
+                    elapsed = round(time.monotonic() - t0, 3)
+                    seen: set[str] = set()
+                    deduped: list[str] = []
+                    for t in all_text:
+                        if t.lower() not in seen:
+                            seen.add(t.lower())
+                            deduped.append(t)
+                    return elapsed, '\n'.join(deduped)
+
+                # Ensure EasyOCR reader is initialised on THIS thread before
+                # we hand off to the executor (Reader.__init__ is not reentrant).
+                if HAS_EASYOCR and self._easyocr_reader is None:
+                    with _warnings.catch_warnings():
+                        _warnings.filterwarnings('ignore', message='.*pin_memory.*', category=UserWarning)
+                        self._easyocr_reader = _easyocr.Reader(
+                            ['en', 'de'], gpu=False, verbose=False,
+                        )
+
+                # Submit both engines in parallel; collect results.
+                _futures: dict[str, '_cf.Future'] = {}
+                with _cf.ThreadPoolExecutor(max_workers=2) as _pool:
+                    if HAS_OCR:
+                        _futures['tesseract'] = _pool.submit(_run_tesseract)
+                    if HAS_EASYOCR:
+                        _futures['easyocr'] = _pool.submit(_run_easyocr)
+
+                for _eng, _fut in _futures.items():
+                    try:
+                        _elapsed, _text = _fut.result()
+                        _ocr_timings[_eng] = _elapsed
+                        if _text:
+                            _ocr_texts.append({'engine': _eng, 'time_s': _elapsed, 'text': _text})
+                    except Exception as _e:
+                        logger.debug('%s %s failed (%s): %s', s, _eng, label, _e)
+
+                result['ocr_text'] = _ocr_texts
+                _timing_str = ', '.join(f'{eng}={t}s' for eng, t in _ocr_timings.items())
+                logger.debug('%s OCR timings (%s): %s', s, label, _timing_str or 'none')
+                # Extract IOCs from all engine results combined.
+                _all_ocr_text = '\n'.join(e['text'] for e in _ocr_texts)
+                if _all_ocr_text:
+                    ocr_iocs = self.extract_iocs(_all_ocr_text.encode('utf-8', 'ignore'))
                     for k in ('urls', 'ips', 'domains'):
                         result['iocs'][k] = sorted(
                             set(result['iocs'][k] + ocr_iocs[k])
@@ -1988,8 +2366,10 @@ class InspectorDaemon:
                                 + ', '.join(ocr_iocs['urls'][:3])
                             ),
                         })
+            except _OcrSkipped:
+                pass  # pre-screen decided OCR is not useful for this image
             except Exception as exc:
-                logger.debug('pytesseract OCR failed (%s): %s', label, exc)
+                logger.debug('%s OCR failed (%s): %s', s, label, exc)
 
         # -- EXIF metadata extraction ----------------------------------------
         if HAS_OCR and img is not None:
@@ -2085,15 +2465,25 @@ class InspectorDaemon:
             )
             detected = self.get_detected_type(None, None, name, member_data[:4096])
             analyzers_run: list[str] = []
+            member_errors: dict = {}
             findings_before = len(report['analyses'])
 
+            def _run_member(analyzer_name: str, fn, *args):
+                try:
+                    return fn(*args)
+                except Exception as exc:
+                    logger.info('%s - archive member %s: analyzer %s error: %s',
+                                s, name, analyzer_name, exc)
+                    member_errors[analyzer_name] = type(exc).__name__
+                    return None
+
             if detected == 'archive' and depth + 1 < max_depth:
-                sub = self.analyze_archive(s, name, member_data, depth + 1)
+                sub = _run_member('archive', self.analyze_archive, s, name, member_data, depth + 1)
                 if sub:
                     self.merge_reports(report, sub)
                     analyzers_run.append('archive')
             elif detected in ('pdf', 'html', 'office', 'text'):
-                sub = self.sync_analyze(s, name, member_data, None)
+                sub = _run_member(detected, self.sync_analyze, s, name, member_data, None)
                 if sub:
                     self.merge_reports(report, sub)
                     analyzers_run.append(detected)
@@ -2104,31 +2494,36 @@ class InspectorDaemon:
                     if _clamav_members:
                         analyzers_run.append('clamav')
             elif detected == 'image':
-                sub = self.analyze_image(member_data, label=name)
+                sub = _run_member('image', self.analyze_image, member_data, name)
                 if sub:
                     self.merge_reports(report, sub)
                     analyzers_run.append('image')
                 if _yara_ok:
-                    yr = self.analyze_yara(member_data)
+                    yr = _run_member('yara', self.analyze_yara, member_data)
                     if yr:
                         self.merge_reports(report, yr)
                     analyzers_run.append('yara')
                 if _clamav_members:
-                    cv_res = self.analyze_clamav(member_data, name)
+                    cv_res = _run_member('clamav', self.analyze_clamav, member_data, name)
                     if cv_res:
                         self.merge_reports(report, cv_res)
                     analyzers_run.append('clamav')
             else:
                 if _yara_ok:
-                    yr = self.analyze_yara(member_data)
+                    yr = _run_member('yara', self.analyze_yara, member_data)
                     if yr:
                         self.merge_reports(report, yr)
                     analyzers_run.append('yara')
                 if _clamav_members:
-                    cv_res = self.analyze_clamav(member_data, name)
+                    cv_res = _run_member('clamav', self.analyze_clamav, member_data, name)
                     if cv_res:
                         self.merge_reports(report, cv_res)
                     analyzers_run.append('clamav')
+
+            if member_errors:
+                report.setdefault('analyzer_errors', {}).update(
+                    {f'{name}:{k}': v for k, v in member_errors.items()}
+                )
 
             report['archive_files'].append({
                 'name':           name,
@@ -2150,11 +2545,12 @@ class InspectorDaemon:
             # is non-empty or we exhaust the list.
             passwords_to_try: list = [None] + list(self.passwords[:50])
             f = None
+            _sflock_hard_error = False
             for pwd in passwords_to_try:
                 try:
                     f = _sflock.unpack(
                         contents=data,
-                        filename=filename,
+                        filename=filename.encode() if isinstance(filename, str) else filename,
                         password=pwd,
                     )
                     if getattr(f, 'children', None):
@@ -2165,12 +2561,15 @@ class InspectorDaemon:
                                    and 'wrong' not in err and 'bad' not in err):
                         break   # error is not password-related — stop retrying
                 except Exception as exc:
-                    logger.debug('%s - sflock unpack error for %s: %s', s, filename, exc)
+                    logger.debug('%s - sflock unpack error for %s: %s — falling back to stdlib',
+                                 s, filename, exc)
                     f = None
+                    _sflock_hard_error = True
                     break
 
-            if f is None or not getattr(f, 'children', None):
-                return None
+            if not _sflock_hard_error:
+                if f is None or not getattr(f, 'children', None):
+                    return None
 
             if getattr(f, 'password', None):
                 report['decryption_password'] = str(f.password)
@@ -2178,10 +2577,15 @@ class InspectorDaemon:
             def _walk_sflock(file_obj: object, current_depth: int) -> None:
                 nonlocal total_extracted
                 for child in (getattr(file_obj, 'children', None) or []):
-                    child_name = str(
+                    _raw_name = (
                         getattr(child, 'filename', None) or
                         getattr(child, 'relapath',  None) or
-                        'unknown'
+                        b'unknown'
+                    )
+                    child_name = (
+                        _raw_name.decode('utf-8', errors='replace')
+                        if isinstance(_raw_name, bytes)
+                        else str(_raw_name)
                     )
                     child_contents = getattr(child, 'contents', None) or b''
                     if getattr(child, 'children', None):
@@ -2199,10 +2603,12 @@ class InspectorDaemon:
                             return
                         _analyse_member(child_name, child_contents)
 
-            _walk_sflock(f, depth)
+            if not _sflock_hard_error:
+                _walk_sflock(f, depth)
 
-        else:
+        if (not HAS_SFLOCK or _sflock_hard_error) and config.get('xspct_archive_stdlib_fallback', False):
             # ---- Fallback: stdlib zipfile + optional py7zr ------------------
+            # Disabled by default (no sandbox). Enable via xspct_archive_stdlib_fallback: true.
             is_zip = zipfile.is_zipfile(io.BytesIO(data))
             is_7z  = data[:6] == b'7z\xbc\xaf\x27\x1c'
 
@@ -3431,6 +3837,7 @@ class InspectorDaemon:
 
             results = vba_parser.analyze_macros(False, True)
             if results:
+                vba_string_count = 0
                 for kw_type, keyword, description in results:
                     if kw_type == 'IOC':
                         if '://' in keyword:
@@ -3442,14 +3849,28 @@ class InspectorDaemon:
                             if keyword not in office_report['iocs']['ips']:
                                 office_report['iocs']['ips'].append(keyword)
                         else:
-                            if keyword not in office_report['iocs']['domains']:
-                                office_report['iocs']['domains'].append(keyword)
+                            # Apply the same quality filter used for iocs_extended:
+                            # TLD must be all-lowercase alpha; SLD must be ≥ 2 chars.
+                            _kparts = keyword.rstrip('.').rsplit('.', 2)
+                            _ktld = _kparts[-1]
+                            _ksld = _kparts[-2] if len(_kparts) >= 2 else ''
+                            if _ktld.isalpha() and _ktld == _ktld.lower() and len(_ksld) >= 2:
+                                if keyword not in office_report['iocs']['domains']:
+                                    office_report['iocs']['domains'].append(keyword)
+                    elif kw_type == 'VBA string':
+                        vba_string_count += 1
                     else:
                         office_report['analyses'].append({
                             'type': kw_type,
                             'keyword': keyword,
                             'description': description,
                         })
+                if vba_string_count:
+                    office_report['analyses'].append({
+                        'type': 'VBA string',
+                        'keyword': f'{vba_string_count} obfuscated string(s)',
+                        'description': f'{vba_string_count} VBA obfuscated string expression(s) detected',
+                    })
 
             effective = working_data if working_data is not None else data
             body_iocs = self.extract_iocs(effective)
@@ -3470,16 +3891,16 @@ class InspectorDaemon:
                         s_val = v.decode('utf-8', 'ignore') if isinstance(v, bytes) else str(v)
                         return re.sub(r'[\x00-\x1f\x7f]', '', s_val)[:256]
                     office_report['meta_document'] = {
-                        'title':          _oclean(m.title),
-                        'author':         _oclean(m.author),
-                        'subject':        _oclean(m.subject),
-                        'keywords':       _oclean(m.keywords),
-                        'last_saved_by':  _oclean(m.last_saved_by),
-                        'company':        _oclean(m.company),
-                        'app_name':       _oclean(m.app_name),
-                        'revision_num':   str(m.revision_num or ''),
-                        'creation_date':  str(m.create_time or ''),
-                        'mod_date':       str(m.last_saved or ''),
+                        'title':          _oclean(getattr(m, 'title', None)),
+                        'author':         _oclean(getattr(m, 'author', None)),
+                        'subject':        _oclean(getattr(m, 'subject', None)),
+                        'keywords':       _oclean(getattr(m, 'keywords', None)),
+                        'last_saved_by':  _oclean(getattr(m, 'last_saved_by', None)),
+                        'company':        _oclean(getattr(m, 'company', None)),
+                        'app_name':       _oclean(getattr(m, 'app_name', None)),
+                        'revision_num':   str(getattr(m, 'revision_num', None) or ''),
+                        'creation_date':  str(getattr(m, 'create_time', None) or ''),
+                        'mod_date':       str(getattr(m, 'last_saved', None) or ''),
                     }
                     ole.close()
                 except Exception as exc:
@@ -3581,7 +4002,7 @@ class InspectorDaemon:
                     s, filename, data, file_mime, rtf_eval, custom_passwords
                 )
             elif t == 'image' and 'image' in enabled:
-                res = self.analyze_image(data, label=filename)
+                res = self.analyze_image(data, label=filename, s=s)
             elif t == 'archive' and 'archive' in enabled:
                 res = self.analyze_archive(s, filename, data, 0)
             elif t == 'text' and 'text' in enabled:
@@ -3601,7 +4022,7 @@ class InspectorDaemon:
             ('yara_x' in enabled and getattr(self, '_yara_x_rules', None) is not None)
         )
         if _yara_ok:
-            yara_res = self.analyze_yara(data)
+            yara_res = self.analyze_yara(data, filename, file_mime or '', s)
             if yara_res:
                 self.merge_reports(report, yara_res)
         # iocsearcher — extended IOC extraction on full text
@@ -3624,7 +4045,7 @@ class InspectorDaemon:
         # (the parent archive scan already passes the whole archive to clamd).
         _cv_cfg = config['xspct_clamav']
         if HAS_CLAMD and _cv_cfg['enabled'] and _cv_cfg.get('scan_members', True):
-            cv_res = self.analyze_clamav(data, filename)
+            cv_res = self.analyze_clamav(data, filename, s)
             if cv_res:
                 self.merge_reports(report, cv_res)
         # Image OCR / QR analysis for OOXML (contains media/ entries in ZIP)
@@ -3755,7 +4176,7 @@ class InspectorDaemon:
                          _is_analyzer_hit(name, result))
             # Inject timing without mutating the analyzer's result dict
             merge_payload = dict(result) if result else {}
-            merge_payload['analyzer_timings'] = {name: elapsed_ms}
+            merge_payload['analyzer_timings'] = {name: round(elapsed_ms / 1000, 3)}
             await partial.merge(name, merge_payload, self)
 
         tasks: list = []
@@ -3788,9 +4209,10 @@ class InspectorDaemon:
             # 'unknown': no dedicated Group-1 analyzer; iocsearcher + YARA
             # still run via the pre-Group-2 block and the yara task.
         if yara_enabled:
-            tasks.append(asyncio.create_task(_run('yara', self.analyze_yara, data)))
+            tasks.append(asyncio.create_task(
+                _run('yara', self.analyze_yara, data, filename, file_mime or '', s)))
         if clamav_enabled:
-            tasks.append(asyncio.create_task(_run('clamav', self.analyze_clamav, data, filename)))
+            tasks.append(asyncio.create_task(_run('clamav', self.analyze_clamav, data, filename, s)))
 
         if tasks:
             await asyncio.gather(*tasks)
@@ -3828,6 +4250,7 @@ class InspectorDaemon:
                     _iocsearcher_text = _full_text_for_analysis
             else:
                 _iocsearcher_text = _full_text_for_analysis
+            _iocs_t0 = time.monotonic()
             try:
                 iocs_result = await loop.run_in_executor(
                     None, self.analyze_iocsearcher, _iocsearcher_text, filename
@@ -3835,8 +4258,12 @@ class InspectorDaemon:
             except Exception as exc:
                 logger.error('%s - analyzer iocs raised: %s', s, exc)
                 iocs_result = {'analyzer_errors': {'iocs': type(exc).__name__}}
+            _iocs_ms = int((time.monotonic() - _iocs_t0) * 1000)
+            _record_analyzer_stats('iocs', _iocs_ms, iocs_result)
             if iocs_result:
-                await partial.merge('iocs', iocs_result, self)
+                iocs_payload = dict(iocs_result)
+                iocs_payload['analyzer_timings'] = {'iocs': round(_iocs_ms / 1000, 3)}
+                await partial.merge('iocs', iocs_payload, self)
 
         # --- Finalise ---
         report = partial.report
@@ -3848,8 +4275,8 @@ class InspectorDaemon:
             ','.join(sorted(successful)) if successful else 'unknown'
         )
         # text_preview already populated above; no second extraction needed.
-        # text_full: store when xspct_include_text is enabled.
-        if config.get('xspct_include_text'):
+        # text_full: store when xspct_include_text_full is enabled.
+        if config.get('xspct_include_text_full'):
             report['text_full'] = _full_text_for_analysis if _text_max > _preview_limit \
                 else partial.report['text_preview']
         # OOXML embedded images: analyse in thread pool.
@@ -3875,7 +4302,7 @@ class InspectorDaemon:
                 for name in z.namelist():
                     if re.match(r'(?:word|xl|ppt)/media/', name, re.I):
                         img_bytes = z.read(name)
-                        img_result = self.analyze_image(img_bytes, label=f'OOXML {name}')
+                        img_result = self.analyze_image(img_bytes, label=f'OOXML {name}', s=s)
                         for hit in img_result.get('analyses', []):
                             if hit not in report['analyses']:
                                 report['analyses'].append(hit)
@@ -3920,10 +4347,60 @@ class InspectorDaemon:
         report = partial.report
         _elapsed = time.monotonic() - _t0
         report['time_taken'] = round(_elapsed, 4)
-        logger.info('%s - analysis done for %s in %.3fs analyzers=%s',
-                    s, filename, _elapsed,
-                    dict(report.get('analyzer_timings', {})))
+
+        # --- compact scan summary ---
+        _iocs   = report.get('iocs', {})
+        _flags  = []
+        if report.get('has_macro'):
+            _flags.append('macro')
+        if report.get('decrypted'):
+            _flags.append('decrypted')
+        if report.get('is_encrypted') and not report.get('decrypted'):
+            _flags.append('encrypted')
+        _clamav = next(
+            (a['keyword'] for a in report.get('analyses', []) if a.get('type') == 'ClamAV'),
+            None,
+        )
+        _yara_rules = sorted({m['rule'] for m in report.get('yara_matches', [])})
+        _analysis_hits = [
+            a for a in report.get('analyses', [])
+            if a.get('type') not in ('ClamAV',)
+        ]
+        # Condensed hit tokens: type:keyword (VBA string collapsed to count only)
+        _hit_tokens: list[str] = []
+        for a in _analysis_hits:
+            kw = a.get('keyword', '')
+            atype = a.get('type', '')
+            if atype == 'VBA string':
+                # already collapsed to "N obfuscated string(s)" — extract count
+                _hit_tokens.append(f'VBA_strings:{kw}')
+            else:
+                _hit_tokens.append(f'{atype}:{kw}')
+        logger.info(
+            '%s file=%s hash=%s type=%s time=%.3fs'
+            ' analyses=%d urls=%d ips=%d domains=%d yara=%d%s%s%s%s',
+            s,
+            filename,
+            file_hash[:12],
+            report.get('detected_type', '?'),
+            _elapsed,
+            len(report.get('analyses', [])),
+            len(_iocs.get('urls', [])),
+            len(_iocs.get('ips', [])),
+            len(_iocs.get('domains', [])),
+            len(_yara_rules),
+            (' ' + ' '.join(_flags)) if _flags else '',
+            (' clamav=' + _clamav) if _clamav else '',
+            (' hits=[' + ', '.join(_hit_tokens) + ']') if _hit_tokens else '',
+            (' yara=[' + ', '.join(_yara_rules) + ']') if _yara_rules else '',
+        )
+
         await self.cache_report(s, file_hash, report)
+        # Strip disabled text fields from the cached/returned report.
+        if not config.get('xspct_include_text_preview', True):
+            report['text_preview'] = ''
+        if not config.get('xspct_include_text_full', False):
+            report.pop('text_full', None)
         return report
 
     # ------------------------------------------------------------------
@@ -3962,7 +4439,7 @@ class InspectorDaemon:
             self._bg_sem.release()
 
     async def handle_scan(self, request: web.Request) -> web.Response:
-        """Handle ``POST /scan`` — accept a file and return an analysis report.
+        """Handle ``POST /v1/scan`` — accept a file and return an analysis report.
 
         Supports two upload modes selected by ``Content-Type``:
 
@@ -4208,7 +4685,7 @@ class InspectorDaemon:
             return web.json_response({'error': 'Internal server error'}, status=500)
 
     async def handle_query(self, request: web.Request) -> web.Response:
-        """Handle ``GET|POST /query`` — look up a report by file hash.
+        """Handle ``GET|POST /v1/query`` — look up a report by file hash.
 
         Accepts the hash via query-string (``?hash=…``) or in a JSON
         request body (``{"hash": "…"}``).  Checks the in-memory task
@@ -4264,7 +4741,7 @@ class InspectorDaemon:
         return web.json_response({'status': 'not_found'}, status=404)
 
     async def handle_metrics(self, request: web.Request) -> web.Response:
-        """Handle ``GET /metrics`` — expose Prometheus-format counters.
+        """Handle ``GET /v1/metrics`` — expose Prometheus-format counters.
 
         Emits all :data:`stats` counters plus the current in-memory task
         count as a plain-text Prometheus exposition.
@@ -4396,7 +4873,7 @@ class InspectorDaemon:
         return web.Response(text='\n'.join(lines) + '\n', content_type='text/plain')
 
     async def handle_admin_reload(self, request: web.Request) -> web.Response:
-        """Handle ``POST /admin/reload`` — hot-reload config, YARA rules, and passwords.
+        """Handle ``POST /v1/admin/reload`` — hot-reload config, YARA rules, and passwords.
 
         Requires a valid ``X-Admin-Api-Key`` header (``xspct_admin_api_key``
         config key).  Performs the following atomically from the event loop's
@@ -4441,7 +4918,7 @@ class InspectorDaemon:
             return web.json_response({'error': 'Reload failed'}, status=500)
 
     async def handle_openapi_json(self, request: web.Request) -> web.Response:
-        """Handle ``GET /openapi.json`` — return the OpenAPI 3.0 spec.
+        """Handle ``GET /v1/openapi.json`` — return the OpenAPI 3.0 spec.
 
         The spec is generated once (lazily) from the pydantic response models
         and cached in memory.  If pydantic is not installed the response
@@ -4458,10 +4935,10 @@ class InspectorDaemon:
         return web.json_response(spec, status=status)
 
     async def handle_redoc(self, request: web.Request) -> web.Response:
-        """Handle ``GET /apidoc/redoc`` — serve the ReDoc UI.
+        """Handle ``GET /v1/apidoc/redoc`` — serve the ReDoc UI.
 
         Renders a self-contained HTML page that loads ReDoc from the
-        official CDN and points it at ``/openapi.json``.
+        official CDN and points it at ``/v1/openapi.json``.
 
         Args:
             request: Incoming aiohttp request (unused).
@@ -4479,7 +4956,7 @@ class InspectorDaemon:
   <style>body { margin: 0; padding: 0; }</style>
 </head>
 <body>
-  <redoc spec-url="/openapi.json"></redoc>
+  <redoc spec-url="/v1/openapi.json"></redoc>
   <script src="https://cdn.jsdelivr.net/npm/redoc/bundles/redoc.standalone.js"></script>
 </body>
 </html>'''
@@ -4598,17 +5075,20 @@ async def make_app() -> web.Application:
     (:meth:`~InspectorDaemon.setup` / :meth:`~InspectorDaemon.teardown`),
     and registers all routes:
 
-    =========  ======  ====================
-    Path       Method  Handler
-    =========  ======  ====================
-    /scan      POST    :meth:`~InspectorDaemon.handle_scan`
-    /query     POST    :meth:`~InspectorDaemon.handle_query`
-    /query     GET     :meth:`~InspectorDaemon.handle_query`
-    /metrics   GET     :meth:`~InspectorDaemon.handle_metrics`
-    /health    GET     Returns ``OK``
-    /ping      GET     Returns ``pong``
-    /          GET     Returns ``xspct-scan``
-    =========  ======  ====================
+    =================  ======  ====================
+    Path               Method  Handler
+    =================  ======  ====================
+    /v1/scan           POST    :meth:`~InspectorDaemon.handle_scan`
+    /v1/query          POST    :meth:`~InspectorDaemon.handle_query`
+    /v1/query          GET     :meth:`~InspectorDaemon.handle_query`
+    /v1/metrics        GET     :meth:`~InspectorDaemon.handle_metrics`
+    /v1/admin/reload   POST    :meth:`~InspectorDaemon.handle_admin_reload`
+    /v1/openapi.json   GET     :meth:`~InspectorDaemon.handle_openapi_json`
+    /v1/apidoc/redoc   GET     :meth:`~InspectorDaemon.handle_redoc`
+    /health            GET     Returns ``OK`` (unversioned)
+    /ping              GET     Returns ``pong`` (unversioned)
+    /                  GET     Returns ``xspct-scan``
+    =================  ======
 
     Returns:
         Configured :class:`aiohttp.web.Application` ready to be served.
@@ -4629,13 +5109,13 @@ async def make_app() -> web.Application:
     app['daemon'] = daemon
     app.on_startup.append(_on_startup)
     app.on_shutdown.append(_on_shutdown)
-    app.router.add_post('/scan',          daemon.handle_scan)
-    app.router.add_post('/query',         daemon.handle_query)
-    app.router.add_get('/query',          daemon.handle_query)
-    app.router.add_get('/metrics',        daemon.handle_metrics)
-    app.router.add_post('/admin/reload',  daemon.handle_admin_reload)
-    app.router.add_get('/openapi.json',   daemon.handle_openapi_json)
-    app.router.add_get('/apidoc/redoc',   daemon.handle_redoc)
+    app.router.add_post('/v1/scan',          daemon.handle_scan)
+    app.router.add_post('/v1/query',         daemon.handle_query)
+    app.router.add_get('/v1/query',          daemon.handle_query)
+    app.router.add_get('/v1/metrics',        daemon.handle_metrics)
+    app.router.add_post('/v1/admin/reload',  daemon.handle_admin_reload)
+    app.router.add_get('/v1/openapi.json',   daemon.handle_openapi_json)
+    app.router.add_get('/v1/apidoc/redoc',   daemon.handle_redoc)
     app.router.add_get('/health',  lambda r: web.Response(text='OK'))
     app.router.add_get('/ping',    lambda r: web.Response(text='pong'))
     app.router.add_get('/',        lambda r: web.Response(text='xspct-scan'))
