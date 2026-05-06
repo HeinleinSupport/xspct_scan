@@ -1,6 +1,10 @@
 # HTTP API
 
-All endpoints return JSON unless stated otherwise.
+All endpoints return JSON by default.  Responses can alternatively be
+returned as **msgpack** (`application/x-msgpack`) or **CBOR**
+(`application/cbor`) by sending an appropriate `Accept` header — see
+[Content negotiation](#content-negotiation) below.
+
 Authentication (when enabled) is via the `X-Api-Key` header — see
 [Authentication](authentication).
 
@@ -41,14 +45,14 @@ Submit a document for malware analysis.
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `doc` | ✓ | The file to scan (any filename). |
+| `doc` | ✓ | The file to scan (any filename). The daemon transparently decompresses a zstd-compressed part if the Zstandard frame magic bytes are detected. A `.zst` suffix is stripped from the filename before type detection. |
 | `file_mime` | | Override the detected MIME type. |
 | `file_type` | | Override the detected file description string. |
 | `passwords` | | Comma- or newline-separated passwords to try when decrypting encrypted Office **or PDF** files. Custom passwords are tried before the daemon-wide list. |
 
 *application/octet-stream*: send raw file bytes as the request body.
 Pass optional metadata as query parameters (`filename`, `file_mime`, `file_type`,
-`passwords`).
+`passwords`). Zstd-compressed bodies are automatically decompressed via magic bytes.
 
 **Query parameters**
 
@@ -226,3 +230,80 @@ Requires `pydantic` (`pip install "xspct_scan[openapi]"`).
 
 Interactive API documentation rendered with [ReDoc](https://redocly.com/redoc/).
 Requires `pydantic`.
+
+---
+
+## Content negotiation
+
+All endpoints that return a scan report support three wire formats.
+The format is selected in the following priority order:
+
+1. **`xspct_response_format` config key** — if set to `json`, `msgpack`, or
+   `cbor`, that format is always used regardless of request headers.
+2. **`Accept` request header** — the first recognised MIME type wins:
+   `application/json`, `application/x-msgpack`, `application/cbor`.
+3. **Fallback** — `application/json`.
+
+Msgpack and CBOR require the `serialization` extra:
+
+```bash
+pip install "xspct_scan[serialization]"
+```
+
+Example — request msgpack:
+
+```bash
+curl -s -F "doc=@invoice.pdf" \
+  -H "Accept: application/x-msgpack" \
+  http://localhost:8080/v1/scan | python3 -c "import sys,msgpack; print(msgpack.unpackb(sys.stdin.buffer.read()))"
+```
+
+The `/v1/query` `POST` endpoint also accepts a msgpack or CBOR request body
+(detected via `Content-Type: application/x-msgpack` or
+`Content-Type: application/cbor`).
+
+---
+
+## Response compression (zstd)
+
+Add `Accept-Encoding: zstd` to any scan or query request to receive a
+zstd-compressed response body. The response will carry
+`Content-Encoding: zstd`; the payload format (`Content-Type`) is unchanged.
+
+Requires the `compression` extra:
+
+```bash
+pip install "xspct_scan[compression]"
+```
+
+Example:
+
+```bash
+curl -s -F "doc=@invoice.pdf" \
+  -H "Accept-Encoding: zstd" \
+  http://localhost:8080/v1/scan | zstd -d
+```
+
+---
+
+## Compressed uploads (zstd)
+
+The daemon transparently decompresses zstd-compressed uploads. Detection is
+based on the Zstandard frame magic bytes (`\x28\xb5\x2f\xfd`) at the start of
+the data — no special header is required.
+
+- **Multipart** — compress the `doc` field payload before attaching it to the
+  form.
+- **Octet-stream** — send the compressed bytes as the request body.
+
+A `.zst` filename suffix is stripped before type detection, so
+`invoice.pdf.zst` is analysed as a PDF.
+
+Example:
+
+```bash
+zstd -c invoice.pdf | curl -s \
+  -X POST "http://localhost:8080/v1/scan?filename=invoice.pdf.zst" \
+  --data-binary @- \
+  -H "Content-Type: application/octet-stream"
+```

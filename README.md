@@ -114,6 +114,8 @@ pip install xspct_scan
 | `enrichment` | `Pillow`, `pytesseract`, `pyzbar`, `easyocr`, `clamd`, `jsbeautifier`, `quickjs`, `tree-sitter` | Image OCR/barcode/EXIF (Tesseract + EasyOCR), ClamAV integration, JS deobfuscation (QuickJS sandbox opt-in via config) |
 | `openapi` | `pydantic>=2.0` | OpenAPI 3.0 spec + ReDoc UI |
 | `advanced` | `yara-python`, `yara-x`, `iocsearcher`, `py7zr`, `SFlock2` | YARA scanning, extended IOCs, sandboxed archive extraction (ZIP/RAR/7z/EML/MSG/…) |
+| `serialization` | `msgpack`, `cbor2` | msgpack and CBOR response serialization (negotiated via `Accept` header or `xspct_response_format` config) |
+| `compression` | `zstandard` | zstd response compression (`Accept-Encoding: zstd`) and transparent zstd decompression of uploaded files |
 
 ```bash
 pip install "xspct_scan[uvloop,redis,enrichment,openapi,advanced]"
@@ -149,6 +151,7 @@ Key settings:
 | `xspct_analyzers` | _(all enabled)_ | Per-analyzer enable/disable + options |
 | `xspct_analyzers.javascript.quickjs` | `false` | Enable QuickJS sandbox emulation for JS |
 | `xspct_include_text` | `false` | Include full extracted text in reports |
+| `xspct_response_format` | `auto` | Response serialization: `auto` (negotiate via `Accept` header), `json`, `msgpack`, or `cbor` |
 | `xspct_archive_max_depth` | `2` | Recursion limit for archive extraction |
 | `xspct_foreground_slots` | `16` | Max concurrent scans holding a client connection open |
 | `xspct_background_slots` | `4` | Max concurrent scans continuing after `202` timeout |
@@ -174,6 +177,20 @@ curl -s -X POST "http://localhost:8080/v1/scan?filename=malware.xlsm" \
   --data-binary @malware.xlsm \
   -H "Content-Type: application/octet-stream"
 ```
+
+**msgpack / CBOR responses** — set the `Accept` header to request a non-JSON
+wire format (`application/x-msgpack` or `application/cbor`). Requires
+`pip install "xspct_scan[serialization]"`. The server-wide default is
+controlled by `xspct_response_format`.
+
+**zstd-compressed responses** — add `Accept-Encoding: zstd` to receive a
+zstd-compressed response body (`Content-Encoding: zstd`). Requires
+`pip install "xspct_scan[compression]"`.
+
+**zstd-compressed uploads** — the daemon transparently decompresses a
+zstd-compressed `doc` part or octet-stream body (detected via the Zstandard
+frame magic bytes). The `.zst` filename suffix is stripped before type
+detection.
 
 Example response:
 

@@ -146,6 +146,12 @@ and unknown blobs.
 | `xspct_text_preview_length` | `2000` | Maximum characters for `text_preview` — the short excerpt included in every response. |
 | `xspct_text_max_length` | `50000` | Maximum characters for internal full-text extraction. Used by iocsearcher and (when `xspct_include_text` is `true`) for `text_full`. Higher values improve IOC recall on long documents at the cost of more memory and CPU per scan. |
 
+### Response serialization
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `xspct_response_format` | `auto` | Wire format for scan and query responses. `auto` negotiates via the `Accept` request header (first of `application/json`, `application/x-msgpack`, `application/cbor` wins, default `json`). Set to `json`, `msgpack`, or `cbor` to force a fixed format regardless of client headers. Msgpack and CBOR require `pip install "xspct_scan[serialization]"`. |
+
 ### Archive analysis
 
 | Key | Default | Description |
