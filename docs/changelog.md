@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-05-06
+
 ### Added
 - **sflock2 archive backend**: when `SFlock2` is installed (`pip install "xspct_scan[advanced]"`)
   archive extraction runs inside the zipjail usermode sandbox, covering RAR,
@@ -14,7 +16,7 @@
 - **`HAS_SFLOCK` feature flag** visible in the Python API (same pattern as
   `HAS_YARA`, `HAS_IOCSEARCHER`, etc.).
 
-## 2.0.0 — 2026-04-24
+## 0.2.0 — 2026-04-24
 
 Initial public release of xspct_scan (renamed from olefy_v2).
 

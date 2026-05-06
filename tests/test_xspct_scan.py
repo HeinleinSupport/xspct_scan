@@ -827,7 +827,7 @@ class TestSyncAnalyze:
     def test_meta_always_present(self, daemon):
         r = daemon.sync_analyze('<t>', 'x.pdf', PDF_CLEAN, 'application/pdf')
         assert r['meta']['script_name'] == 'xspct-scan'
-        assert r['meta']['version'] == '2.0.0'
+        assert r['meta']['version'] == '0.3.0'
 
     @pytest.mark.skipif(not os.path.exists(OLE_FILE), reason='OLE sample not present')
     def test_real_ole_has_macro(self, daemon):

@@ -807,7 +807,7 @@ if HAS_PYDANTIC:
             'openapi': '3.0.3',
             'info': {
                 'title':   'xspct-scan API',
-                'version': '2.0.0',
+                'version': '0.3.0',
                 'description': (
                     'HTTP API for scanning Office, PDF, and HTML files '
                     'for malware indicators.'
@@ -4177,7 +4177,7 @@ class InspectorDaemon:
             'analyses':            [],
             'meta': {
                 'script_name': 'xspct-scan',
-                'version': '2.0.0',
+                'version': '0.3.0',
                 'type': 'MetaInformation',
             },
             'rtf_objects':         [],

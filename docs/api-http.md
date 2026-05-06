@@ -100,7 +100,7 @@ iocsearcher.
     "title": "Q1 Invoice",
     "creation_date": "D:20260115120000Z"
   },
-  "meta": {"script_name": "xspct_scan", "version": "2.0.0", "type": "MetaInformation"},
+  "meta": {"script_name": "xspct_scan", "version": "0.3.0", "type": "MetaInformation"},
   "analyzers_completed": ["office", "iocs"],
   "analyzers_pending": [],
   "status": "finished",
