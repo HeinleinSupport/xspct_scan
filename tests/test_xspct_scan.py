@@ -1323,14 +1323,14 @@ class TestAnalyzeImage:
 
     def test_empty_bytes_returns_empty_structure(self, daemon):
         r = daemon.analyze_image(b'')
-        assert r['ocr_text'] == '' or r['ocr_text'] == []
+        assert r['ocr_text'] == []
         assert r['qr_codes'] == []
         assert r['analyses'] == []
         assert r['iocs'] == {'urls': [], 'ips': [], 'domains': []}
 
     def test_invalid_bytes_returns_empty_structure(self, daemon):
         r = daemon.analyze_image(b'this is not an image at all XXXX')
-        assert r['ocr_text'] == '' or r['ocr_text'] == []
+        assert r['ocr_text'] == []
         assert r['qr_codes'] == []
 
     def test_return_structure_keys(self, daemon):
@@ -1342,8 +1342,7 @@ class TestAnalyzeImage:
     def test_blank_png_does_not_raise(self, daemon):
         png = _make_png()
         r = daemon.analyze_image(png, label='test blank')
-        # ocr_text is now list[dict] (one entry per OCR engine) or [] when skipped
-        assert isinstance(r['ocr_text'], (str, list))
+        assert isinstance(r['ocr_text'], list)
         assert isinstance(r['qr_codes'], list)
         assert isinstance(r['analyses'], list)
 
