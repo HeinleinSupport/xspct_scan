@@ -70,6 +70,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import pytest
+from xspct_scan import client as xspct_client
 
 try:
     import fitz as _fitz
@@ -1150,6 +1151,87 @@ class TestQueryEndpoint:
         assert query_b['report']['file_hash'] == fhash
 
 
+class _ClientResponseStub:
+
+    def __init__(self, status, body):
+        self.status = status
+        self._body = body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def json(self, content_type=None):
+        return self._body
+
+
+class _ClientSessionStub:
+
+    def __init__(self, status, body):
+        self._status = status
+        self._body = body
+
+    def post(self, *args, **kwargs):
+        return _ClientResponseStub(self._status, self._body)
+
+
+class TestClientPolling:
+
+    def test_normalize_result_payload_unwraps_query_response(self):
+        payload = {
+            'status': 'finished',
+            'report': {
+                'file_hash': 'abc',
+                'detected_type': 'pdf',
+                'analyses': [],
+            },
+        }
+        result = xspct_client._normalize_result_payload(payload)
+        assert result['status'] == 'finished'
+        assert result['file_hash'] == 'abc'
+        assert 'report' not in result
+
+    @pytest.mark.asyncio
+    async def test_scan_file_poll_returns_flat_report(self, tmp_path, monkeypatch):
+        sample = tmp_path / 'sample.pdf'
+        sample.write_bytes(b'%PDF-1.4\n')
+
+        async def _fake_poll_result(session, base_url, file_hash, headers, interval):
+            return {
+                'status': 'finished',
+                'report': {
+                    'file_hash': file_hash,
+                    'filename': sample.name,
+                    'detected_type': 'pdf',
+                    'analyses': [],
+                    'iocs': {'urls': [], 'ips': [], 'domains': []},
+                },
+            }
+
+        monkeypatch.setattr(xspct_client, '_poll_result', _fake_poll_result)
+        session = _ClientSessionStub(202, {'status': 'processing', 'file_hash': 'deadbeef'})
+
+        result = await xspct_client.scan_file(
+            session=session,
+            path=sample,
+            base_url='http://localhost:8080',
+            timeout=1,
+            passwords=None,
+            rtf=False,
+            api_key=None,
+            poll=True,
+            poll_interval=0,
+            no_color=True,
+        )
+
+        assert result is not None
+        assert result['status'] == 'finished'
+        assert result['file_hash'] == 'deadbeef'
+        assert result['detected_type'] == 'pdf'
+
+
 class TestAuthentication:
 
     async def test_health_no_auth_required(self, auth_client):
@@ -1890,6 +1972,55 @@ class TestAnalyzeArchive:
         assert isinstance(result.get('yara_matches', []), list)
 
 
+class TestArchiveCapabilityGating:
+
+    def test_archive_analyzer_disabled_without_backend(self, daemon, monkeypatch):
+        saved_fallback = xspct.config['xspct_archive_stdlib_fallback']
+        saved_enabled = xspct.config['xspct_analyzers']['archive']['enabled']
+        monkeypatch.setattr(xspct, 'HAS_SFLOCK', False)
+        xspct.config['xspct_archive_stdlib_fallback'] = False
+        xspct.config['xspct_analyzers']['archive']['enabled'] = True
+        try:
+            enabled = daemon._resolve_enabled_analyzers()
+        finally:
+            xspct.config['xspct_archive_stdlib_fallback'] = saved_fallback
+            xspct.config['xspct_analyzers']['archive']['enabled'] = saved_enabled
+        assert 'archive' not in enabled
+
+    def test_archive_analyzer_enabled_with_stdlib_fallback(self, daemon, monkeypatch):
+        saved_fallback = xspct.config['xspct_archive_stdlib_fallback']
+        saved_enabled = xspct.config['xspct_analyzers']['archive']['enabled']
+        monkeypatch.setattr(xspct, 'HAS_SFLOCK', False)
+        xspct.config['xspct_archive_stdlib_fallback'] = True
+        xspct.config['xspct_analyzers']['archive']['enabled'] = True
+        try:
+            enabled = daemon._resolve_enabled_analyzers()
+        finally:
+            xspct.config['xspct_archive_stdlib_fallback'] = saved_fallback
+            xspct.config['xspct_analyzers']['archive']['enabled'] = saved_enabled
+        assert 'archive' in enabled
+
+    def test_sync_analyze_zip_without_backend_returns_unknown(self, daemon, monkeypatch):
+        saved_fallback = xspct.config['xspct_archive_stdlib_fallback']
+        saved_enabled = xspct.config['xspct_analyzers']['archive']['enabled']
+        monkeypatch.setattr(xspct, 'HAS_SFLOCK', False)
+        xspct.config['xspct_archive_stdlib_fallback'] = False
+        xspct.config['xspct_analyzers']['archive']['enabled'] = True
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            z.writestr('readme.txt', 'hello world')
+
+        try:
+            report = daemon.sync_analyze('s', 'test.zip', buf.getvalue(), 'application/zip')
+        finally:
+            xspct.config['xspct_archive_stdlib_fallback'] = saved_fallback
+            xspct.config['xspct_analyzers']['archive']['enabled'] = saved_enabled
+
+        assert report['detected_type'] == 'unknown'
+        assert report['archive_files'] == []
+
+
 # ===========================================================================
 # UNIT TESTS — sflock2 archive extraction path
 # ===========================================================================
@@ -2291,6 +2422,56 @@ class TestTwoTierConcurrency:
             assert body.get('status') == 'processing'
             await asyncio.wait_for(finalized.wait(), timeout=1)
             assert daemon._bg_sem._value == 1
+        finally:
+            xspct.config['xspct_foreground_slots'] = 16
+            xspct.config['xspct_background_slots'] = 4
+
+    async def test_background_failure_becomes_stable_query_error(self, aiohttp_client, monkeypatch):
+        """A failed background scan should be queryable as a stable error result."""
+        xspct.config['xspct_foreground_slots'] = 1
+        xspct.config['xspct_background_slots'] = 1
+        app = await xspct.make_app()
+        client = await aiohttp_client(app)
+        daemon = app['daemon']
+
+        allow_raise = asyncio.Event()
+        error_stored = asyncio.Event()
+        original_store = daemon._store_terminal_result
+
+        async def _boom(*args, **kwargs):
+            await allow_raise.wait()
+            raise RuntimeError('boom')
+
+        def _store_and_signal(file_hash, result):
+            original_store(file_hash, result)
+            if result.get('status') == 'error':
+                error_stored.set()
+
+        monkeypatch.setattr(daemon, 'analyze_task', _boom)
+        monkeypatch.setattr(daemon, '_store_terminal_result', _store_and_signal)
+        try:
+            r = await client.post(
+                '/v1/scan?timeout=0.01',
+                data=_form(PDF_CLEAN, 'boom.pdf'),
+            )
+            assert r.status == 202
+            body = await r.json()
+            assert body.get('status') == 'processing'
+
+            allow_raise.set()
+            await asyncio.wait_for(error_stored.wait(), timeout=1)
+
+            query_1 = await client.get(f"/v1/query?hash={body['file_hash']}")
+            assert query_1.status == 200
+            q1_body = await query_1.json()
+            assert q1_body['status'] == 'error'
+            assert q1_body['file_hash'] == body['file_hash']
+
+            query_2 = await client.get(f"/v1/query?hash={body['file_hash']}")
+            assert query_2.status == 200
+            q2_body = await query_2.json()
+            assert q2_body['status'] == 'error'
+            assert q2_body['file_hash'] == body['file_hash']
         finally:
             xspct.config['xspct_foreground_slots'] = 16
             xspct.config['xspct_background_slots'] = 4
