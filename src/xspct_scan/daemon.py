@@ -218,6 +218,16 @@ except ImportError:
 
 # Zstandard frame magic (little-endian 0xFD2FB528)
 _ZSTD_MAGIC = b'\x28\xb5\x2f\xfd'
+_MAX_ZSTD_DECOMPRESSED_BYTES = 64 * 1024 * 1024
+
+
+class _ClientRequestError(Exception):
+    """Raised when the client sends a malformed or oversized request payload."""
+
+    def __init__(self, message: str, *, status: int = 400) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status = status
 
 # ---------------------------------------------------------------------------
 # Per-request timer (ContextVar — isolated per async task)
@@ -4494,6 +4504,7 @@ class InspectorDaemon:
     # ------------------------------------------------------------------
 
     _SERIALIZE_FORMAT_WARN_LOGGED: dict[str, bool] = {}
+    _MAX_ZSTD_DECOMPRESSED_BYTES = _MAX_ZSTD_DECOMPRESSED_BYTES
 
     # ------------------------------------------------------------------
     # Zstd request decompression / response compression helpers
@@ -4520,9 +4531,32 @@ class InspectorDaemon:
                 )
                 self._SERIALIZE_FORMAT_WARN_LOGGED['zstd_decompress'] = True
             return data
+        limit = getattr(self, '_MAX_ZSTD_DECOMPRESSED_BYTES', _MAX_ZSTD_DECOMPRESSED_BYTES)
         dctx = _zstd.ZstdDecompressor()
-        with dctx.stream_reader(io.BytesIO(data)) as reader:
-            decompressed = reader.read()
+        chunks: list[bytes] = []
+        total = 0
+        try:
+            with dctx.stream_reader(io.BytesIO(data)) as reader:
+                while True:
+                    chunk = reader.read(131072)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > limit:
+                        raise _ClientRequestError(
+                            f'Zstd-compressed upload expands beyond limit '
+                            f'({limit} bytes)',
+                            status=413,
+                        )
+                    chunks.append(chunk)
+        except _ClientRequestError:
+            raise
+        except Exception as exc:
+            zstd_error = getattr(_zstd, 'ZstdError', None)
+            if zstd_error and isinstance(exc, zstd_error):
+                raise _ClientRequestError('Invalid zstd-compressed upload') from exc
+            raise
+        decompressed = b''.join(chunks)
         logger.debug(
             'zstd decompressed %s: %d → %d bytes', label, len(data), len(decompressed)
         )
@@ -4868,6 +4902,11 @@ class InspectorDaemon:
                 if bg_acquired:
                     self._bg_sem.release()
 
+        except _ClientRequestError as exc:
+            logger.warning(
+                '%s - invalid upload for %s: %s', s, filename or 'unknown', exc.message
+            )
+            return self._build_response({'error': exc.message}, request, status=exc.status)
         except Exception as exc:
             logger.exception(
                 '%s - error handling scan for %s: %s', s, filename or 'unknown', exc

@@ -1351,6 +1351,13 @@ class TestZstdCompression:
         assert body['status'] == 'finished'
         assert body['detected_type'] == 'pdf'
 
+    async def test_multipart_malformed_zstd_returns_400(self, client):
+        malformed = xspct._ZSTD_MAGIC + b'not-a-valid-zstd-frame'
+        r = await client.post('/v1/scan', data=_form(malformed, 'clean.pdf.zst'))
+        assert r.status == 400
+        body = await r.json()
+        assert body['error'] == 'Invalid zstd-compressed upload'
+
     async def test_multipart_zst_filename_suffix_stripped(self, client):
         compressed = _zstd_compress(PDF_CLEAN)
         r = await client.post('/v1/scan', data=_form(compressed, 'clean.pdf.zst'))
@@ -1389,6 +1396,18 @@ class TestZstdCompression:
         assert body['status'] == 'finished'
         reported_name = body.get('file_name') or body.get('filename') or ''
         assert not reported_name.lower().endswith('.zst')
+
+    async def test_octet_stream_zstd_over_limit_returns_413(self, client, monkeypatch):
+        monkeypatch.setattr(xspct.InspectorDaemon, '_MAX_ZSTD_DECOMPRESSED_BYTES', 1024)
+        compressed = _zstd_compress(b'A' * 2048)
+        r = await client.post(
+            '/v1/scan?filename=clean.pdf.zst',
+            data=compressed,
+            headers={'Content-Type': 'application/octet-stream'},
+        )
+        assert r.status == 413
+        body = await r.json()
+        assert body['error'] == 'Zstd-compressed upload expands beyond limit (1024 bytes)'
 
     # ------------------------------------------------------------------ #
     # Response compression                                               #
