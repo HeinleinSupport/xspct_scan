@@ -1428,17 +1428,23 @@ class InspectorDaemon:
     def _try_acquire_background_slot(self) -> bool:
         """Attempt to take one background semaphore slot without waiting.
 
-        ``asyncio.Semaphore`` does not provide a public non-blocking acquire
-        operation. Background promotion needs an immediate yes/no decision so
-        foreground requests can release their slot promptly instead of waiting
-        for background capacity.
+        Uses the semaphore's internal counter via acquire_nowait() pattern.
+        Background promotion needs an immediate yes/no decision so foreground
+        requests can release their slot promptly instead of waiting for
+        background capacity.
 
         Returns:
             ``True`` when a slot was claimed, otherwise ``False``.
         """
         sem = self._bg_sem
-        if sem is None or sem._value <= 0:
+        if sem is None:
             return False
+        if sem.locked():
+            return False
+        # locked() returns True when value is 0; if not locked, acquire is
+        # guaranteed to succeed immediately on the next await.  We still need
+        # a synchronous decrement — the internal _value is the only option in
+        # CPython's asyncio.Semaphore, but we guard with locked() first.
         sem._value -= 1
         return True
 
@@ -3145,7 +3151,8 @@ class InspectorDaemon:
         import tempfile
         tmp_path = None
         try:
-            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as fh:
+            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False, mode='wb') as fh:
+                os.fchmod(fh.fileno(), 0o600)
                 fh.write(data)
                 tmp_path = fh.name
             result = _vendored_pdfid.PDFiD(tmp_path, allNames=False, extraData=False,
@@ -4998,6 +5005,8 @@ class InspectorDaemon:
             file_hash = request.query.get('hash')
         if not file_hash:
             return self._build_response({'error': 'No hash provided'}, request, status=400)
+        if not re.fullmatch(r'[0-9a-f]{64}', file_hash):
+            return self._build_response({'error': 'Invalid hash format'}, request, status=400)
         if file_hash in self.tasks:
             result = self.tasks[file_hash]
             if isinstance(result, asyncio.Task):
@@ -5245,12 +5254,12 @@ class InspectorDaemon:
   <title>xspct-scan API</title>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link href="https://fonts.googleapis.com/css?family=Montserrat:300,400,700|Roboto:300,400,700" rel="stylesheet">
   <style>body { margin: 0; padding: 0; }</style>
 </head>
 <body>
   <redoc spec-url="/v1/openapi.json"></redoc>
-  <script src="https://cdn.jsdelivr.net/npm/redoc/bundles/redoc.standalone.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/redoc@2.4.0/bundles/redoc.standalone.js"
+          crossorigin="anonymous"></script>
 </body>
 </html>'''
         return web.Response(text=html, content_type='text/html')
@@ -5398,7 +5407,7 @@ async def make_app() -> web.Application:
         await daemon.teardown()
         logger.info('xspct-scan stopped')
 
-    app = web.Application()
+    app = web.Application(client_max_size=50 * 1024 * 1024)  # 50 MB
     app['daemon'] = daemon
     app.on_startup.append(_on_startup)
     app.on_shutdown.append(_on_shutdown)
