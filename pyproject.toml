@@ -53,12 +53,18 @@ enrichment = [
     "pyzbar>=0.1",
     "easyocr>=1.7",
 ]
+serialization = [
+    "msgpack>=1.0",
+    "cbor2>=5.0",
+]
 dev    = [
     "pytest>=9",
     "pytest-asyncio>=1.0",
     "pytest-aiohttp>=1.0",
     "pytest-cov>=5.0",
     "fakeredis>=2.0",
+    "msgpack>=1.0",
+    "cbor2>=5.0",
 ]
 openapi = [
     "pydantic>=2.0",

@@ -195,6 +195,20 @@ except ImportError:
     _sflock = None  # type: ignore[assignment]
     HAS_SFLOCK = False
 
+try:
+    import msgpack as _msgpack
+    HAS_MSGPACK = True
+except ImportError:
+    _msgpack = None  # type: ignore[assignment]
+    HAS_MSGPACK = False
+
+try:
+    import cbor2 as _cbor2
+    HAS_CBOR2 = True
+except ImportError:
+    _cbor2 = None  # type: ignore[assignment]
+    HAS_CBOR2 = False
+
 # ---------------------------------------------------------------------------
 # Per-request timer (ContextVar — isolated per async task)
 # ---------------------------------------------------------------------------
@@ -4465,6 +4479,90 @@ class InspectorDaemon:
         finally:
             self._bg_sem.release()
 
+    # ------------------------------------------------------------------
+    # Response serialization helpers
+    # ------------------------------------------------------------------
+
+    _SERIALIZE_FORMAT_WARN_LOGGED: dict[str, bool] = {}
+
+    def _negotiate_format(self, request: web.Request) -> str:
+        """Return the wire format to use for this response.
+
+        Priority:
+        1. ``xspct_response_format`` config key (if not ``'auto'``).
+        2. ``Accept`` request header (first recognised MIME wins).
+        3. ``Content-Type`` of the incoming request (for msgpack/cbor
+           bodies on ``/v1/query`` POST).
+        4. Fall back to ``'json'``.
+        """
+        forced = config.get('xspct_response_format', 'auto')
+        if forced and forced != 'auto':
+            return str(forced).lower()
+
+        accept = request.headers.get('Accept', '')
+        for token in accept.split(','):
+            mime = token.split(';')[0].strip().lower()
+            if mime == 'application/json':
+                return 'json'
+            if mime == 'application/x-msgpack':
+                return 'msgpack'
+            if mime == 'application/cbor':
+                return 'cbor'
+
+        ct = request.headers.get('Content-Type', '').split(';')[0].strip().lower()
+        if ct == 'application/x-msgpack':
+            return 'msgpack'
+        if ct == 'application/cbor':
+            return 'cbor'
+
+        return 'json'
+
+    def _build_response(
+        self,
+        data: dict,
+        request: web.Request,
+        *,
+        status: int = 200,
+    ) -> web.Response:
+        """Serialise *data* in the negotiated wire format and return a Response.
+
+        If the negotiated format's library is not installed the response falls
+        back to JSON and logs a one-time warning.
+        """
+        fmt = self._negotiate_format(request)
+
+        if fmt == 'msgpack':
+            if HAS_MSGPACK:
+                body = _msgpack.packb(data, use_bin_type=True)
+                return web.Response(
+                    body=body,
+                    status=status,
+                    content_type='application/x-msgpack',
+                )
+            if not self._SERIALIZE_FORMAT_WARN_LOGGED.get('msgpack'):
+                logger.warning(
+                    'msgpack requested but msgpack library not installed; '
+                    'falling back to JSON. Install xspct-scan[serialization].'
+                )
+                self._SERIALIZE_FORMAT_WARN_LOGGED['msgpack'] = True
+
+        elif fmt == 'cbor':
+            if HAS_CBOR2:
+                body = _cbor2.dumps(data)
+                return web.Response(
+                    body=body,
+                    status=status,
+                    content_type='application/cbor',
+                )
+            if not self._SERIALIZE_FORMAT_WARN_LOGGED.get('cbor'):
+                logger.warning(
+                    'cbor requested but cbor2 library not installed; '
+                    'falling back to JSON. Install xspct-scan[serialization].'
+                )
+                self._SERIALIZE_FORMAT_WARN_LOGGED['cbor'] = True
+
+        return web.json_response(data, status=status)
+
     async def handle_scan(self, request: web.Request) -> web.Response:
         """Handle ``POST /v1/scan`` — accept a file and return an analysis report.
 
@@ -4498,7 +4596,7 @@ class InspectorDaemon:
         s = make_session(request)
         stats['requests_total'] += 1
         if not verify_api_key(s, request):
-            return web.json_response({'error': 'Unauthorized'}, status=401)
+            return self._build_response({'error': 'Unauthorized'}, request, status=401)
         start_time = time.monotonic()
         filename = None
         try:
@@ -4534,14 +4632,14 @@ class InspectorDaemon:
                         file_type_provided = (await part.text()).strip()
                 if not filedata:
                     logger.warning('%s - no "doc" part in multipart request', s)
-                    return web.json_response(
-                        {'error': 'No file part named "doc"'}, status=400
+                    return self._build_response(
+                        {'error': 'No file part named "doc"'}, request, status=400
                     )
             elif 'application/octet-stream' in content_type:
                 # ---- Raw octet-stream upload ---------------------------------
                 filedata = bytes(await request.read())
                 if not filedata:
-                    return web.json_response({'error': 'Empty request body'}, status=400)
+                    return self._build_response({'error': 'Empty request body'}, request, status=400)
                 filename = request.query.get('filename', 'upload.bin')
                 file_mime_provided = request.query.get('file_mime') or None
                 file_type_provided = request.query.get('file_type') or None
@@ -4553,9 +4651,10 @@ class InspectorDaemon:
                 logger.info('%s (%s) - read %d bytes (octet-stream) from %s',
                             s, timer(), len(filedata), filename)
             else:
-                return web.json_response(
+                return self._build_response(
                     {'error': 'Unsupported Content-Type — use multipart/form-data '
                               'or application/octet-stream'},
+                    request,
                     status=415,
                 )
             file_hash = hashlib.sha256(filedata).hexdigest()
@@ -4564,7 +4663,7 @@ class InspectorDaemon:
                 if cached.get('decrypted') or not custom_passwords:
                     logger.info('%s (%s) - cache hit for %s', s, timer(), file_hash)
                     cached['cache_hit'] = True
-                    return web.json_response(cached)
+                    return self._build_response(cached, request)
                 logger.info('%s - cache hit but re-analyzing (custom passwords)', s)
             if HAS_MAGIC:
                 file_magic_mime = _magic.Magic(mime=True)
@@ -4612,8 +4711,8 @@ class InspectorDaemon:
             except asyncio.TimeoutError:
                 stats['foreground_overloaded'] += 1
                 logger.warning('%s - overloaded: no foreground slot within %.1fs', s, timeout)
-                return web.json_response(
-                    {'error': 'Service overloaded, retry later'}, status=503
+                return self._build_response(
+                    {'error': 'Service overloaded, retry later'}, request, status=503
                 )
 
             bg_acquired = False
@@ -4637,7 +4736,7 @@ class InspectorDaemon:
                     report['status']     = 'finished'
                     report['time_taken'] = round(time.monotonic() - start_time, 4)
                     stats['requests_finished'] += 1
-                    return web.json_response(report)
+                    return self._build_response(report, request)
 
                 except asyncio.TimeoutError:
                     # Deadline exceeded — attempt non-blocking transition to background.
@@ -4665,8 +4764,8 @@ class InspectorDaemon:
                         if partial:
                             snap = partial.snapshot()
                             snap.update(resp)
-                            return web.json_response(snap, status=202)
-                        return web.json_response(resp, status=202)
+                            return self._build_response(snap, request, status=202)
+                        return self._build_response(resp, request, status=202)
 
                     # Background slot acquired — release foreground slot now.
                     self._fg_sem.release()
@@ -4689,8 +4788,8 @@ class InspectorDaemon:
                     if partial:
                         snap = partial.snapshot()
                         snap.update(snap_resp)
-                        return web.json_response(snap, status=202)
-                    return web.json_response(snap_resp, status=202)
+                        return self._build_response(snap, request, status=202)
+                    return self._build_response(snap_resp, request, status=202)
 
             finally:
                 if fg_acquired:
@@ -4702,7 +4801,7 @@ class InspectorDaemon:
             logger.exception(
                 '%s - error handling scan for %s: %s', s, filename or 'unknown', exc
             )
-            return web.json_response({'error': 'Internal server error'}, status=500)
+            return self._build_response({'error': 'Internal server error'}, request, status=500)
 
     async def handle_query(self, request: web.Request) -> web.Response:
         """Handle ``GET|POST /v1/query`` — look up a report by file hash.
@@ -4721,17 +4820,25 @@ class InspectorDaemon:
         timer('start')
         s = make_session(request)
         if not verify_api_key(s, request):
-            return web.json_response({'error': 'Unauthorized'}, status=401)
+            return self._build_response({'error': 'Unauthorized'}, request, status=401)
         try:
             if request.method == 'POST':
-                body = await request.json()
+                ct = request.headers.get('Content-Type', '').split(';')[0].strip().lower()
+                if ct == 'application/x-msgpack':
+                    raw = await request.read()
+                    body = _msgpack.unpackb(raw, raw=False) if HAS_MSGPACK else {}
+                elif ct == 'application/cbor':
+                    raw = await request.read()
+                    body = _cbor2.loads(raw) if HAS_CBOR2 else {}
+                else:
+                    body = await request.json()
                 file_hash = body.get('hash')
             else:
                 file_hash = request.query.get('hash')
         except Exception:
             file_hash = request.query.get('hash')
         if not file_hash:
-            return web.json_response({'error': 'No hash provided'}, status=400)
+            return self._build_response({'error': 'No hash provided'}, request, status=400)
         if file_hash in self.tasks:
             result = self.tasks[file_hash]
             if isinstance(result, asyncio.Task):
@@ -4741,31 +4848,31 @@ class InspectorDaemon:
                             file_hash, 'Analysis was cancelled'
                         )
                         self._store_terminal_result(file_hash, error)
-                        return web.json_response(error)
+                        return self._build_response(error, request)
                     try:
                         report = result.result()
-                        return web.json_response({'status': 'finished', 'report': report})
+                        return self._build_response({'status': 'finished', 'report': report}, request)
                     except Exception as exc:
                         error = self._make_terminal_error_result(file_hash)
                         self._store_terminal_result(file_hash, error)
                         logger.exception(
                             '%s - background task for %s raised: %s', s, file_hash, exc
                         )
-                        return web.json_response(error)
+                        return self._build_response(error, request)
                 # Task still running — return partial report if available.
                 partial = self._partials.get(file_hash)
                 if partial:
                     snap = partial.snapshot()
                     snap['status'] = 'processing'
-                    return web.json_response(snap)
-                return web.json_response({'status': 'processing'})
+                    return self._build_response(snap, request)
+                return self._build_response({'status': 'processing'}, request)
             if isinstance(result, dict) and result.get('status') == 'error':
-                return web.json_response(result)
-            return web.json_response({'status': 'finished', 'report': result})
+                return self._build_response(result, request)
+            return self._build_response({'status': 'finished', 'report': result}, request)
         report = await self.get_cached_report(s, file_hash)
         if report:
-            return web.json_response({'status': 'finished', 'report': report})
-        return web.json_response({'status': 'not_found'}, status=404)
+            return self._build_response({'status': 'finished', 'report': report}, request)
+        return self._build_response({'status': 'not_found'}, request, status=404)
 
     async def handle_metrics(self, request: web.Request) -> web.Response:
         """Handle ``GET /v1/metrics`` — expose Prometheus-format counters.

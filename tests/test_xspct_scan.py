@@ -1151,6 +1151,169 @@ class TestQueryEndpoint:
         assert query_b['report']['file_hash'] == fhash
 
 
+# ===========================================================================
+# Response serialization (msgpack / cbor / config override)
+# ===========================================================================
+
+try:
+    import msgpack as _msgpack_test
+    _HAS_MSGPACK_TEST = True
+except ImportError:
+    _HAS_MSGPACK_TEST = False
+
+try:
+    import cbor2 as _cbor2_test
+    _HAS_CBOR2_TEST = True
+except ImportError:
+    _HAS_CBOR2_TEST = False
+
+
+@pytest.mark.skipif(not _HAS_MSGPACK_TEST, reason='msgpack not installed')
+class TestResponseSerializationMsgpack:
+
+    async def test_scan_accept_msgpack_returns_msgpack(self, client):
+        r = await client.post(
+            '/v1/scan',
+            data=_form(PDF_CLEAN, 'clean.pdf'),
+            headers={'Accept': 'application/x-msgpack'},
+        )
+        assert r.status == 200
+        assert 'application/x-msgpack' in r.headers.get('Content-Type', '')
+        body = _msgpack_test.unpackb(await r.read(), raw=False)
+        assert body['status'] == 'finished'
+        assert body['detected_type'] == 'pdf'
+
+    async def test_query_get_accept_msgpack_returns_msgpack(self, client):
+        scan_r = await client.post(
+            '/v1/scan',
+            data=_form(PDF_CLEAN, 'clean.pdf'),
+            headers={'Accept': 'application/x-msgpack'},
+        )
+        file_hash = _msgpack_test.unpackb(await scan_r.read(), raw=False)['file_hash']
+
+        r = await client.get(
+            f'/v1/query?hash={file_hash}',
+            headers={'Accept': 'application/x-msgpack'},
+        )
+        assert r.status == 200
+        assert 'application/x-msgpack' in r.headers.get('Content-Type', '')
+        body = _msgpack_test.unpackb(await r.read(), raw=False)
+        assert body['status'] == 'finished'
+
+    async def test_query_post_msgpack_body_returns_msgpack(self, client):
+        scan_r = await client.post('/v1/scan', data=_form(PDF_CLEAN, 'clean.pdf'))
+        scan_b = await scan_r.json()
+        file_hash = scan_b['file_hash']
+
+        payload = _msgpack_test.packb({'hash': file_hash}, use_bin_type=True)
+        r = await client.post(
+            '/v1/query',
+            data=payload,
+            headers={'Content-Type': 'application/x-msgpack'},
+        )
+        assert r.status == 200
+        assert 'application/x-msgpack' in r.headers.get('Content-Type', '')
+        body = _msgpack_test.unpackb(await r.read(), raw=False)
+        assert body['status'] == 'finished'
+
+    async def test_config_force_json_overrides_accept_msgpack(self, client):
+        saved = xspct.config.get('xspct_response_format', 'auto')
+        xspct.config['xspct_response_format'] = 'json'
+        try:
+            r = await client.post(
+                '/v1/scan',
+                data=_form(PDF_CLEAN, 'clean.pdf'),
+                headers={'Accept': 'application/x-msgpack'},
+            )
+            assert r.status == 200
+            assert r.headers.get('Content-Type', '').startswith('application/json')
+            body = await r.json()
+            assert body['status'] == 'finished'
+        finally:
+            xspct.config['xspct_response_format'] = saved
+
+    async def test_config_force_msgpack_overrides_json_accept(self, client):
+        saved = xspct.config.get('xspct_response_format', 'auto')
+        xspct.config['xspct_response_format'] = 'msgpack'
+        try:
+            r = await client.post(
+                '/v1/scan',
+                data=_form(PDF_CLEAN, 'clean.pdf'),
+                headers={'Accept': 'application/json'},
+            )
+            assert r.status == 200
+            assert 'application/x-msgpack' in r.headers.get('Content-Type', '')
+            body = _msgpack_test.unpackb(await r.read(), raw=False)
+            assert body['status'] == 'finished'
+        finally:
+            xspct.config['xspct_response_format'] = saved
+
+
+@pytest.mark.skipif(not _HAS_CBOR2_TEST, reason='cbor2 not installed')
+class TestResponseSerializationCbor:
+
+    async def test_scan_accept_cbor_returns_cbor(self, client):
+        r = await client.post(
+            '/v1/scan',
+            data=_form(PDF_CLEAN, 'clean.pdf'),
+            headers={'Accept': 'application/cbor'},
+        )
+        assert r.status == 200
+        assert 'application/cbor' in r.headers.get('Content-Type', '')
+        body = _cbor2_test.loads(await r.read())
+        assert body['status'] == 'finished'
+        assert body['detected_type'] == 'pdf'
+
+    async def test_query_get_accept_cbor_returns_cbor(self, client):
+        scan_r = await client.post(
+            '/v1/scan',
+            data=_form(PDF_CLEAN, 'clean.pdf'),
+            headers={'Accept': 'application/cbor'},
+        )
+        file_hash = _cbor2_test.loads(await scan_r.read())['file_hash']
+
+        r = await client.get(
+            f'/v1/query?hash={file_hash}',
+            headers={'Accept': 'application/cbor'},
+        )
+        assert r.status == 200
+        assert 'application/cbor' in r.headers.get('Content-Type', '')
+        body = _cbor2_test.loads(await r.read())
+        assert body['status'] == 'finished'
+
+    async def test_query_post_cbor_body_returns_cbor(self, client):
+        scan_r = await client.post('/v1/scan', data=_form(PDF_CLEAN, 'clean.pdf'))
+        scan_b = await scan_r.json()
+        file_hash = scan_b['file_hash']
+
+        payload = _cbor2_test.dumps({'hash': file_hash})
+        r = await client.post(
+            '/v1/query',
+            data=payload,
+            headers={'Content-Type': 'application/cbor'},
+        )
+        assert r.status == 200
+        assert 'application/cbor' in r.headers.get('Content-Type', '')
+        body = _cbor2_test.loads(await r.read())
+        assert body['status'] == 'finished'
+
+    async def test_config_force_cbor_overrides_json_accept(self, client):
+        saved = xspct.config.get('xspct_response_format', 'auto')
+        xspct.config['xspct_response_format'] = 'cbor'
+        try:
+            r = await client.post(
+                '/v1/scan',
+                data=_form(PDF_CLEAN, 'clean.pdf'),
+                headers={'Accept': 'application/json'},
+            )
+            assert r.status == 200
+            assert 'application/cbor' in r.headers.get('Content-Type', '')
+            body = _cbor2_test.loads(await r.read())
+            assert body['status'] == 'finished'
+        finally:
+            xspct.config['xspct_response_format'] = saved
+
+
 class _ClientResponseStub:
 
     def __init__(self, status, body):

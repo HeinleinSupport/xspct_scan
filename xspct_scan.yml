@@ -89,6 +89,13 @@ xspct_analyzers:
 # When false (default), only the truncated 'text_preview' is included.
 xspct_include_text: false
 
+# Response serialization format.
+# auto    - negotiate from Accept header, then Content-Type, then fall back to JSON
+# json    - always return application/json (default behaviour)
+# msgpack - always return application/x-msgpack  (requires xspct-scan[serialization])
+# cbor    - always return application/cbor        (requires xspct-scan[serialization])
+xspct_response_format: auto
+
 # Maximum characters for 'text_preview' (the short excerpt included in every
 # response). Keep this small for low-latency API consumers.
 xspct_text_preview_length: 2000
