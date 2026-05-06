@@ -52,6 +52,21 @@ except ImportError:
 # Formatting helpers
 # ---------------------------------------------------------------------------
 
+def _normalize_result_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize daemon responses to the flat scan-report shape.
+
+    ``POST /v1/scan`` returns the report directly, while ``GET /v1/query``
+    wraps finished results as ``{"status": "finished", "report": {...}}``.
+    The CLI formatters expect the flat report shape in both cases.
+    """
+    report = payload.get("report")
+    if isinstance(report, dict):
+        normalized = dict(report)
+        if "status" in payload and "status" not in normalized:
+            normalized["status"] = payload["status"]
+        return normalized
+    return payload
+
 def _collect_iocs(result: dict[str, Any]) -> list[str]:
     seen: dict[str, None] = {}
     for v in (result.get("iocs") or {}).values():
@@ -207,7 +222,8 @@ async def _poll_result(
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status == 200:
-                    return await resp.json(content_type=None)
+                    body = await resp.json(content_type=None)
+                    return _normalize_result_payload(body)
                 # 404 → still processing; keep polling
         except aiohttp.ClientError:
             pass
@@ -281,7 +297,7 @@ async def scan_file(
         _print_error(f"{path.name}: HTTP {http_status} — {msg}")
         return None
 
-    return body
+    return _normalize_result_payload(body)
 
 
 # ---------------------------------------------------------------------------
