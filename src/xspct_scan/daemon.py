@@ -2169,13 +2169,15 @@ class InspectorDaemon:
         Returns:
             A dict with keys:
 
-            - **ocr_text** (str): Extracted text (empty when OCR unavailable).
+            - **ocr_text** (list[dict]): OCR engine results with ``engine``,
+              ``time_s``, and ``text`` keys. Empty when OCR is unavailable or
+              skipped.
             - **qr_codes** (list[str]): Decoded QR/barcode values.
             - **analyses** (list[dict]): Suspicious findings from OCR text.
             - **iocs** (dict): URLs/IPs/domains extracted from OCR text.
         """
         result: dict = {
-            'ocr_text': '',
+            'ocr_text': [],
             'qr_codes': [],
             'analyses': [],
             'iocs': {'urls': [], 'ips': [], 'domains': []},
