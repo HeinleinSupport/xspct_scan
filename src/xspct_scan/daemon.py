@@ -4566,8 +4566,52 @@ class InspectorDaemon:
         """Return True if the client accepts zstd-encoded responses."""
         if not HAS_ZSTD:
             return False
-        ae = request.headers.get('Accept-Encoding', '')
-        return any(t.split(';')[0].strip().lower() == 'zstd' for t in ae.split(','))
+
+        weighted = self._parse_weighted_header(request.headers.get('Accept-Encoding', ''))
+        zstd_q: float | None = None
+        wildcard_q: float | None = None
+        for token, q, _specificity, _index in weighted:
+            if token == 'zstd':
+                zstd_q = q
+                break
+            if token == '*':
+                wildcard_q = q
+        accepted_q = zstd_q if zstd_q is not None else wildcard_q
+        return bool(accepted_q and accepted_q > 0)
+
+    @staticmethod
+    def _parse_weighted_header(header_value: str) -> list[tuple[str, float, int, int]]:
+        """Parse an RFC-style weighted header into sortable tokens.
+
+        Returns tuples of ``(token, q, specificity, index)`` where higher
+        specificity means a more exact match and lower index preserves
+        original order for equally weighted tokens.
+        """
+        weighted: list[tuple[str, float, int, int]] = []
+        for index, raw_token in enumerate(header_value.split(',')):
+            raw_token = raw_token.strip()
+            if not raw_token:
+                continue
+            parts = [part.strip() for part in raw_token.split(';') if part.strip()]
+            token = parts[0].lower()
+            q = 1.0
+            for param in parts[1:]:
+                if not param.startswith('q='):
+                    continue
+                try:
+                    q = float(param[2:])
+                except ValueError:
+                    q = 0.0
+                break
+            q = max(0.0, min(1.0, q))
+            specificity = 2
+            if token in {'*', '*/*'}:
+                specificity = 0
+            elif token.endswith('/*'):
+                specificity = 1
+            weighted.append((token, q, specificity, index))
+        weighted.sort(key=lambda item: (-item[1], -item[2], item[3]))
+        return weighted
 
     def _negotiate_format(self, request: web.Request) -> str:
         """Return the wire format to use for this response.
@@ -4583,9 +4627,10 @@ class InspectorDaemon:
         if forced and forced != 'auto':
             return str(forced).lower()
 
-        accept = request.headers.get('Accept', '')
-        for token in accept.split(','):
-            mime = token.split(';')[0].strip().lower()
+        accept = self._parse_weighted_header(request.headers.get('Accept', ''))
+        for mime, q, _specificity, _index in accept:
+            if q <= 0:
+                continue
             if mime == 'application/json':
                 return 'json'
             if mime == 'application/x-msgpack':
@@ -4649,7 +4694,11 @@ class InspectorDaemon:
         compress: bool,
     ) -> web.Response:
         """Build a Response, optionally zstd-compressing the body."""
-        headers = {}
+        vary = ['Accept-Encoding']
+        forced = config.get('xspct_response_format', 'auto')
+        if not forced or forced == 'auto':
+            vary.insert(0, 'Accept')
+        headers = {'Vary': ', '.join(vary)}
         if compress:
             body = _zstd.ZstdCompressor().compress(body)
             headers['Content-Encoding'] = 'zstd'

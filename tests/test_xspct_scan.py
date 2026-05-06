@@ -1248,6 +1248,33 @@ class TestResponseSerializationMsgpack:
         finally:
             xspct.config['xspct_response_format'] = saved
 
+    async def test_accept_qvalue_prefers_msgpack(self, client):
+        r = await client.post(
+            '/v1/scan',
+            data=_form(PDF_CLEAN, 'clean.pdf'),
+            headers={
+                'Accept': 'application/json;q=0.2, application/x-msgpack;q=0.8',
+            },
+        )
+        assert r.status == 200
+        assert 'application/x-msgpack' in r.headers.get('Content-Type', '')
+        assert r.headers.get('Vary', '') == 'Accept, Accept-Encoding'
+        body = _msgpack_test.unpackb(await r.read(), raw=False)
+        assert body['status'] == 'finished'
+
+    async def test_accept_qvalue_zero_rejects_msgpack(self, client):
+        r = await client.post(
+            '/v1/scan',
+            data=_form(PDF_CLEAN, 'clean.pdf'),
+            headers={
+                'Accept': 'application/x-msgpack;q=0, application/json;q=1',
+            },
+        )
+        assert r.status == 200
+        assert r.headers.get('Content-Type', '').startswith('application/json')
+        body = await r.json()
+        assert body['status'] == 'finished'
+
 
 @pytest.mark.skipif(not _HAS_CBOR2_TEST, reason='cbor2 not installed')
 class TestResponseSerializationCbor:
@@ -1428,6 +1455,7 @@ class TestZstdCompression:
         assert r.status == 200
         assert r.headers.get('Content-Encoding', '') == 'zstd'
         assert r.headers.get('Content-Type', '').startswith('application/json')
+        assert r.headers.get('Vary', '') == 'Accept, Accept-Encoding'
         # aiohttp client transparently decompresses when zstandard is installed
         result = await r.json()
         assert result['status'] == 'finished'
@@ -1458,6 +1486,17 @@ class TestZstdCompression:
             data=_form(PDF_CLEAN, 'clean.pdf'),
             # Override aiohttp's automatic Accept-Encoding to exclude zstd
             headers={'Accept-Encoding': 'gzip'},
+        )
+        assert r.status == 200
+        assert r.headers.get('Content-Encoding', '') != 'zstd'
+        body = await r.json()
+        assert body['status'] == 'finished'
+
+    async def test_accept_encoding_qvalue_zero_disables_zstd(self, client):
+        r = await client.post(
+            '/v1/scan',
+            data=_form(PDF_CLEAN, 'clean.pdf'),
+            headers={'Accept-Encoding': 'zstd;q=0, gzip;q=1'},
         )
         assert r.status == 200
         assert r.headers.get('Content-Encoding', '') != 'zstd'
