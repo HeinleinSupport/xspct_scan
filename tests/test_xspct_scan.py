@@ -1314,6 +1314,152 @@ class TestResponseSerializationCbor:
             xspct.config['xspct_response_format'] = saved
 
 
+# ===========================================================================
+# Zstd request decompression / response compression
+# ===========================================================================
+
+try:
+    import zstandard as _zstd_test
+    _HAS_ZSTD_TEST = True
+except ImportError:
+    _HAS_ZSTD_TEST = False
+
+
+def _zstd_compress(data: bytes) -> bytes:
+    return _zstd_test.ZstdCompressor().compress(data)
+
+
+def _zstd_stream_decompress(data: bytes) -> bytes:
+    dctx = _zstd_test.ZstdDecompressor()
+    with dctx.stream_reader(io.BytesIO(data)) as reader:
+        return reader.read()
+
+
+@pytest.mark.skipif(not _HAS_ZSTD_TEST, reason='zstandard not installed')
+class TestZstdCompression:
+
+    # ------------------------------------------------------------------ #
+    # Request decompression — multipart                                   #
+    # ------------------------------------------------------------------ #
+
+    async def test_multipart_zstd_doc_decompresses(self, client):
+        """zstd-compressed doc part detected via magic bytes and decompressed."""
+        compressed = _zstd_compress(PDF_CLEAN)
+        r = await client.post('/v1/scan', data=_form(compressed, 'clean.pdf'))
+        assert r.status == 200
+        body = await r.json()
+        assert body['status'] == 'finished'
+        assert body['detected_type'] == 'pdf'
+
+    async def test_multipart_zst_filename_suffix_stripped(self, client):
+        compressed = _zstd_compress(PDF_CLEAN)
+        r = await client.post('/v1/scan', data=_form(compressed, 'clean.pdf.zst'))
+        assert r.status == 200
+        body = await r.json()
+        assert body['status'] == 'finished'
+        reported_name = body.get('file_name') or body.get('filename') or ''
+        assert not reported_name.lower().endswith('.zst')
+
+    # ------------------------------------------------------------------ #
+    # Request decompression — octet-stream                               #
+    # ------------------------------------------------------------------ #
+
+    async def test_octet_stream_zstd_magic_decompresses(self, client):
+        """zstd magic bytes auto-detect on octet-stream body."""
+        compressed = _zstd_compress(PDF_CLEAN)
+        r = await client.post(
+            '/v1/scan?filename=clean.pdf',
+            data=compressed,
+            headers={'Content-Type': 'application/octet-stream'},
+        )
+        assert r.status == 200
+        body = await r.json()
+        assert body['status'] == 'finished'
+        assert body['detected_type'] == 'pdf'
+
+    async def test_octet_stream_zst_filename_suffix_stripped(self, client):
+        compressed = _zstd_compress(PDF_CLEAN)
+        r = await client.post(
+            '/v1/scan?filename=clean.pdf.zst',
+            data=compressed,
+            headers={'Content-Type': 'application/octet-stream'},
+        )
+        assert r.status == 200
+        body = await r.json()
+        assert body['status'] == 'finished'
+        reported_name = body.get('file_name') or body.get('filename') or ''
+        assert not reported_name.lower().endswith('.zst')
+
+    # ------------------------------------------------------------------ #
+    # Response compression                                               #
+    # ------------------------------------------------------------------ #
+
+    async def test_accept_encoding_zstd_compresses_json_response(self, client):
+        """Explicit Accept-Encoding: zstd triggers server-side compression.
+
+        aiohttp client auto-decompresses the response body, so we read
+        the result via r.json() and only verify the Content-Encoding header
+        to confirm the server did compress.
+        """
+        r = await client.post(
+            '/v1/scan',
+            data=_form(PDF_CLEAN, 'clean.pdf'),
+            headers={'Accept-Encoding': 'zstd'},
+        )
+        assert r.status == 200
+        assert r.headers.get('Content-Encoding', '') == 'zstd'
+        assert r.headers.get('Content-Type', '').startswith('application/json')
+        # aiohttp client transparently decompresses when zstandard is installed
+        result = await r.json()
+        assert result['status'] == 'finished'
+        assert result['detected_type'] == 'pdf'
+
+    async def test_accept_encoding_zstd_with_msgpack(self, client):
+        if not _HAS_MSGPACK_TEST:
+            pytest.skip('msgpack not installed')
+        r = await client.post(
+            '/v1/scan',
+            data=_form(PDF_CLEAN, 'clean.pdf'),
+            headers={
+                'Accept': 'application/x-msgpack',
+                'Accept-Encoding': 'zstd',
+            },
+        )
+        assert r.status == 200
+        assert r.headers.get('Content-Encoding', '') == 'zstd'
+        assert 'application/x-msgpack' in r.headers.get('Content-Type', '')
+        # aiohttp client decompresses zstd; r.read() returns plain msgpack bytes
+        result = _msgpack_test.unpackb(await r.read(), raw=False)
+        assert result['status'] == 'finished'
+
+    async def test_no_accept_encoding_no_compression(self, client):
+        """Explicitly requesting gzip only must not trigger zstd compression."""
+        r = await client.post(
+            '/v1/scan',
+            data=_form(PDF_CLEAN, 'clean.pdf'),
+            # Override aiohttp's automatic Accept-Encoding to exclude zstd
+            headers={'Accept-Encoding': 'gzip'},
+        )
+        assert r.status == 200
+        assert r.headers.get('Content-Encoding', '') != 'zstd'
+        body = await r.json()
+        assert body['status'] == 'finished'
+
+    async def test_query_accept_encoding_zstd_compresses_response(self, client):
+        scan_r = await client.post('/v1/scan', data=_form(PDF_CLEAN, 'clean.pdf'))
+        file_hash = (await scan_r.json())['file_hash']
+
+        r = await client.get(
+            f'/v1/query?hash={file_hash}',
+            headers={'Accept-Encoding': 'zstd'},
+        )
+        assert r.status == 200
+        assert r.headers.get('Content-Encoding', '') == 'zstd'
+        # aiohttp client transparently decompresses
+        result = await r.json()
+        assert result['status'] == 'finished'
+
+
 class _ClientResponseStub:
 
     def __init__(self, status, body):

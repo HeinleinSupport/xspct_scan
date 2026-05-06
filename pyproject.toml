@@ -57,6 +57,9 @@ serialization = [
     "msgpack>=1.0",
     "cbor2>=5.0",
 ]
+compression = [
+    "zstandard>=0.21",
+]
 dev    = [
     "pytest>=9",
     "pytest-asyncio>=1.0",
@@ -65,6 +68,7 @@ dev    = [
     "fakeredis>=2.0",
     "msgpack>=1.0",
     "cbor2>=5.0",
+    "zstandard>=0.21",
 ]
 openapi = [
     "pydantic>=2.0",

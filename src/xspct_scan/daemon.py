@@ -209,6 +209,16 @@ except ImportError:
     _cbor2 = None  # type: ignore[assignment]
     HAS_CBOR2 = False
 
+try:
+    import zstandard as _zstd
+    HAS_ZSTD = True
+except ImportError:
+    _zstd = None  # type: ignore[assignment]
+    HAS_ZSTD = False
+
+# Zstandard frame magic (little-endian 0xFD2FB528)
+_ZSTD_MAGIC = b'\x28\xb5\x2f\xfd'
+
 # ---------------------------------------------------------------------------
 # Per-request timer (ContextVar — isolated per async task)
 # ---------------------------------------------------------------------------
@@ -4485,6 +4495,46 @@ class InspectorDaemon:
 
     _SERIALIZE_FORMAT_WARN_LOGGED: dict[str, bool] = {}
 
+    # ------------------------------------------------------------------
+    # Zstd request decompression / response compression helpers
+    # ------------------------------------------------------------------
+
+    def _decompress_zstd_part(self, data: bytes, label: str) -> bytes:
+        """Transparently decompress *data* if zstd magic bytes are detected.
+
+        Detection is based entirely on the Zstandard frame magic bytes
+        (``\\x28\\xb5\\x2f\\xfd``) at the start of the data.  This is
+        reliable and immune to HTTP pipeline behaviour that may have
+        already consumed the ``Content-Encoding`` header.
+
+        If the ``zstandard`` library is not installed and zstd data is
+        detected, data is returned unchanged and a one-time warning is logged.
+        """
+        if len(data) < 4 or data[:4] != _ZSTD_MAGIC:
+            return data
+        if not HAS_ZSTD:
+            if not self._SERIALIZE_FORMAT_WARN_LOGGED.get('zstd_decompress'):
+                logger.warning(
+                    'zstd-compressed %s received but zstandard library not installed; '
+                    'passing raw bytes. Install xspct-scan[compression].', label
+                )
+                self._SERIALIZE_FORMAT_WARN_LOGGED['zstd_decompress'] = True
+            return data
+        dctx = _zstd.ZstdDecompressor()
+        with dctx.stream_reader(io.BytesIO(data)) as reader:
+            decompressed = reader.read()
+        logger.debug(
+            'zstd decompressed %s: %d → %d bytes', label, len(data), len(decompressed)
+        )
+        return decompressed
+
+    def _should_compress_response(self, request: web.Request) -> bool:
+        """Return True if the client accepts zstd-encoded responses."""
+        if not HAS_ZSTD:
+            return False
+        ae = request.headers.get('Accept-Encoding', '')
+        return any(t.split(';')[0].strip().lower() == 'zstd' for t in ae.split(','))
+
     def _negotiate_format(self, request: web.Request) -> str:
         """Return the wire format to use for this response.
 
@@ -4530,15 +4580,12 @@ class InspectorDaemon:
         back to JSON and logs a one-time warning.
         """
         fmt = self._negotiate_format(request)
+        compress = self._should_compress_response(request)
 
         if fmt == 'msgpack':
             if HAS_MSGPACK:
                 body = _msgpack.packb(data, use_bin_type=True)
-                return web.Response(
-                    body=body,
-                    status=status,
-                    content_type='application/x-msgpack',
-                )
+                return self._make_response(body, 'application/x-msgpack', status, compress)
             if not self._SERIALIZE_FORMAT_WARN_LOGGED.get('msgpack'):
                 logger.warning(
                     'msgpack requested but msgpack library not installed; '
@@ -4549,11 +4596,7 @@ class InspectorDaemon:
         elif fmt == 'cbor':
             if HAS_CBOR2:
                 body = _cbor2.dumps(data)
-                return web.Response(
-                    body=body,
-                    status=status,
-                    content_type='application/cbor',
-                )
+                return self._make_response(body, 'application/cbor', status, compress)
             if not self._SERIALIZE_FORMAT_WARN_LOGGED.get('cbor'):
                 logger.warning(
                     'cbor requested but cbor2 library not installed; '
@@ -4561,7 +4604,27 @@ class InspectorDaemon:
                 )
                 self._SERIALIZE_FORMAT_WARN_LOGGED['cbor'] = True
 
-        return web.json_response(data, status=status)
+        body = json.dumps(data).encode()
+        return self._make_response(body, 'application/json', status, compress)
+
+    def _make_response(
+        self,
+        body: bytes,
+        content_type: str,
+        status: int,
+        compress: bool,
+    ) -> web.Response:
+        """Build a Response, optionally zstd-compressing the body."""
+        headers = {}
+        if compress:
+            body = _zstd.ZstdCompressor().compress(body)
+            headers['Content-Encoding'] = 'zstd'
+        return web.Response(
+            body=body,
+            status=status,
+            content_type=content_type,
+            headers=headers,
+        )
 
     async def handle_scan(self, request: web.Request) -> web.Response:
         """Handle ``POST /v1/scan`` — accept a file and return an analysis report.
@@ -4616,6 +4679,11 @@ class InspectorDaemon:
                     if part.name == 'doc':
                         filename = part.filename
                         filedata = bytes(await part.read())
+                        filedata = self._decompress_zstd_part(
+                            filedata, filename or 'doc'
+                        )
+                        if filename and filename.lower().endswith('.zst'):
+                            filename = filename[:-4]
                         logger.info('%s (%s) - read %d bytes from %s',
                                     s, timer(), len(filedata), filename)
                     elif part.name == 'passwords':
@@ -4641,6 +4709,9 @@ class InspectorDaemon:
                 if not filedata:
                     return self._build_response({'error': 'Empty request body'}, request, status=400)
                 filename = request.query.get('filename', 'upload.bin')
+                filedata = self._decompress_zstd_part(filedata, filename)
+                if filename and filename.lower().endswith('.zst'):
+                    filename = filename[:-4]
                 file_mime_provided = request.query.get('file_mime') or None
                 file_type_provided = request.query.get('file_type') or None
                 pw_param = request.query.get('passwords', '')
