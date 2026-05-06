@@ -1184,6 +1184,12 @@ class InspectorDaemon:
         self._clamav_version: str = ''  # cached VERSION response
         # EasyOCR reader — lazily initialised on first use (slow to load).
         self._easyocr_reader = None
+        # Dedicated thread pool for CPU-bound analyzer work.
+        self._executor: 'concurrent.futures.ThreadPoolExecutor | None' = None
+        # Cached config-derived values (rebuilt on reload).
+        self._exclude_suffixes: tuple[str, ...] = ()
+        self._exclude_suffixes_source: 'list | None' = None  # identity-check
+        self._rebuild_cached_config()
 
     # ------------------------------------------------------------------
     # Redis helpers
@@ -1294,6 +1300,17 @@ class InspectorDaemon:
         """
         self._read_passwords()
 
+        # Build cached config-derived values.
+        self._rebuild_cached_config()
+
+        # Create dedicated thread pool for CPU-bound analyzer work.
+        import concurrent.futures
+        pool_size = int(config.get('xspct_foreground_slots', 16)) + int(config.get('xspct_background_slots', 4))
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=pool_size,
+            thread_name_prefix='xspct-analyzer',
+        )
+
         # Log availability of every optional engine at startup so operators
         # can see at a glance what is installed and what is active.
         _az = config.get('xspct_analyzers', {})
@@ -1386,6 +1403,8 @@ class InspectorDaemon:
         Called once during application shutdown via the aiohttp
         ``on_cleanup`` signal.
         """
+        if self._executor:
+            self._executor.shutdown(wait=False)
         if self.redis_pool:
             try:
                 await self.redis_pool.aclose()
@@ -1424,6 +1443,22 @@ class InspectorDaemon:
             if cfg.get('enabled', True)
             and (name != 'archive' or self._archive_backend_available())
         ]
+
+    def _rebuild_cached_config(self) -> None:
+        """Rebuild cached config-derived values from current module config."""
+        src = config.get('xspct_ioc_url_exclude_domains') or []
+        self._exclude_suffixes = tuple(
+            s.lower() for s in src if s
+        )
+        self._exclude_suffixes_source = src
+
+    def _get_exclude_suffixes(self) -> tuple:
+        """Return cached exclude suffixes, refreshing if config changed."""
+        src = config.get('xspct_ioc_url_exclude_domains') or []
+        if src is not self._exclude_suffixes_source:
+            self._exclude_suffixes = tuple(s.lower() for s in src if s)
+            self._exclude_suffixes_source = src
+        return self._exclude_suffixes
 
     def _try_acquire_background_slot(self) -> bool:
         """Attempt to take one background semaphore slot without waiting.
@@ -1717,13 +1752,8 @@ class InspectorDaemon:
         except Exception:
             text_utf8  = data.decode('ascii', 'ignore')
             text_utf16 = ''
-        combined = text_utf8 + ' ' + text_utf16
 
-        exclude_suffixes = tuple(
-            s.lower()
-            for s in (config.get('xspct_ioc_url_exclude_domains') or [])
-            if s
-        )
+        exclude_suffixes = self._get_exclude_suffixes()
 
         def _host_from_url(url: str) -> str:
             """Best-effort hostname extraction without a full URL parser."""
@@ -1735,27 +1765,37 @@ class InspectorDaemon:
             except Exception:
                 return ''
 
-        raw_urls = self._URL_RE.findall(combined)
+        # Scan each encoding separately to avoid concatenating two large strings.
+        raw_urls: set[str] = set()
+        raw_urls.update(self._URL_RE.findall(text_utf8))
+        if text_utf16:
+            raw_urls.update(self._URL_RE.findall(text_utf16))
         if exclude_suffixes:
-            urls = sorted({
+            urls = sorted(
                 u for u in raw_urls
                 if not self._ioc_excluded(_host_from_url(u), exclude_suffixes)
-            })
+            )
         else:
-            urls = sorted(set(raw_urls))
+            urls = sorted(raw_urls)
 
-        raw_ips = set(self._IP_RE.findall(combined))
+        raw_ips: set[str] = set()
+        raw_ips.update(self._IP_RE.findall(text_utf8))
+        if text_utf16:
+            raw_ips.update(self._IP_RE.findall(text_utf16))
         ips = sorted(
             ip for ip in raw_ips
             if all(0 <= int(p) <= 255 for p in ip.split('.'))
         )
 
-        raw_domains = self._DOM_RE.findall(combined)
-        domains = sorted({
+        raw_domains: set[str] = set()
+        raw_domains.update(self._DOM_RE.findall(text_utf8))
+        if text_utf16:
+            raw_domains.update(self._DOM_RE.findall(text_utf16))
+        domains = sorted(
             d for d in raw_domains
             if self._has_valid_tld(d)
             and (not exclude_suffixes or not self._ioc_excluded(d, exclude_suffixes))
-        })
+        )
 
         return {'urls': urls, 'ips': ips, 'domains': domains}
 
@@ -1784,11 +1824,7 @@ class InspectorDaemon:
             logger.debug('iocsearcher failed (%s): %s', label, exc)
             return None
 
-        exclude_suffixes = tuple(
-            s.lower()
-            for s in (config.get('xspct_ioc_url_exclude_domains') or [])
-            if s
-        )
+        exclude_suffixes = self._get_exclude_suffixes()
 
         # IOC types whose value is a hostname or URL — apply the exclude list.
         _HOST_TYPES = frozenset({'fqdn', 'domain', 'url', 'ip', 'ipv6'})
@@ -3698,10 +3734,17 @@ class InspectorDaemon:
         """
         if not source:
             return
+        # Use a set of hashable keys for O(1) deduplication of list items.
+        _analyses_seen: set[tuple] = {
+            (d['type'], d['keyword'], d['description'])
+            for d in target['analyses']
+        } if target.get('analyses') else set()
         for key, value in source.items():
             if key == 'analyses':
                 for item in value:
-                    if item not in target['analyses']:
+                    _key = (item['type'], item['keyword'], item['description'])
+                    if _key not in _analyses_seen:
+                        _analyses_seen.add(_key)
                         target['analyses'].append(item)
             elif key == 'iocs':
                 for ik in ('urls', 'ips', 'domains'):
@@ -4229,7 +4272,7 @@ class InspectorDaemon:
             """Run *sync_fn* in the thread pool, record timing, and merge."""
             t0 = time.monotonic()
             try:
-                result = await loop.run_in_executor(None, sync_fn, *args)
+                result = await loop.run_in_executor(self._executor, sync_fn, *args)
             except Exception as exc:
                 logger.error('%s - analyzer %s raised: %s', s, name, exc)
                 result = {'analyzer_errors': {name: type(exc).__name__}}
@@ -4290,13 +4333,13 @@ class InspectorDaemon:
         _preview_limit = int(config.get('xspct_text_preview_length', 2000))
         if not partial.report.get('text_preview'):
             partial.report['text_preview'] = await loop.run_in_executor(
-                None, self.extract_text_preview, data, file_mime, _preview_limit
+                self._executor, self.extract_text_preview, data, file_mime, _preview_limit
             )
         # Full text for internal analysis (may equal text_preview when
         # xspct_text_max_length <= 2000, but never shorter).
         if _text_max > _preview_limit or not partial.report.get('text_preview'):
             _full_text_for_analysis = await loop.run_in_executor(
-                None, self.extract_text_preview, data, file_mime, _text_max
+                self._executor, self.extract_text_preview, data, file_mime, _text_max
             )
         else:
             _full_text_for_analysis = partial.report['text_preview']
@@ -4317,7 +4360,7 @@ class InspectorDaemon:
             _iocs_t0 = time.monotonic()
             try:
                 iocs_result = await loop.run_in_executor(
-                    None, self.analyze_iocsearcher, _iocsearcher_text, filename
+                    self._executor, self.analyze_iocsearcher, _iocsearcher_text, filename
                 )
             except Exception as exc:
                 logger.error('%s - analyzer iocs raised: %s', s, exc)
@@ -4346,7 +4389,7 @@ class InspectorDaemon:
         # OOXML embedded images: analyse in thread pool.
         if (HAS_OCR or HAS_PYZBAR) and file_mime and 'openxmlformats' in file_mime.lower():
             await loop.run_in_executor(
-                None, self._extract_ooxml_images, s, data, report
+                self._executor, self._extract_ooxml_images, s, data, report
             )
         return partial
 
@@ -5204,6 +5247,7 @@ class InspectorDaemon:
             if config_path and os.path.isfile(config_path):
                 load_config(config_path)
                 configure_logging()
+                self._rebuild_cached_config()
                 reloaded.append('config')
                 logger.info('%s - admin reload: config reloaded from %s', s, config_path)
             # Re-read passwords.

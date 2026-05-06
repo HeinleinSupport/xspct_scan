@@ -1102,7 +1102,7 @@ class TestQueryEndpoint:
         assert r.status == 400
 
     async def test_get_unknown_hash_returns_404(self, client):
-        r = await client.get('/v1/query?hash=deadbeef1234')
+        r = await client.get('/v1/query?hash=' + 'a' * 64)
         assert r.status == 404
 
     async def test_post_missing_hash_returns_400(self, client):
@@ -1110,7 +1110,7 @@ class TestQueryEndpoint:
         assert r.status == 400
 
     async def test_post_unknown_hash_returns_404(self, client):
-        r = await client.post('/v1/query', json={'hash': 'deadbeef1234'})
+        r = await client.post('/v1/query', json={'hash': 'b' * 64})
         assert r.status == 404
 
     async def test_get_after_scan_returns_finished(self, client):
@@ -1641,7 +1641,7 @@ class TestAuthentication:
     async def test_query_correct_key_returns_404_not_401(self, auth_client):
         """After auth passes, unknown hash → 404 (not 401)."""
         r = await auth_client.get(
-            '/v1/query?hash=deadbeef',
+            '/v1/query?hash=' + 'c' * 64,
             headers={'X-Api-Key': 'test-secret-key'},
         )
         assert r.status == 404
