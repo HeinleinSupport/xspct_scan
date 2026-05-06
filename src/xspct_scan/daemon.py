@@ -1216,10 +1216,7 @@ class InspectorDaemon:
             file_hash: SHA-256 hex digest used as the cache key.
             report: Finished analysis report dict to store.
         """
-        self.tasks[file_hash] = report
-        self.tasks.move_to_end(file_hash)
-        self._evict_tasks()
-        self._partials.pop(file_hash, None)  # partial no longer needed
+        self._store_terminal_result(file_hash, report)
         if not self._redis_enabled(s):
             return
         key = config['xspct_redis_cache']['prefix'] + file_hash
@@ -1230,6 +1227,22 @@ class InspectorDaemon:
             logger.info('%s - cached report for %s (TTL %ds)', s, file_hash, expire)
         except Exception as exc:
             self._redis_record_error(s, exc)
+
+    def _store_terminal_result(self, file_hash: str, result: dict) -> None:
+        """Persist a terminal in-memory result for subsequent /query lookups."""
+        self.tasks[file_hash] = result
+        self.tasks.move_to_end(file_hash)
+        self._evict_tasks()
+        self._partials.pop(file_hash, None)  # partial no longer needed
+
+    def _make_terminal_error_result(self, file_hash: str,
+                                    message: str = 'Internal server error') -> dict:
+        """Build a stable error payload for failed background/query lookups."""
+        return {
+            'status': 'error',
+            'file_hash': file_hash,
+            'error': message,
+        }
 
     def _evict_tasks(self) -> None:
         while len(self.tasks) > self._TASKS_MAX_SIZE:
@@ -1359,6 +1372,10 @@ class InspectorDaemon:
         self.passwords = (all_passwords + defaults) if all_passwords else defaults
         logger.info('Loaded %d passwords.', len(self.passwords))
 
+    def _archive_backend_available(self) -> bool:
+        """Return whether archive extraction has a usable backend."""
+        return HAS_SFLOCK or bool(config.get('xspct_archive_stdlib_fallback', False))
+
     def _resolve_enabled_analyzers(self) -> list[str]:
         """Return the list of analyzer names that are currently enabled.
 
@@ -1371,6 +1388,7 @@ class InspectorDaemon:
         return [
             name for name, cfg in config['xspct_analyzers'].items()
             if cfg.get('enabled', True)
+            and (name != 'archive' or self._archive_backend_available())
         ]
 
     def _try_acquire_background_slot(self) -> bool:
@@ -1389,20 +1407,6 @@ class InspectorDaemon:
             return False
         sem._value -= 1
         return True
-
-    def _resolve_enabled_analyzers(self) -> list[str]:
-        """Return the list of analyzer names that are currently enabled.
-
-        Reads ``xspct_analyzers`` from the module config and returns the names
-        of all analyzers whose ``enabled`` flag is truthy.
-
-        Returns:
-            Ordered list of enabled analyzer name strings.
-        """
-        return [
-            name for name, cfg in config['xspct_analyzers'].items()
-            if cfg.get('enabled', True)
-        ]
 
     # ------------------------------------------------------------------
     # YARA rules
@@ -4451,6 +4455,10 @@ class InspectorDaemon:
             logger.debug('%s - background scan cancelled for %s', s, file_hash)
         except Exception as exc:
             stats['background_errors'] += 1
+            self._store_terminal_result(
+                file_hash,
+                self._make_terminal_error_result(file_hash),
+            )
             logger.exception(
                 '%s - background scan raised for %s: %s', s, file_hash, exc
             )
@@ -4728,17 +4736,22 @@ class InspectorDaemon:
             result = self.tasks[file_hash]
             if isinstance(result, asyncio.Task):
                 if result.done():
+                    if result.cancelled():
+                        error = self._make_terminal_error_result(
+                            file_hash, 'Analysis was cancelled'
+                        )
+                        self._store_terminal_result(file_hash, error)
+                        return web.json_response(error)
                     try:
                         report = result.result()
                         return web.json_response({'status': 'finished', 'report': report})
                     except Exception as exc:
+                        error = self._make_terminal_error_result(file_hash)
+                        self._store_terminal_result(file_hash, error)
                         logger.exception(
                             '%s - background task for %s raised: %s', s, file_hash, exc
                         )
-                        return web.json_response(
-                            {'status': 'error', 'error': 'Internal server error'},
-                            status=500,
-                        )
+                        return web.json_response(error)
                 # Task still running — return partial report if available.
                 partial = self._partials.get(file_hash)
                 if partial:
@@ -4746,6 +4759,8 @@ class InspectorDaemon:
                     snap['status'] = 'processing'
                     return web.json_response(snap)
                 return web.json_response({'status': 'processing'})
+            if isinstance(result, dict) and result.get('status') == 'error':
+                return web.json_response(result)
             return web.json_response({'status': 'finished', 'report': result})
         report = await self.get_cached_report(s, file_hash)
         if report:
