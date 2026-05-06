@@ -1373,6 +1373,23 @@ class InspectorDaemon:
             if cfg.get('enabled', True)
         ]
 
+    def _try_acquire_background_slot(self) -> bool:
+        """Attempt to take one background semaphore slot without waiting.
+
+        ``asyncio.Semaphore`` does not provide a public non-blocking acquire
+        operation. Background promotion needs an immediate yes/no decision so
+        foreground requests can release their slot promptly instead of waiting
+        for background capacity.
+
+        Returns:
+            ``True`` when a slot was claimed, otherwise ``False``.
+        """
+        sem = self._bg_sem
+        if sem is None or sem._value <= 0:
+            return False
+        sem._value -= 1
+        return True
+
     def _resolve_enabled_analyzers(self) -> list[str]:
         """Return the list of analyzer names that are currently enabled.
 
@@ -4620,16 +4637,9 @@ class InspectorDaemon:
                     logger.info('%s (%s) - timeout for %s, attempting background promotion',
                                 s, timer(), filename)
 
-                    # Try to grab a background slot immediately (no await).
+                    # Try to grab a background slot immediately.
                     # If none are free we drop the scan to protect foreground capacity.
-                    # asyncio.wait_for(acquire(), timeout=0) succeeds instantly when
-                    # a slot is available (no event-loop yield needed); raises
-                    # TimeoutError when the semaphore is at zero.
-                    try:
-                        await asyncio.wait_for(self._bg_sem.acquire(), timeout=0)
-                        bg_acquired = True
-                    except asyncio.TimeoutError:
-                        bg_acquired = False
+                    bg_acquired = self._try_acquire_background_slot()
 
                     if not bg_acquired:
                         # No background capacity — cancel and report dropped.

@@ -2257,6 +2257,45 @@ class TestTwoTierConcurrency:
             xspct.config['xspct_background_slots'] = 4
         assert xspct.stats['background_rejected'] > before
 
+    async def test_timeout_promotes_to_background_when_slot_available(self, aiohttp_client, monkeypatch):
+        """A timed-out scan should return 202/processing when a bg slot is free."""
+        xspct.config['xspct_foreground_slots'] = 1
+        xspct.config['xspct_background_slots'] = 1
+        app = await xspct.make_app()
+        client = await aiohttp_client(app)
+        daemon = app['daemon']
+
+        finalized = asyncio.Event()
+
+        async def _slow(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        async def _finalize_background(s, file_hash, task):
+            try:
+                task.cancel()
+                await task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                daemon._bg_sem.release()
+                finalized.set()
+
+        monkeypatch.setattr(daemon, 'analyze_task', _slow)
+        monkeypatch.setattr(daemon, '_finalize_background', _finalize_background)
+        try:
+            r = await client.post(
+                '/v1/scan?timeout=0.1',
+                data=_form(PDF_CLEAN, 'slow.pdf'),
+            )
+            assert r.status == 202
+            body = await r.json()
+            assert body.get('status') == 'processing'
+            await asyncio.wait_for(finalized.wait(), timeout=1)
+            assert daemon._bg_sem._value == 1
+        finally:
+            xspct.config['xspct_foreground_slots'] = 16
+            xspct.config['xspct_background_slots'] = 4
+
     # --- /metrics exposes new counters -----------------------------------
 
     async def test_metrics_contains_concurrency_lines(self, client):
