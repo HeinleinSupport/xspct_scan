@@ -112,7 +112,7 @@ iocsearcher.
 }
 ```
 
-New report fields (v2.0.0+):
+New report fields (v0.2.0+):
 
 | Field | Type | Description |
 |-------|------|-------------|
