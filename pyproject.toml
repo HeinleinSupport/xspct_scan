@@ -16,7 +16,7 @@ authors = [
 requires-python = ">=3.10"
 keywords = ["rspamd", "malware", "pdf", "office", "oletools", "aiohttp", "scanner"]
 classifiers = [
-  "Development Status :: 5 - Production/Stable",
+  "Development Status :: 4 - Beta",
   "Environment :: No Input/Output (Daemon)",
   "Framework :: AsyncIO",
   "Intended Audience :: System Administrators",
@@ -90,8 +90,8 @@ docs   = [
 ]
 
 [project.urls]
-Repository = "https://github.com/heinlein-support/xspct_scan"
-Issues = "https://github.com/heinlein-support/xspct_scan/issues"
+Repository = "https://github.com/HeinleinSupport/xspct_scan"
+Issues = "https://github.com/HeinleinSupport/xspct_scan/issues"
 
 [project.scripts]
 xspct-scan    = "xspct_scan.__main__:main"

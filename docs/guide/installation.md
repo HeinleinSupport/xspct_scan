@@ -36,7 +36,7 @@ pip install "xspct_scan[uvloop,redis,enrichment,openapi,advanced]"
 ## Install from source
 
 ```bash
-git clone https://github.com/heinlein-support/xspct_scan.git
+git clone https://github.com/HeinleinSupport/xspct_scan.git
 cd xspct_scan
 pip install -e ".[uvloop,redis,enrichment,openapi,advanced]"
 ```
