@@ -13,10 +13,10 @@
   sudo dnf install file-libs
   ```
 
-## Install from PyPI
+## Install from GitHub
 
 ```bash
-pip install xspct_scan
+pip install "git+https://github.com/HeinleinSupport/xspct_scan.git"
 ```
 
 ### Optional extras
@@ -30,7 +30,7 @@ pip install xspct_scan
 | `advanced` | `yara-python`, `yara-x`, `iocsearcher`, `py7zr` | YARA scanning (classic + Rust engines), extended IOC extraction, 7z archive support |
 
 ```bash
-pip install "xspct_scan[uvloop,redis,enrichment,openapi,advanced]"
+pip install "xspct_scan[uvloop,redis,enrichment,openapi,advanced] @ git+https://github.com/HeinleinSupport/xspct_scan.git"
 ```
 
 ## Install from source

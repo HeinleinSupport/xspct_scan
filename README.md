@@ -50,6 +50,10 @@ a simple HTTP API for on-demand scanning.
   and ZPAQ; configurable depth/size limits, password loop for encrypted
   archives, recursive sub-file analysis.  Falls back to stdlib
   `zipfile`/`py7zr` without SFlock2.
+- **ClamAV integration** — every file (and individual archive members) forwarded
+  to a running `clamd` daemon for antivirus signature matching; results surfaced
+  in the `clamav` response field and appended to `analyses` (optional; requires
+  `[enrichment]`)
 
 ### Infrastructure
 - **Parallel pipeline** — analyzers run as concurrent asyncio tasks; partial
@@ -65,7 +69,7 @@ a simple HTTP API for on-demand scanning.
 ## Quick start
 
 ```bash
-pip install xspct_scan
+pip install "git+https://github.com/HeinleinSupport/xspct_scan.git"
 xspct_scan /etc/xspct_scan/config.yml
 ```
 
@@ -99,10 +103,10 @@ curl -s -X POST http://localhost:8080/v1/scan \
 
 ## Installation
 
-### From PyPI
+### From GitHub
 
 ```bash
-pip install xspct_scan
+pip install "git+https://github.com/HeinleinSupport/xspct_scan.git"
 ```
 
 ### Optional extras
@@ -118,7 +122,7 @@ pip install xspct_scan
 | `compression` | `zstandard` | zstd response compression (`Accept-Encoding: zstd`) and transparent zstd decompression of uploaded files |
 
 ```bash
-pip install "xspct_scan[uvloop,redis,enrichment,openapi,advanced]"
+pip install "xspct_scan[uvloop,redis,enrichment,openapi,advanced] @ git+https://github.com/HeinleinSupport/xspct_scan.git"
 ```
 
 ### From source
@@ -180,12 +184,12 @@ curl -s -X POST "http://localhost:8080/v1/scan?filename=malware.xlsm" \
 
 **msgpack / CBOR responses** — set the `Accept` header to request a non-JSON
 wire format (`application/x-msgpack` or `application/cbor`). Requires
-`pip install "xspct_scan[serialization]"`. The server-wide default is
+`pip install "xspct_scan[serialization] @ git+https://github.com/HeinleinSupport/xspct_scan.git"`. The server-wide default is
 controlled by `xspct_response_format`.
 
 **zstd-compressed responses** — add `Accept-Encoding: zstd` to receive a
 zstd-compressed response body (`Content-Encoding: zstd`). Requires
-`pip install "xspct_scan[compression]"`.
+`pip install "xspct_scan[compression] @ git+https://github.com/HeinleinSupport/xspct_scan.git"`.
 
 **zstd-compressed uploads** — the daemon transparently decompresses a
 zstd-compressed `doc` part or octet-stream body (detected via the Zstandard
@@ -294,7 +298,7 @@ via **zipjail**:
 
 ```bash
 # Python package
-pip install "xspct_scan[advanced]"
+pip install "xspct_scan[advanced] @ git+https://github.com/HeinleinSupport/xspct_scan.git"
 
 # System packages for full native-format support (Debian / Ubuntu)
 sudo apt-get install p7zip-full rar unace-nonfree cabextract lzip zpaq
@@ -359,7 +363,7 @@ running `clamd` daemon for antivirus signature matching.
 
 ```bash
 # Python library
-pip install "xspct_scan[enrichment]"
+pip install "xspct_scan[enrichment] @ git+https://github.com/HeinleinSupport/xspct_scan.git"
 
 # ClamAV daemon (Debian / Ubuntu)
 sudo apt-get install clamav-daemon
@@ -424,7 +428,7 @@ WantedBy=multi-user.target
 Full docs are in the [docs/](docs/) directory and can be built with Sphinx:
 
 ```bash
-pip install "xspct_scan[docs]"
+pip install "xspct_scan[docs] @ git+https://github.com/HeinleinSupport/xspct_scan.git"
 sphinx-build docs docs/_build/html
 ```
 
