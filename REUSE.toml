@@ -25,10 +25,28 @@ path = [
     ".gitignore",
     ".reuseignore",
     "CLAUDE.md",
+    "README.md",
     "docs/**",
+    "yara/url.yar",
 ]
 SPDX-FileCopyrightText = "2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>"
 SPDX-License-Identifier = "EUPL-1.2"
+
+# ── Prompt workflows ───────────────────────────────────────────────────────
+[[annotations]]
+path = ".github/prompts/**"
+SPDX-FileCopyrightText = "2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>"
+SPDX-License-Identifier = "EUPL-1.2"
+
+# ── Vendored public-domain PDF tools ───────────────────────────────────────
+[[annotations]]
+path = [
+    "src/xspct_scan/vendor/pdf_parser.py",
+    "src/xspct_scan/vendor/pdfid.py",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "NONE"
+SPDX-License-Identifier = "LicenseRef-Public-Domain"
 
 # ── Generated build and cache artifacts ─────────────────────────────────────
 [[annotations]]
