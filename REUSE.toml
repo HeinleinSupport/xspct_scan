@@ -24,6 +24,7 @@ path = [
     ".github/agents/xspct-feature.agent.md",
     ".gitignore",
     ".reuseignore",
+    "bom.json",
     "CLAUDE.md",
     "README.md",
     "docs/**",
