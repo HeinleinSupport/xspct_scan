@@ -29,10 +29,52 @@ import secrets
 import sys
 import time
 import timeit
+import urllib.parse
 import yaml
 import zipfile
 from collections import OrderedDict
 from aiohttp import web
+
+
+# ---------------------------------------------------------------------------
+# Schema version exposed in every v2 report
+# ---------------------------------------------------------------------------
+_REPORT_SCHEMA_VERSION = '2.0'
+_ENGINE_VERSION = '0.4.0'
+
+
+def _normalize_pdf_date(date_str: str) -> 'str | None':
+    """Convert a PDF date string to ISO-8601.
+
+    Handles the ``D:YYYYMMDDHHmmSSOHH'mm'`` format produced by Acrobat and
+    most PDF generators.  Returns the input unchanged when the pattern does
+    not match, and ``None`` when *date_str* is empty.
+
+    Examples::
+
+        "D:20260430041451Z"  →  "2026-04-30T04:14:51Z"
+        "D:20260430041451+02'00'"  →  "2026-04-30T04:14:51+02:00"
+    """
+    if not date_str:
+        return None
+    s = date_str.strip()
+    if s.startswith('D:'):
+        s = s[2:]
+    m = re.match(
+        r'^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(Z|[+-]\d{2}\'?\d{2}\'?)?',
+        s,
+    )
+    if not m:
+        return date_str or None
+    y, mo, d, h, mi, sec = m.groups()[:6]
+    tz = m.group(7) or 'Z'
+    if tz == 'Z':
+        return f'{y}-{mo}-{d}T{h}:{mi}:{sec}Z'
+    sign = tz[0]
+    digits = re.sub(r"[^0-9]", '', tz[1:])
+    if len(digits) >= 4:
+        return f"{y}-{mo}-{d}T{h}:{mi}:{sec}{sign}{digits[:2]}:{digits[2:4]}"
+    return f'{y}-{mo}-{d}T{h}:{mi}:{sec}{tz}'
 
 
 
@@ -741,6 +783,80 @@ if HAS_PYDANTIC:
         version:     str
         type:        str
 
+    # ── v2 models ─────────────────────────────────────────────────────
+    class _V2Engine(_pydantic.BaseModel):
+        name:    str
+        version: str
+
+    class _V2File(_pydantic.BaseModel):
+        name:  str
+        sha256: str
+        size:  int
+        mime:  Optional[str] = None
+        magic: Optional[str] = None
+        type:  str
+
+    class _V2AnalyzerInfo(_pydantic.BaseModel):
+        completed: list[str] = []
+        pending:   list[str] = []
+        timings_s: dict      = _pydantic.Field(default_factory=dict)
+        errors:    Optional[dict] = None
+
+    class _V2Scan(_pydantic.BaseModel):
+        status:     str
+        duration_s: float
+        cache_hit:  bool = False
+        analyzers:  '_V2AnalyzerInfo' = _pydantic.Field(
+            default_factory=lambda: _V2AnalyzerInfo())
+
+    class _V2Verdict(_pydantic.BaseModel):
+        score:        Optional[int]  = None
+        severity:     str            = 'unknown'
+        labels:       list[str]      = []
+        summary:      Optional[str]  = None
+        contributors: dict           = _pydantic.Field(default_factory=dict)
+
+    class _V2IocEntry(_pydantic.BaseModel):
+        value:      str
+        source:     str
+        confidence: str            # 'high' | 'medium' | 'low'
+        defanged:   Optional[str] = None
+        context:    Optional[str] = None
+
+    class _V2Iocs(_pydantic.BaseModel):
+        urls:    list['_V2IocEntry'] = []
+        domains: list['_V2IocEntry'] = []
+        ips:     list['_V2IocEntry'] = []
+        emails:  list['_V2IocEntry'] = []
+        hashes:  list['_V2IocEntry'] = []
+        cves:    list['_V2IocEntry'] = []
+        wallets: list['_V2IocEntry'] = []
+        onions:  list['_V2IocEntry'] = []
+        phones:  list['_V2IocEntry'] = []
+
+    class _V2Finding(_pydantic.BaseModel):
+        type:        str
+        keyword:     str
+        description: str
+        severity:    str           # 'info' | 'low' | 'medium' | 'high' | 'critical'
+        source:      str
+        confidence:  Optional[str] = None
+
+    class _V2ScanReport(_pydantic.BaseModel):
+        """v2 scan report — the structure returned by ``/v1/scan``."""
+        schema_version: str
+        engine:         '_V2Engine'
+        file:           '_V2File'
+        scan:           '_V2Scan'
+        verdict:        '_V2Verdict' = _pydantic.Field(default_factory=_V2Verdict)
+        flags:          dict        = _pydantic.Field(default_factory=dict)
+        iocs:           '_V2Iocs'  = _pydantic.Field(default_factory=_V2Iocs)
+        findings:       list['_V2Finding'] = []
+        content:        Optional[dict] = None
+        document:       Optional[dict] = None
+        engines:        Optional[dict] = None
+
+    # ── (legacy model kept for internal OpenAPI spec generation only) ──
     class _ScanReport(_pydantic.BaseModel):
         filename:            str
         file_hash:           str
@@ -804,9 +920,12 @@ if HAS_PYDANTIC:
     def _build_openapi_spec() -> dict:
         """Build and return the OpenAPI 3.0 spec dict."""
         schemas = {}
-        for model in (_AnalysisHit, _IocReport, _TextSegment, _MetaInfo, _ScanReport,
-                       _ScanResponse, _ProcessingResponse, _QueryResponse,
-                       _ErrorResponse):
+        for model in (
+            _AnalysisHit, _IocReport, _TextSegment, _MetaInfo,
+            _V2Engine, _V2File, _V2AnalyzerInfo, _V2Scan, _V2Verdict,
+            _V2IocEntry, _V2Iocs, _V2Finding, _V2ScanReport,
+            _ScanResponse, _ProcessingResponse, _QueryResponse, _ErrorResponse,
+        ):
             s = model.model_json_schema()
             # pydantic embeds $defs for nested models — hoist them
             for k, v in s.pop('$defs', {}).items():
@@ -870,7 +989,7 @@ if HAS_PYDANTIC:
                         'responses': {
                             '200': {
                                 'description': 'Analysis complete',
-                                'content': {'application/json': {'schema': _ref('ScanReport')}},
+                                'content': {'application/json': {'schema': _ref('V2ScanReport')}},
                             },
                             '202': {
                                 'description': 'Analysis in progress (partial report)',
@@ -4645,6 +4764,235 @@ class InspectorDaemon:
         for seg in img_result.get('text_segments', []):
             self._add_text_segment(report, source, seg.get('text', ''))
 
+    # ------------------------------------------------------------------
+    # v2 report transformer
+    # ------------------------------------------------------------------
+
+    def _to_v2_report(self, v1: dict, filename: str, filesize: int) -> dict:
+        """Transform a finalized v1-internal report dict into the v2 schema.
+
+        This is the single serialization boundary: all internal accumulation
+        stays in v1 format; this method is called once in
+        :meth:`analyze_task` before caching and returning.
+
+        Args:
+            v1:       Completed v1 report dict (after _finalize_text_fields).
+            filename: Original filename (URL-decoded in the output).
+            filesize: Raw byte length of the scanned file.
+
+        Returns:
+            A v2 report dict ready for serialization and caching.
+        """
+        # engine
+        v2: dict = {
+            'schema_version': _REPORT_SCHEMA_VERSION,
+            'engine': {'name': 'xspct-scan', 'version': _ENGINE_VERSION},
+        }
+
+        # file
+        v2['file'] = {
+            'name':   urllib.parse.unquote(filename or ''),
+            'sha256': v1.get('file_hash', ''),
+            'size':   filesize,
+            'mime':   v1.get('file_type') or None,
+            'magic':  v1.get('file_description') or None,
+            'type':   v1.get('detected_type') or 'unknown',
+        }
+
+        # scan
+        analyzers: dict = {
+            'completed': v1.get('analyzers_completed', []),
+            'pending':   v1.get('analyzers_pending', []),
+            'timings_s': v1.get('analyzer_timings', {}),
+        }
+        if v1.get('analyzer_errors'):
+            analyzers['errors'] = v1['analyzer_errors']
+        v2['scan'] = {
+            'status':     v1.get('status', 'finished'),
+            'duration_s': v1.get('time_taken', 0.0),
+            'cache_hit':  bool(v1.get('cache_hit', False)),
+            'analyzers':  analyzers,
+        }
+
+        # verdict  (scoring/labels populated in a later iteration)
+        v2['verdict'] = {
+            'score':        None,
+            'severity':     'unknown',
+            'labels':       [],
+            'summary':      None,
+            'contributors': {},
+        }
+
+        # flags  — only keys that are True (plus decryption info when set)
+        _flag_map = [
+            ('encrypted',    'is_encrypted'),
+            ('decrypted',    'decrypted'),
+            ('macros',       'has_macro'),
+            ('javascript',   'has_javascript'),
+            ('open_action',  'has_openaction'),
+            ('launch',       'has_launch'),
+            ('embedded_files', 'has_embedded_files'),
+            ('forms',        'has_forms'),
+            ('scripts',      'has_scripts'),
+            ('iframes',      'has_iframes'),
+            ('meta_refresh', 'has_meta_refresh'),
+        ]
+        flags: dict = {}
+        for v2_key, v1_key in _flag_map:
+            if v1.get(v1_key):
+                flags[v2_key] = True
+        if v1.get('decryption_password'):
+            flags['decryption_password'] = v1['decryption_password']
+        v2['flags'] = flags
+
+        # iocs — rich {value, source, confidence} objects, deduped
+        v2_iocs: dict = {}
+        basic = v1.get('iocs', {})
+        ext   = v1.get('iocs_extended', {})
+
+        def _append_unique(bucket: list, value: str, source: str,
+                           confidence: str) -> None:
+            if not any(e['value'] == value for e in bucket):
+                bucket.append({'value': value, 'source': source,
+                                'confidence': confidence})
+
+        urls: list = []
+        for u in basic.get('urls', []):
+            _append_unique(urls, u, 'scanner', 'high')
+        for u in ext.get('url', []):
+            if not any(e['value'] == u for e in urls):
+                _append_unique(urls, u, 'iocsearcher', 'high')
+        if urls:
+            v2_iocs['urls'] = urls
+
+        domains: list = []
+        for d in basic.get('domains', []):
+            _append_unique(domains, d, 'scanner', 'medium')
+        for d in ext.get('fqdn', []):
+            existing = next((e for e in domains if e['value'] == d), None)
+            if existing:
+                existing['confidence'] = 'high'
+                existing['source'] = 'iocsearcher'
+            else:
+                _append_unique(domains, d, 'iocsearcher', 'high')
+        if domains:
+            v2_iocs['domains'] = domains
+
+        ips: list = []
+        for ip in basic.get('ips', []):
+            _append_unique(ips, ip, 'scanner', 'high')
+        for ip in ext.get('ip', []) + ext.get('ipv6', []):
+            _append_unique(ips, ip, 'iocsearcher', 'high')
+        if ips:
+            v2_iocs['ips'] = ips
+
+        _ext_type_map = [
+            ('email', 'emails'), ('md5', 'hashes'), ('sha1', 'hashes'),
+            ('sha256', 'hashes'), ('cve', 'cves'), ('cryptocurrency', 'wallets'),
+            ('onion', 'onions'), ('phone', 'phones'),
+        ]
+        for ext_type, v2_type in _ext_type_map:
+            for val in ext.get(ext_type, []):
+                bucket = v2_iocs.setdefault(v2_type, [])
+                _append_unique(bucket, val, 'iocsearcher', 'high')
+
+        v2['iocs'] = v2_iocs
+
+        # findings  (was analyses; enrich with severity + source)
+        findings: list = []
+        for a in v1.get('analyses', []):
+            f: dict = {
+                'type':        a.get('type', ''),
+                'keyword':     a.get('keyword', ''),
+                'description': a.get('description', ''),
+                'severity':    'medium',
+                'source':      'scanner',
+            }
+            if a.get('confidence'):
+                f['confidence'] = a['confidence']
+            findings.append(f)
+        if findings:
+            v2['findings'] = findings
+
+        # content  (text segments; controlled by config flags)
+        content: dict = {}
+        preview = v1.get('text_preview', [])
+        if preview and config.get('xspct_include_text_preview', True):
+            content['preview'] = preview
+        full = v1.get('text_full', [])
+        if full and config.get('xspct_include_text_full', False):
+            content['full'] = full
+        if content:
+            v2['content'] = content
+
+        # document  (was meta_document; ISO-8601 dates, empty keys omitted)
+        meta_doc = v1.get('meta_document') or {}
+        doc: dict = {}
+        for v1_k, v2_k in [
+            ('title', 'title'), ('author', 'author'), ('subject', 'subject'),
+            ('keywords', 'keywords'), ('creator', 'creator'),
+            ('producer', 'producer'), ('last_saved_by', 'last_saved_by'),
+            ('company', 'company'), ('app_name', 'app_name'),
+            ('revision_num', 'revision'), ('encryption', 'encryption'),
+        ]:
+            val = str(meta_doc.get(v1_k, '') or '').strip()
+            if val:
+                doc[v2_k] = val
+        for v1_k, v2_k in [('creation_date', 'created'), ('mod_date', 'modified')]:
+            iso = _normalize_pdf_date(str(meta_doc.get(v1_k, '') or ''))
+            if iso:
+                doc[v2_k] = iso
+        if doc:
+            v2['document'] = doc
+
+        # engines  (per-engine raw output; section omitted when empty)
+        engines: dict = {}
+
+        clamav = v1.get('clamav')
+        if clamav is not None:
+            cv: dict = {'status': clamav.get('status', 'unavailable')}
+            if clamav.get('viruses'):
+                cv['viruses'] = clamav['viruses']
+            for fld in ('engine_version', 'db_version', 'db_date'):
+                val = clamav.get(fld)
+                if val:
+                    cv[fld] = val
+            cv['scan_time_s'] = clamav.get('scan_time_s', 0.0)
+            engines['clamav'] = cv
+
+        yara_matches = v1.get('yara_matches', [])
+        if yara_matches:
+            engines['yara'] = {'matches': yara_matches}
+
+        pdfid_kw   = v1.get('pdfid_keywords') or {}
+        pdfid_meta = v1.get('pdfid_meta') or {}
+        pdfid_kw_nz   = {k: v for k, v in pdfid_kw.items() if v}
+        pdfid_meta_nz = {k: v for k, v in pdfid_meta.items() if v}
+        if pdfid_kw_nz or pdfid_meta_nz:
+            pdfid: dict = {}
+            if pdfid_kw_nz:
+                pdfid['keywords'] = pdfid_kw_nz
+            if pdfid_meta_nz:
+                pdfid['meta'] = pdfid_meta_nz
+            engines['pdfid'] = pdfid
+
+        archive_files = v1.get('archive_files', [])
+        if archive_files:
+            engines['archive'] = {'files': archive_files}
+
+        exif = v1.get('exif') or {}
+        if exif:
+            engines['image'] = {'exif': exif}
+
+        rtf_objects = v1.get('rtf_objects', [])
+        if rtf_objects:
+            engines['rtf'] = {'objects': rtf_objects}
+
+        if engines:
+            v2['engines'] = engines
+
+        return v2
+
     async def analyze_pipeline(self, s: str, filename: str, data: bytes,
                                 file_mime: 'str | None',
                                 file_desc: 'str | None' = None,
@@ -4970,13 +5318,11 @@ class InspectorDaemon:
             (' yara=[' + ', '.join(_yara_rules) + ']') if _yara_rules else '',
         )
 
-        await self.cache_report(s, file_hash, report)
-        # Strip disabled text fields from the cached/returned report.
-        if not config.get('xspct_include_text_preview', True):
-            report['text_preview'] = []
-        if not config.get('xspct_include_text_full', False):
-            report['text_full'] = []
-        return report
+        # Transform v1 internal report → v2 output schema before caching.
+        v2_report = self._to_v2_report(report, filename, len(data))
+        v2_report['status'] = 'finished'
+        await self.cache_report(s, file_hash, v2_report)
+        return v2_report
 
     # ------------------------------------------------------------------
     # HTTP request handlers

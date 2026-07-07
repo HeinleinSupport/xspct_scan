@@ -826,7 +826,7 @@ class TestSyncAnalyze:
     def test_meta_always_present(self, daemon):
         r = daemon.sync_analyze('<t>', 'x.pdf', PDF_CLEAN, 'application/pdf')
         assert r['meta']['script_name'] == 'xspct-scan'
-        assert r['meta']['version'] == '0.3.0'
+        assert r['meta']['version'] == '0.4.0'
 
     @pytest.mark.skipif(not os.path.exists(OLE_FILE), reason='OLE sample not present')
     def test_real_ole_has_macro(self, daemon):
@@ -948,34 +948,34 @@ class TestScanEndpoint:
         r = await client.post('/v1/scan', data=_form(PDF_CLEAN, 'clean.pdf'))
         assert r.status == 200
         body = await r.json()
-        assert body['status']         == 'finished'
-        assert body['detected_type']  == 'pdf'
-        assert body['has_javascript'] is False
-        assert body['has_openaction'] is False
+        assert body['status']                    == 'finished'
+        assert body['file']['type']               == 'pdf'
+        assert body.get('flags', {}).get('javascript', False) is False
+        assert body.get('flags', {}).get('open_action', False) is False
 
     async def test_scan_malicious_pdf_flags(self, client):
         r = await client.post('/v1/scan', data=_form(PDF_ALL_MARKERS, 'malware.pdf'))
         assert r.status == 200
         body = await r.json()
-        assert body['has_javascript'] is True
-        assert body['has_openaction'] is True
-        assert body['is_encrypted']   is True
+        assert body.get('flags', {}).get('javascript', False) is True
+        assert body.get('flags', {}).get('open_action', False) is True
+        assert body.get('flags', {}).get('encrypted', False)   is True
 
     async def test_scan_malicious_html_flags(self, client):
         r = await client.post('/v1/scan', data=_form(HTML_MALICIOUS, 'phish.html'))
         assert r.status == 200
         body = await r.json()
-        assert body['detected_type'] == 'html'
-        assert body['has_scripts']   is True
-        assert body['has_forms']     is True
-        assert body['has_iframes']   is True
+        assert body['file']['type']                            == 'html'
+        assert body.get('flags', {}).get('scripts', False)    is True
+        assert body.get('flags', {}).get('forms', False)      is True
+        assert body.get('flags', {}).get('iframes', False)    is True
 
     async def test_scan_ooxml_returns_200(self, client):
         r = await client.post('/v1/scan', data=_form(OOXML_DATA, 'doc.docx'))
         assert r.status == 200
         body = await r.json()
-        assert 'file_hash' in body
-        assert len(body['file_hash']) == 64  # SHA-256 hex
+        assert 'schema_version' in body
+        assert len(body['file']['sha256']) == 64  # SHA-256 hex
 
     async def test_scan_file_mime_override(self, client):
         form = aiohttp.FormData()
@@ -984,7 +984,7 @@ class TestScanEndpoint:
         r = await client.post('/v1/scan', data=form)
         assert r.status == 200
         body = await r.json()
-        assert body['detected_type'] == 'html'
+        assert body['file']['type'] == 'html'
 
     async def test_scan_custom_passwords_accepted(self, client):
         form = aiohttp.FormData()
@@ -1002,8 +1002,8 @@ class TestScanEndpoint:
         r = await client.post('/v1/scan', data=form)
         assert r.status == 200
         body = await r.json()
-        assert body['is_encrypted'] is True
-        assert body['decrypted'] is False
+        assert body.get('flags', {}).get('encrypted', False) is True
+        assert body.get('flags', {}).get('decrypted', False)  is False
 
     @pytest.mark.skipif(not _HAS_FITZ, reason='PyMuPDF not installed')
     async def test_scan_encrypted_pdf_correct_password(self, client):
@@ -1014,9 +1014,9 @@ class TestScanEndpoint:
         r = await client.post('/v1/scan', data=form)
         assert r.status == 200
         body = await r.json()
-        assert body['detected_type'] == 'pdf'
-        assert body['decrypted'] is True
-        assert body['decryption_password'] == _PDF_ENC_PASSWORD
+        assert body['file']['type']                                   == 'pdf'
+        assert body.get('flags', {}).get('decrypted', False)          is True
+        assert body.get('flags', {}).get('decryption_password')       == _PDF_ENC_PASSWORD
 
     async def test_scan_time_taken_present(self, client):
         r = await client.post('/v1/scan', data=_form(PDF_CLEAN, 'timed.pdf'))
@@ -1036,8 +1036,8 @@ class TestScanEndpoint:
         b1 = await r1.json()
         r2 = await client.post('/v1/scan', data=_form(PDF_CLEAN, 'b.pdf'))
         b2 = await r2.json()
-        assert b1['file_hash'] == b2['file_hash']
-        assert b1['file_hash'] == hashlib.sha256(PDF_CLEAN).hexdigest()
+        assert b1['file']['sha256'] == b2['file']['sha256']
+        assert b1['file']['sha256'] == hashlib.sha256(PDF_CLEAN).hexdigest()
 
     async def test_scan_short_timeout_may_return_202(self, client):
         """Very short timeout → 200 (fast path) or 202 (background). Both valid."""
@@ -1057,7 +1057,11 @@ class TestScanEndpoint:
         r = await client.post('/v1/scan', data=_form(data, 'autostart-encrypt-standardpassword.xls'))
         assert r.status == 200
         body = await r.json()
-        assert body['decrypted'] is True or body['has_macro'] is True or len(body['analyses']) > 0
+        assert (
+            body.get('flags', {}).get('decrypted', False) is True
+            or body.get('flags', {}).get('macros', False) is True
+            or len(body.get('findings', [])) > 0
+        )
 
     @pytest.mark.skipif(not os.path.exists(OLE_FILE), reason='OLE sample not present')
     async def test_scan_real_ole_has_ioc_urls(self, client):
@@ -1065,12 +1069,12 @@ class TestScanEndpoint:
             data = f.read()
         r = await client.post('/v1/scan', data=_form(data, 'autostart-encrypt-standardpassword.xls'))
         body = await r.json()
-        iocs = body['iocs']
+        iocs = body.get('iocs', {})
         # No real network IOCs in this sample — internal Office object references
         # (MSO.DLL, Excel.Sheet, etc.) are correctly filtered by TLD validation.
-        assert isinstance(iocs['urls'], list)
-        assert isinstance(iocs['ips'], list)
-        assert isinstance(iocs['domains'], list)
+        assert isinstance(iocs.get('urls', []), list)
+        assert isinstance(iocs.get('ips', []), list)
+        assert isinstance(iocs.get('domains', []), list)
 
     @pytest.mark.skipif(not os.path.exists(OLE_FILE), reason='OLE sample not present')
     async def test_scan_ole_with_custom_passwords(self, client):
@@ -1091,10 +1095,7 @@ class TestScanEndpoint:
         r = await client.post('/v1/scan?rtf=true', data=_form(data, 'sample.rtf'))
         assert r.status == 200
         body = await r.json()
-        assert 'file_hash' in body
-
-
-class TestQueryEndpoint:
+        assert 'schema_version' in body
 
     async def test_get_missing_hash_returns_400(self, client):
         r = await client.get('/v1/query')
@@ -1115,25 +1116,25 @@ class TestQueryEndpoint:
     async def test_get_after_scan_returns_finished(self, client):
         scan_r  = await client.post('/v1/scan', data=_form(PDF_CLEAN, 'q.pdf'))
         scan_b  = await scan_r.json()
-        fhash   = scan_b['file_hash']
+        fhash   = scan_b['file']['sha256']
 
         query_r = await client.get(f'/v1/query?hash={fhash}')
         assert query_r.status == 200
         query_b = await query_r.json()
-        assert query_b['status']                  == 'finished'
-        assert query_b['report']['file_hash']     == fhash
-        assert query_b['report']['detected_type'] == 'pdf'
+        assert query_b['status']                      == 'finished'
+        assert query_b['report']['file']['sha256']    == fhash
+        assert query_b['report']['file']['type']      == 'pdf'
 
     async def test_post_after_scan_returns_finished(self, client):
         scan_r = await client.post('/v1/scan', data=_form(HTML_CLEAN, 'q.html'))
         scan_b = await scan_r.json()
-        fhash  = scan_b['file_hash']
+        fhash  = scan_b['file']['sha256']
 
         query_r = await client.post('/v1/query', json={'hash': fhash})
         assert query_r.status == 200
         query_b = await query_r.json()
         assert query_b['status'] == 'finished'
-        assert query_b['report']['detected_type'] == 'html'
+        assert query_b['report']['file']['type'] == 'html'
 
     @pytest.mark.skipif(not os.path.exists(OLE_FILE), reason='OLE sample not present')
     async def test_get_ole_report_after_scan(self, client):
@@ -1141,13 +1142,13 @@ class TestQueryEndpoint:
             data = f.read()
         scan_r = await client.post('/v1/scan', data=_form(data, 'autostart-encrypt-standardpassword.xls'))
         scan_b = await scan_r.json()
-        fhash  = scan_b['file_hash']
+        fhash  = scan_b['file']['sha256']
 
         query_r = await client.get(f'/v1/query?hash={fhash}')
         assert query_r.status == 200
         query_b = await query_r.json()
         assert query_b['status'] == 'finished'
-        assert query_b['report']['file_hash'] == fhash
+        assert query_b['report']['file']['sha256'] == fhash
 
 
 # ===========================================================================
@@ -1180,7 +1181,7 @@ class TestResponseSerializationMsgpack:
         assert 'application/x-msgpack' in r.headers.get('Content-Type', '')
         body = _msgpack_test.unpackb(await r.read(), raw=False)
         assert body['status'] == 'finished'
-        assert body['detected_type'] == 'pdf'
+        assert body['file']['type'] == 'pdf'
 
     async def test_query_get_accept_msgpack_returns_msgpack(self, client):
         scan_r = await client.post(
@@ -1188,7 +1189,7 @@ class TestResponseSerializationMsgpack:
             data=_form(PDF_CLEAN, 'clean.pdf'),
             headers={'Accept': 'application/x-msgpack'},
         )
-        file_hash = _msgpack_test.unpackb(await scan_r.read(), raw=False)['file_hash']
+        file_hash = _msgpack_test.unpackb(await scan_r.read(), raw=False)['file']['sha256']
 
         r = await client.get(
             f'/v1/query?hash={file_hash}',
@@ -1202,7 +1203,7 @@ class TestResponseSerializationMsgpack:
     async def test_query_post_msgpack_body_returns_msgpack(self, client):
         scan_r = await client.post('/v1/scan', data=_form(PDF_CLEAN, 'clean.pdf'))
         scan_b = await scan_r.json()
-        file_hash = scan_b['file_hash']
+        file_hash = scan_b['file']['sha256']
 
         payload = _msgpack_test.packb({'hash': file_hash}, use_bin_type=True)
         r = await client.post(
@@ -1288,7 +1289,7 @@ class TestResponseSerializationCbor:
         assert 'application/cbor' in r.headers.get('Content-Type', '')
         body = _cbor2_test.loads(await r.read())
         assert body['status'] == 'finished'
-        assert body['detected_type'] == 'pdf'
+        assert body['file']['type'] == 'pdf'
 
     async def test_query_get_accept_cbor_returns_cbor(self, client):
         scan_r = await client.post(
@@ -1296,7 +1297,7 @@ class TestResponseSerializationCbor:
             data=_form(PDF_CLEAN, 'clean.pdf'),
             headers={'Accept': 'application/cbor'},
         )
-        file_hash = _cbor2_test.loads(await scan_r.read())['file_hash']
+        file_hash = _cbor2_test.loads(await scan_r.read())['file']['sha256']
 
         r = await client.get(
             f'/v1/query?hash={file_hash}',
@@ -1310,7 +1311,7 @@ class TestResponseSerializationCbor:
     async def test_query_post_cbor_body_returns_cbor(self, client):
         scan_r = await client.post('/v1/scan', data=_form(PDF_CLEAN, 'clean.pdf'))
         scan_b = await scan_r.json()
-        file_hash = scan_b['file_hash']
+        file_hash = scan_b['file']['sha256']
 
         payload = _cbor2_test.dumps({'hash': file_hash})
         r = await client.post(
@@ -1375,7 +1376,7 @@ class TestZstdCompression:
         assert r.status == 200
         body = await r.json()
         assert body['status'] == 'finished'
-        assert body['detected_type'] == 'pdf'
+        assert body['file']['type'] == 'pdf'
 
     async def test_multipart_malformed_zstd_returns_400(self, client):
         malformed = xspct._ZSTD_MAGIC + b'not-a-valid-zstd-frame'
@@ -1390,7 +1391,7 @@ class TestZstdCompression:
         assert r.status == 200
         body = await r.json()
         assert body['status'] == 'finished'
-        reported_name = body.get('file_name') or body.get('filename') or ''
+        reported_name = body.get('file', {}).get('name', '')
         assert not reported_name.lower().endswith('.zst')
 
     # ------------------------------------------------------------------ #
@@ -1408,7 +1409,7 @@ class TestZstdCompression:
         assert r.status == 200
         body = await r.json()
         assert body['status'] == 'finished'
-        assert body['detected_type'] == 'pdf'
+        assert body['file']['type'] == 'pdf'
 
     async def test_octet_stream_zst_filename_suffix_stripped(self, client):
         compressed = _zstd_compress(PDF_CLEAN)
@@ -1420,7 +1421,7 @@ class TestZstdCompression:
         assert r.status == 200
         body = await r.json()
         assert body['status'] == 'finished'
-        reported_name = body.get('file_name') or body.get('filename') or ''
+        reported_name = body.get('file', {}).get('name', '')
         assert not reported_name.lower().endswith('.zst')
 
     async def test_octet_stream_zstd_over_limit_returns_413(self, client, monkeypatch):
@@ -1458,7 +1459,7 @@ class TestZstdCompression:
         # aiohttp client transparently decompresses when zstandard is installed
         result = await r.json()
         assert result['status'] == 'finished'
-        assert result['detected_type'] == 'pdf'
+        assert result['file']['type'] == 'pdf'
 
     async def test_accept_encoding_zstd_with_msgpack(self, client):
         if not _HAS_MSGPACK_TEST:
@@ -1504,7 +1505,7 @@ class TestZstdCompression:
 
     async def test_query_accept_encoding_zstd_compresses_response(self, client):
         scan_r = await client.post('/v1/scan', data=_form(PDF_CLEAN, 'clean.pdf'))
-        file_hash = (await scan_r.json())['file_hash']
+        file_hash = (await scan_r.json())['file']['sha256']
 
         r = await client.get(
             f'/v1/query?hash={file_hash}',
@@ -2621,8 +2622,8 @@ class TestScanOctetStream:
         )
         assert r.status == 200
         body = await r.json()
-        assert body['detected_type'] == 'pdf'
-        assert body['file_hash'] == hashlib.sha256(PDF_CLEAN).hexdigest()
+        assert body['file']['type']          == 'pdf'
+        assert body['file']['sha256']        == hashlib.sha256(PDF_CLEAN).hexdigest()
 
     async def test_octet_stream_same_hash_as_multipart(self, client):
         r1 = await client.post('/v1/scan', data=_form(PDF_CLEAN, 'a.pdf'))
@@ -2634,7 +2635,7 @@ class TestScanOctetStream:
             headers={'Content-Type': 'application/octet-stream'},
         )
         b2 = await r2.json()
-        assert b1['file_hash'] == b2['file_hash']
+        assert b1['file']['sha256'] == b2['file']['sha256']
 
     async def test_unsupported_content_type_returns_415(self, client):
         r = await client.post(
@@ -2652,7 +2653,7 @@ class TestScanOctetStream:
         )
         assert r.status == 200
         body = await r.json()
-        assert body['detected_type'] == 'html'
+        assert body['file']['type'] == 'html'
 
 
 # ===========================================================================
@@ -3059,9 +3060,9 @@ class TestTextTypePipeline:
         assert resp.status == 200
         body = await resp.json()
         # detected_type may be 'text' or include 'text'
-        dt = body.get('detected_type', '')
+        dt = body.get('file', {}).get('type', '')
         assert 'text' in dt or dt == 'unknown'
-        assert 'text_preview' in body
+        assert 'content' in body or body.get('file', {}).get('type')
 
     @pytest.mark.asyncio
     async def test_text_analyzer_disabled_skips_method(self, aiohttp_client):
@@ -3138,8 +3139,8 @@ class TestPdfJavascriptFixture:
         resp = await client.post('/v1/scan', data=form)
         assert resp.status == 200
         body = await resp.json()
-        assert body['detected_type'] == 'pdf'
-        assert body['has_javascript'] is True
+        assert body['file']['type']                                    == 'pdf'
+        assert body.get('flags', {}).get('javascript', False)         is True
 
 
 # ===========================================================================
@@ -3261,9 +3262,9 @@ class TestHtmlPhishingFixture:
         resp = await client.post('/v1/scan', data=form)
         assert resp.status == 200
         body = await resp.json()
-        assert body['detected_type'] == 'html'
-        assert body['has_forms'] is True
-        assert body['has_iframes'] is True
+        assert body['file']['type']                              == 'html'
+        assert body.get('flags', {}).get('forms', False)        is True
+        assert body.get('flags', {}).get('iframes', False)      is True
 
 
 # ===========================================================================
@@ -3320,9 +3321,9 @@ class TestArchiveMixedFixture:
         resp = await client.post('/v1/scan', data=form)
         assert resp.status == 200
         body = await resp.json()
-        assert body['detected_type'] == 'archive'
-        assert isinstance(body['archive_files'], list)
-        assert len(body['archive_files']) >= 1
+        assert body['file']['type']    == 'archive'
+        assert isinstance(body.get('engines', {}).get('archive', {}).get('files', []), list)
+        assert len(body.get('engines', {}).get('archive', {}).get('files', [])) >= 1
 
 
 # ===========================================================================
