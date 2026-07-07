@@ -80,6 +80,7 @@ advanced = [
     "tldextract>=5.0",
     "py7zr>=0.20",
     "SFlock2>=0.3",
+    "odfdo>=3.20",
 ]
 docs   = [
     "sphinx>=7",
@@ -95,7 +96,7 @@ Issues = "https://github.com/HeinleinSupport/xspct_scan/issues"
 
 [project.scripts]
 xspct-scan    = "xspct_scan.__main__:main"
-xspct-client  = "xspct_scan.client:main"
+xspct-scan-client  = "xspct_scan.client:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/xspct_scan"]

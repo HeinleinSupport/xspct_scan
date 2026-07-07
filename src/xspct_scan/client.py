@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: EUPL-1.2
 # SPDX-FileCopyrightText: 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
 """
-xspct-client — command-line client for the xspct-scan HTTP API.
+xspct-scan-client — command-line client for the xspct-scan HTTP API.
 
 Usage::
 
-    xspct-client [options] FILE [FILE ...]
+    xspct-scan-client [options] FILE [FILE ...]
 
 Options::
 
@@ -383,15 +383,15 @@ async def _run(args: argparse.Namespace) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="xspct-client",
+        prog="xspct-scan-client",
         description="Submit files to an xspct-scan daemon for analysis.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  xspct-client invoice.pdf\n"
-            "  xspct-client --url http://scan.internal:8080 --json report.zip\n"
-            "  xspct-client --poll --timeout 60 large_archive.zip\n"
-            "  xspct-client --api-key s3cr3t --output result.json sample.doc\n"
+            "  xspct-scan-client invoice.pdf\n"
+            "  xspct-scan-client --url http://scan.internal:8080 --json report.zip\n"
+            "  xspct-scan-client --poll --timeout 60 large_archive.zip\n"
+            "  xspct-scan-client --api-key s3cr3t --output result.json sample.doc\n"
         ),
     )
     parser.add_argument("files", nargs="+", metavar="FILE", help="Files to scan")
