@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.5.0 — 2026-07-07
+
+### Added
+- **v2 report schema** (`schema_version: "2.0"`) — structured, grouped, omit-empty:
+  - `engine` — scanner identity (`{name, version}`).
+  - `file` — file identity: `{name, sha256, size, mime, magic, type}`.
+    SHA-256 hash and MIME are now nested here; dates are **ISO-8601**.
+  - `scan` — lifecycle bookkeeping: `{status, duration_s, cache_hit, analyzers}`.
+    Analyzer timings, completed/pending lists, and errors are grouped here.
+  - `verdict` — placeholder for aggregated risk: `{score, severity, labels,
+    summary, contributors}`. Scoring logic planned for a later release.
+  - `flags` — content indicators map; **only `true` keys are emitted**
+    (no `has_macro: false` noise). Possible keys: `encrypted`, `decrypted`,
+    `decryption_password`, `macros`, `javascript`, `open_action`, `launch`,
+    `embedded_files`, `forms`, `scripts`, `iframes`, `meta_refresh`.
+  - `iocs` — unified, typed, **rich IOC objects** `{value, source, confidence}`
+    replacing the old flat `urls`/`ips`/`domains` lists plus `iocs_extended`.
+    Basic scanner domains start with `medium` confidence; iocsearcher hits
+    upgrade them to `high`. New types: `emails`, `hashes`, `cves`, `wallets`,
+    `onions`, `phones`.
+  - `findings` — was `analyses`; enriched with `severity` and `source` fields.
+  - `content` — `{preview, full}` — lists of `{source, text}` segments;
+    only emitted when non-empty and enabled by config.
+  - `document` — was `meta_document`; empty-string fields omitted; dates
+    normalized to ISO-8601 (`D:YYYYMMDDHHmmSSZ` → `YYYY-MM-DDTHH:MM:SSZ`).
+  - `engines` — per-engine raw output grouped under named sub-keys
+    (`clamav`, `yara`, `pdfid`, `archive`, `image`, `rtf`); a sub-key is
+    **omitted** when the engine produced no output.
+- `_normalize_pdf_date()` — module-level helper for PDF date normalization.
+- `_to_v2_report()` — single transformation boundary in `analyze_task`;
+  internal v1 accumulation is preserved; only the HTTP output is v2.
+- New pydantic v2 models: `_V2Engine`, `_V2File`, `_V2Scan`, `_V2Verdict`,
+  `_V2IocEntry`, `_V2Iocs`, `_V2Finding`, `_V2ScanReport`; legacy models kept.
+- `urllib.parse` import for URL-decoding filenames in output.
+- Dependency SBOM (`bom.json`, CycloneDX JSON, 168 components).
+- REUSE annotation for `bom.json`.
+
+### Changed
+- `file.sha256` (was top-level `file_hash`), `file.type` (was `detected_type`),
+  `file.mime` (was `file_type`), `file.magic` (was `file_description`).
+- `scan.duration_s` (was `time_taken`; `time_taken` kept at top-level too for
+  compatibility with HTTP handlers).
+- `findings` (was `analyses`); `content.preview` / `content.full` (were
+  `text_preview` / `text_full` at top level).
+- `engines.clamav` (was top-level `clamav`), `engines.yara.matches` (was
+  `yara_matches`), `engines.pdfid` (was `pdfid_keywords` / `pdfid_meta`),
+  `engines.archive.files` (was `archive_files`), `engines.image.exif` (was `exif`).
+- `openapi.json` 200-response schema updated to reference `V2ScanReport`.
+- `xspct-scan-client` display functions updated to read v2 field paths with
+  v1 fallbacks for backward-compatible polling of cached v1 reports.
+- `__version__` bumped to `0.5.0` in `__init__.py` and `pyproject.toml`.
+
 ## 0.4.0 — 2026-07-07
 
 ### Added

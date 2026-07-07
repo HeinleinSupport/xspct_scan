@@ -40,7 +40,7 @@ from aiohttp import web
 # Schema version exposed in every v2 report
 # ---------------------------------------------------------------------------
 _REPORT_SCHEMA_VERSION = '2.0'
-_ENGINE_VERSION = '0.4.0'
+_ENGINE_VERSION = '0.5.0'
 
 
 def _normalize_pdf_date(date_str: str) -> 'str | None':
@@ -939,7 +939,7 @@ if HAS_PYDANTIC:
             'openapi': '3.0.3',
             'info': {
                 'title':   'xspct-scan API',
-                'version': '0.4.0',
+                'version': '0.5.0',
                 'description': (
                     'HTTP API for scanning Office, PDF, and HTML files '
                     'for malware indicators.'
@@ -4674,7 +4674,7 @@ class InspectorDaemon:
             'analyses':            [],
             'meta': {
                 'script_name': 'xspct-scan',
-                'version': '0.4.0',
+                'version': '0.5.0',
                 'type': 'MetaInformation',
             },
             'rtf_objects':         [],
