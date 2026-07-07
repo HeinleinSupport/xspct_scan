@@ -253,24 +253,26 @@ curl -s -X POST "http://localhost:8080/v1/scan?filename=malware.xlsm" \
 zstd-compressed body (detected via Zstandard frame magic bytes); the `.zst`
 filename suffix is stripped before type detection.
 
-Example response:
+Example response (schema v2.0 — omit-empty, grouped):
 
 ```json
 {
-  "filename": "malware.xlsm",
-  "file_hash": "sha256...",
-  "detected_type": "office",
-  "has_macro": true,
-  "analyses": [{"type": "AutoExec", "keyword": "AutoOpen", "description": "..."}],
-  "iocs": {"urls": ["https://evil.example/payload"], "ips": [], "domains": []},
-  "iocs_extended": {"url": ["https://evil.example/payload"], "email": []},
-  "yara_matches": [{"engine": "classic", "rule": "Eicar_Test", "tags": [], "meta": {}}],
-  "pdfid_keywords": null,
-  "archive_files": [],
-  "exif": {},
-  "text_preview": [{"source": "office", "text": "..."}],
-  "analyzers_completed": ["office", "yara", "iocs"],
-  "analyzers_pending": [],
+  "schema_version": "2.0",
+  "engine":  { "name": "xspct-scan", "version": "0.4.0" },
+  "file":    { "name": "malware.xlsm", "sha256": "sha256...", "size": 48291,
+               "mime": "application/vnd.openxmlformats-officedocument...",
+               "magic": "Microsoft Word 2007+", "type": "office" },
+  "scan":    { "status": "finished", "duration_s": 0.18, "cache_hit": false,
+               "analyzers": { "completed": ["office","yara","iocs"], "pending": [],
+                              "timings_s": {"office": 0.09, "yara": 0.03, "iocs": 0.01} } },
+  "verdict": { "score": null, "severity": "unknown", "labels": [], "summary": null, "contributors": {} },
+  "flags":   { "macros": true },
+  "iocs":    { "urls":    [{"value": "https://evil.example/payload", "source": "scanner",     "confidence": "high"}],
+               "domains": [{"value": "evil.example",                 "source": "iocsearcher", "confidence": "high"}] },
+  "findings": [{"type": "AutoExec", "keyword": "AutoOpen", "description": "...", "severity": "medium", "source": "scanner"}],
+  "content": { "preview": [{"source": "office", "text": "..."}] },
+  "engines": { "clamav": {"status": "clean", "scan_time_s": 0.01},
+               "yara":   {"matches": [{"engine": "classic", "rule": "Eicar_Test", "tags": [], "meta": {}}]} },
   "status": "finished",
   "time_taken": 0.18
 }

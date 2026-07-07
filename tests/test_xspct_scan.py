@@ -2935,7 +2935,7 @@ class TestOpenApiEndpoints:
         if xspct.HAS_PYDANTIC:
             pytest.skip('pydantic is installed; skipping no-pydantic path')
         r = await client.get('/v1/openapi.json')
-        assert r.status in (200, 501)  # implementation may vary
+        assert r.status in (200, 501, 503)  # 503 when pydantic not installed
 
 
 # ===========================================================================

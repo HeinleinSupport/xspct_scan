@@ -68,39 +68,49 @@ def _normalize_result_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 def _collect_iocs(result: dict[str, Any]) -> list[str]:
+    """Collect all IOC values from a v2 report's iocs section."""
     seen: dict[str, None] = {}
-    for v in (result.get("iocs") or {}).values():
-        if isinstance(v, list):
-            seen.update(dict.fromkeys(str(i) for i in v))
-    for v in (result.get("iocs_extended") or {}).values():
-        if isinstance(v, list):
-            seen.update(dict.fromkeys(str(i) for i in v))
+    iocs = result.get("iocs") or {}
+    for entries in iocs.values():
+        if isinstance(entries, list):
+            for entry in entries:
+                if isinstance(entry, dict):
+                    # v2: {value, source, confidence}
+                    val = entry.get("value")
+                    if val:
+                        seen[str(val)] = None
+                elif entry:
+                    seen[str(entry)] = None
     return list(seen)
 
 
 def _format_plain(result: dict[str, Any], filename: str) -> str:
+    _file = result.get("file") or {}
+    _scan = result.get("scan") or {}
+    _flags_v2 = result.get("flags") or {}
     lines: list[str] = []
-    lines.append(f"File:     {result.get('filename', filename)}")
-    lines.append(f"Hash:     {result.get('file_hash', '-')}")
+    lines.append(f"File:     {_file.get('name', result.get('filename', filename))}")
+    lines.append(f"Hash:     {_file.get('sha256', result.get('file_hash', '-'))}")
     lines.append(
-        f"Type:     {result.get('detected_type', '-')}"
-        f"  ({result.get('file_description', '-')})"
+        f"Type:     {_file.get('type', result.get('detected_type', '-'))}"
+        f"  ({_file.get('magic', result.get('file_description', '-'))})"
     )
-    lines.append(f"Status:   {result.get('status', '-')}  ({result.get('time_taken', '-')} s)")
+    lines.append(f"Status:   {result.get('status', '-')}  ({_scan.get('duration_s', result.get('time_taken', '-'))} s)")
 
     flags: list[str] = []
-    if result.get("has_macro"):
-        flags.append("has_macro")
-    if result.get("is_encrypted"):
+    if _flags_v2.get("macros", result.get("has_macro")):
+        flags.append("macro")
+    if _flags_v2.get("encrypted", result.get("is_encrypted")):
         flags.append("encrypted")
-    if result.get("has_javascript"):
-        flags.append("has_javascript")
-    if result.get("decrypted"):
-        flags.append(f"decrypted(pw={result.get('decryption_password', '?')})")
+    if _flags_v2.get("javascript", result.get("has_javascript")):
+        flags.append("javascript")
+    if _flags_v2.get("decrypted", result.get("decrypted")):
+        _pw = _flags_v2.get("decryption_password") or result.get("decryption_password", "?")
+        flags.append(f"decrypted(pw={_pw})")
     if flags:
         lines.append(f"Flags:    {', '.join(flags)}")
 
-    analyses = result.get("analyses") or []
+    analyses = result.get("findings") or result.get("analyses") or []
     if analyses:
         lines.append(f"Analyses ({len(analyses)}):")
         for a in analyses[:10]:
@@ -118,13 +128,13 @@ def _format_plain(result: dict[str, Any], filename: str) -> str:
         if len(all_iocs) > 20:
             lines.append(f"  … {len(all_iocs) - 20} more")
 
-    yara = result.get("yara_matches") or []
+    yara = (result.get("engines") or {}).get("yara", {}).get("matches") or result.get("yara_matches") or []
     if yara:
         names = ", ".join(m.get("rule", "?") for m in yara[:6])
         suffix = f" … +{len(yara) - 6}" if len(yara) > 6 else ""
         lines.append(f"YARA ({len(yara)}): {names}{suffix}")
 
-    archive = result.get("archive_files") or []
+    archive = (result.get("engines") or {}).get("archive", {}).get("files") or result.get("archive_files") or []
     if archive:
         names = ", ".join(f.get("name", "?") for f in archive[:6])
         suffix = f" … +{len(archive) - 6}" if len(archive) > 6 else ""
@@ -136,7 +146,10 @@ def _format_plain(result: dict[str, Any], filename: str) -> str:
 def _format_rich(result: dict[str, Any], filename: str) -> None:
     from rich.table import Table  # noqa: PLC0415 — local import to avoid hard dep
 
-    title = result.get("filename", filename)
+    _file = result.get("file") or {}
+    _scan = result.get("scan") or {}
+    _flags_v2 = result.get("flags") or {}
+    title = _file.get("name") or result.get("filename") or filename
     status = result.get("status", "-")
     border_color = "green" if status == "finished" else "yellow"
 
@@ -144,31 +157,32 @@ def _format_rich(result: dict[str, Any], filename: str) -> None:
     tbl.add_column("Key", style="bold cyan", no_wrap=True)
     tbl.add_column("Value")
 
-    tbl.add_row("Hash", result.get("file_hash", "-"))
+    tbl.add_row("Hash", _file.get("sha256") or result.get("file_hash", "-"))
     tbl.add_row(
         "Type",
-        f"{result.get('detected_type', '-')}  ({result.get('file_description', '-')})",
+        f"{_file.get('type', result.get('detected_type', '-'))}  ({_file.get('magic', result.get('file_description', '-'))})",
     )
     tbl.add_row(
         "Status",
-        f"[{border_color}]{status}[/{border_color}]  ({result.get('time_taken', '-')} s)",
+        f"[{border_color}]{status}[/{border_color}]  ({_scan.get('duration_s', result.get('time_taken', '-'))} s)",
     )
 
     flags: list[str] = []
-    if result.get("has_macro"):
-        flags.append("[red]has_macro[/red]")
-    if result.get("is_encrypted"):
+    if _flags_v2.get("macros", result.get("has_macro")):
+        flags.append("[red]macro[/red]")
+    if _flags_v2.get("encrypted", result.get("is_encrypted")):
         flags.append("[yellow]encrypted[/yellow]")
-    if result.get("has_javascript"):
-        flags.append("[yellow]has_javascript[/yellow]")
-    if result.get("decrypted"):
-        flags.append(f"[green]decrypted(pw={result.get('decryption_password', '?')})[/green]")
+    if _flags_v2.get("javascript", result.get("has_javascript")):
+        flags.append("[yellow]javascript[/yellow]")
+    if _flags_v2.get("decrypted", result.get("decrypted")):
+        _pw = _flags_v2.get("decryption_password") or result.get("decryption_password", "?")
+        flags.append(f"[green]decrypted(pw={_pw})[/green]")
     if flags:
         tbl.add_row("Flags", "  ".join(flags))
 
-    analyses = result.get("analyses") or []
+    analyses = result.get("findings") or result.get("analyses") or []
     if analyses:
-        tbl.add_row("Analyses", f"[red]{len(analyses)}[/red]")
+        tbl.add_row("Findings", f"[red]{len(analyses)}[/red]")
         for a in analyses[:8]:
             tbl.add_row(
                 "",
@@ -185,13 +199,13 @@ def _format_rich(result: dict[str, Any], filename: str) -> None:
         if len(all_iocs) > 15:
             tbl.add_row("", f"  … {len(all_iocs) - 15} more")
 
-    yara = result.get("yara_matches") or []
+    yara = (result.get("engines") or {}).get("yara", {}).get("matches") or result.get("yara_matches") or []
     if yara:
         names = ", ".join(m.get("rule", "?") for m in yara[:6])
         suffix = f" … +{len(yara) - 6}" if len(yara) > 6 else ""
         tbl.add_row("YARA", f"[red]{len(yara)}[/red]: {names}{suffix}")
 
-    archive = result.get("archive_files") or []
+    archive = (result.get("engines") or {}).get("archive", {}).get("files") or result.get("archive_files") or []
     if archive:
         names = ", ".join(f.get("name", "?") for f in archive[:6])
         suffix = f" … +{len(archive) - 6}" if len(archive) > 6 else ""
@@ -284,7 +298,7 @@ async def scan_file(
                 "Use --poll to wait for the result."
             )
             return body  # return partial result so caller can still write it
-        file_hash = body.get("file_hash")
+        file_hash = body.get("file", {}).get("sha256") or body.get("file_hash")
         if not file_hash:
             _print_error(f"{path.name}: 202 response has no file_hash — cannot poll")
             return body

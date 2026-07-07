@@ -57,80 +57,200 @@ Pass optional metadata as query parameters (`filename`, `file_mime`, `file_type`
 | `timeout` | `10` | Max seconds to wait for analysis before returning `202`. |
 | `rtf` | `false` | Set to `true` to enable RTF object extraction via `rtfobj`. |
 
-`detected_type` in the response will be one of: `pdf`, `html`, `office`,
-`image`, `archive`, `text`, or `unknown`.  For the `text` type the daemon
-decodes the content, runs YARA on the raw bytes, and passes the full text to
-iocsearcher.
+`detected_type` (inside `file.type`) will be one of: `pdf`, `html`, `office`,
+`odf`, `image`, `archive`, `text`, or `unknown`.
 
 **Response `200 OK`** — analysis finished within timeout.
 
+All responses since v2.0 follow a structured, grouped schema (`schema_version: "2.0"`).
+Sections are **omitted when empty** (no null/empty noise).
+
 ```json
 {
-  "filename": "invoice.docx",
-  "file_hash": "sha256hex...",
-  "file_type": "application/vnd.openxmlformats-officedocument...",
-  "file_description": "Microsoft Word 2007+",
-  "detected_type": "office",
-  "has_macro": true,
-  "is_encrypted": false,
-  "analyses": [
-    {"type": "AutoExec", "keyword": "AutoOpen", "description": "..."}
-  ],
+  "schema_version": "2.0",
+  "engine": { "name": "xspct-scan", "version": "0.4.0" },
+
+  "file": {
+    "name": "invoice.docx",
+    "sha256": "sha256hex...",
+    "size": 48291,
+    "mime": "application/vnd.openxmlformats-officedocument...",
+    "magic": "Microsoft Word 2007+",
+    "type": "office"
+  },
+
+  "scan": {
+    "status": "finished",
+    "duration_s": 0.123,
+    "cache_hit": false,
+    "analyzers": {
+      "completed": ["office", "yara", "iocs"],
+      "pending": [],
+      "timings_s": { "office": 0.08, "yara": 0.03, "iocs": 0.01 }
+    }
+  },
+
+  "verdict": {
+    "score": null,
+    "severity": "unknown",
+    "labels": [],
+    "summary": null,
+    "contributors": {}
+  },
+
+  "flags": {
+    "macros": true
+  },
+
   "iocs": {
-    "urls": ["https://malware.example.com/payload"],
-    "ips": [],
-    "domains": []
+    "urls": [
+      { "value": "https://malware.example.com/payload", "source": "scanner", "confidence": "high" }
+    ],
+    "domains": [
+      { "value": "malware.example.com", "source": "iocsearcher", "confidence": "high" }
+    ]
   },
-  "iocs_extended": {
-    "url": ["https://malware.example.com/payload"],
-    "email": []
+
+  "findings": [
+    { "type": "AutoExec", "keyword": "AutoOpen", "description": "...", "severity": "medium", "source": "scanner" }
+  ],
+
+  "content": {
+    "preview": [ { "source": "office", "text": "Dear customer..." } ]
   },
-  "yara_matches": [],
-  "pdfid_keywords": null,
-  "pdfid_meta": null,
-  "archive_files": [],
-  "exif": {},
-  "rtf_objects": [],
-  "decrypted": false,
-  "decryption_password": null,
-  "text_preview": "...",
-  "text_full": null,
-  "meta_document": {
+
+  "document": {
     "author": "John Doe",
     "title": "Q1 Invoice",
-    "creation_date": "D:20260115120000Z"
+    "created": "2026-01-15T12:00:00Z"
   },
-  "meta": {"script_name": "xspct_scan", "version": "0.3.0", "type": "MetaInformation"},
-  "analyzers_completed": ["office", "iocs"],
-  "analyzers_pending": [],
+
+  "engines": {
+    "clamav": { "status": "clean", "scan_time_s": 0.012 },
+    "yara":   { "matches": [] }
+  },
+
   "status": "finished",
   "time_taken": 0.123
 }
 ```
 
-New report fields (v0.2.0+):
+### Response schema reference
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `yara_matches` | list | YARA rule matches (name, tags, meta, strings). Requires `[advanced]` + `xspct_analyzers.yara.enabled: true`. Populated for **all** file types including images and archive members. |
-| `iocs_extended` | dict | Extended IOC types from [iocsearcher](https://github.com/malicialab/iocsearcher) keyed by IOC type (`url`, `email`, `md5`, …). Requires `[advanced]`. |
-| `pdfid_keywords` | dict/null | Raw pdfid keyword counts for PDF files. |
-| `pdfid_meta` | dict/null | pdfid metadata record for PDF files. |
-| `archive_files` | list | Files extracted from archives (`{name, size}`). When `SFlock2` is installed extraction runs in-sandbox and covers ZIP, 7z, RAR, TAR, CAB, ACE, ISO, EML, MSG, and more. Without sflock2 only ZIP and 7z are supported. EML and MSG attachments are included when sflock2 is available. All member types — PDF, HTML, Office, text, image, unknown — are individually analysed and their results merged into the top-level report. |
-| `exif` | dict | EXIF metadata extracted from image files. |
-| `text_preview` | list | Extracted text segments, each `{source, text}`, with `text` truncated to `xspct_text_preview_length`. One entry per extractor (document body, image OCR/QR, macros, archive members, …). Included when `xspct_include_text_preview: true` (default). |
-| `text_full` | list | Extracted text segments, each `{source, text}`, with `text` up to `xspct_text_max_length`. Only populated when `xspct_include_text_full: true`. |
-| `analyzers_completed` | list | Analyzer names that finished. |
-| `analyzers_pending` | list | Analyzer names still running (non-empty only in `202` responses). |
+#### Always-present top-level keys
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `schema_version` | string | `"2.0"` |
+| `engine` | object | `{name, version}` — scan engine identity |
+| `file` | object | File identity — see below |
+| `scan` | object | Lifecycle and analyzer bookkeeping — see below |
+| `verdict` | object | Aggregated risk assessment — see below |
+| `flags` | object | Content indicators that are `true` (empty when nothing flagged) |
+| `iocs` | object | Rich IOC entries grouped by type (omitted when empty) |
+| `status` | string | `finished` / `processing` / `dropped` / `error` |
+| `time_taken` | float | Wall-clock seconds from request receipt to response |
+
+#### `file`
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `name` | string | URL-decoded filename |
+| `sha256` | string | SHA-256 hex digest |
+| `size` | int | File size in bytes |
+| `mime` | string/null | libmagic MIME type |
+| `magic` | string/null | libmagic description |
+| `type` | string | `pdf`\|`html`\|`office`\|`odf`\|`image`\|`archive`\|`text`\|`unknown` |
+
+#### `scan`
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `status` | string | Same as top-level `status` |
+| `duration_s` | float | Analysis pipeline duration |
+| `cache_hit` | bool | `true` when report served from Redis |
+| `analyzers.completed` | list | Analyzer names that finished |
+| `analyzers.pending` | list | Analyzer names still running (non-empty in `202` only) |
+| `analyzers.timings_s` | object | `{analyzer: seconds}` |
+| `analyzers.errors` | object | Present only when ≥1 analyzer errored |
+
+#### `verdict`
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `score` | int/null | 0–100 risk score; `null` until scoring is configured |
+| `severity` | string | `unknown`\|`clean`\|`low`\|`medium`\|`high`\|`critical` |
+| `labels` | list | Taxonomy labels (e.g. `phishing`, `macro`, `redirect`) |
+| `summary` | string/null | Human-readable one-liner |
+| `contributors` | object | Signal-to-weight breakdown of the score |
+
+#### `flags`
+
+Only keys whose value is `true` are emitted:
+`encrypted`, `decrypted`, `decryption_password` (string), `macros`, `javascript`,
+`open_action`, `launch`, `embedded_files`, `forms`, `scripts`, `iframes`, `meta_refresh`.
+
+#### `iocs`
+
+Only non-empty type arrays are present.
+Possible type keys: `urls`, `domains`, `ips`, `emails`, `hashes`, `cves`, `wallets`, `onions`, `phones`.
+
+Each entry:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `value` | string | The IOC value |
+| `source` | string | Producing extractor: `scanner` (regex), `iocsearcher`, or a segment source |
+| `confidence` | string | `high`\|`medium`\|`low` (scanner domains start `medium`; iocsearcher upgrades to `high`) |
+| `defanged` | string | Optional defanged form (`hxxp://…`) |
+| `context` | string | Optional surrounding text snippet |
+
+#### `findings` (present when non-empty)
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `type` | string | e.g. `AutoExec`, `SuspiciousJS`, `ClamAV`, `OCRUrl` |
+| `keyword` | string | Short keyword |
+| `description` | string | Human-readable detail |
+| `severity` | string | `info`\|`low`\|`medium`\|`high`\|`critical` |
+| `source` | string | Producing analyzer |
+| `confidence` | string | Optional |
+
+#### `content` (present when non-empty and enabled by config)
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `preview` | list | `[{source, text}]` truncated to `xspct_text_preview_length` per segment |
+| `full` | list | `[{source, text}]` up to `xspct_text_max_length`; requires `xspct_include_text_full: true` |
+
+Segment `source` values: `pdf`, `pdf-image`, `office`, `office-macro`, `odf`, `odf-macro`, `odf-image`, `html`, `html-image`, `ooxml-image`, `text`, `image-ocr`, `image-qr`.
+
+#### `document` (present when ≥1 field is non-empty)
+
+Document metadata.  Dates are **ISO-8601** (e.g. `"2026-04-30T04:14:51Z"`).
+Possible keys: `title`, `author`, `subject`, `keywords`, `creator`, `producer`,
+`last_saved_by`, `company`, `app_name`, `revision`, `created`, `modified`, `encryption`.
+
+#### `engines` (present when ≥1 engine produced output)
+
+| Sub-key | Shape | Notes |
+|---------|----------|-------|
+| `clamav` | `{status, viruses[], engine_version?, db_version?, db_date?, scan_time_s}` | Always present when enabled |
+| `yara` | `{matches: [{engine, rule, namespace, tags[], meta{}, strings[]}]}` | Only when matches ≥1 |
+| `pdfid` | `{keywords{}, meta{}?}` | Non-zero keyword counts only |
+| `archive` | `{files: [{name, size, detected_type, analyzers_run[], findings}]}` | Archives only |
+| `image` | `{exif{}?}` | Images/embedded images |
+| `rtf` | `{objects: [{is_ole, class_name, oledata_md5, is_package}]}` | RTF only |
 
 **Response `202 Accepted`** — analysis still running (timeout exceeded).
-Poll `/v1/query?hash=<file_hash>` for the result.
+The partial report snapshot (v1 internal structure) is returned alongside
+bookkeeping fields.  Poll `/v1/query?hash=<sha256>` for the finished v2 report.
 
 ```json
 {
   "status": "processing",
   "file_hash": "sha256hex...",
-  "message": "Analysis in progress",
+  "message": "Analysis is continuing in background",
   "time_taken": 10.0,
   "analyzers_completed": ["office"],
   "analyzers_pending": ["iocs", "yara"]
@@ -164,7 +284,16 @@ curl -s -X POST http://localhost:8080/v1/query \
   -d '{"hash": "sha256hex..."}'
 ```
 
-**Response `200 OK`** — the full scan report (same schema as `/v1/scan`).
+**Response `200 OK`** — the scan report wrapped in `{status, report}`:
+
+```json
+{
+  "status": "finished",
+  "report": { ... }  // v2 report (same schema as /v1/scan response)
+}
+```
+
+When the scan is still running: `{"status": "processing"}` (partial fields included).
 
 **Response `404 Not Found`** — hash not in cache or in-memory results.
 
