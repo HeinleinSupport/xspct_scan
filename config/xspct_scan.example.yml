@@ -85,12 +85,12 @@ xspct_analyzers:
   javascript: {enabled: true, quickjs: false}  # set quickjs: true to enable sandboxed JS emulation
   text:       {enabled: true}   # plain-text / script files (feeds YARA + iocsearcher)
 
-# When true (default), 'text_preview' (a short truncated excerpt) is included in
-# every response. Set to false to reduce response size.
+# When true (default), 'text_preview' (a list of {source, text} truncated
+# excerpts, one per extractor) is included in every response.
 xspct_include_text_preview: true
 
-# When true, the full extracted document text is returned as 'text_full'.
-# When false (default), 'text_full' is omitted from the response.
+# When true, 'text_full' (a list of {source, text} segments at full length) is
+# returned. When false (default), 'text_full' is an empty list in the response.
 xspct_include_text_full: false
 
 # Response serialization format.
@@ -100,11 +100,11 @@ xspct_include_text_full: false
 # cbor    - always return application/cbor        (requires xspct-scan[serialization])
 xspct_response_format: auto
 
-# Maximum characters for 'text_preview' (the short excerpt included in every
-# response). Keep this small for low-latency API consumers.
+# Maximum characters per 'text_preview' segment (the short excerpt included in
+# every response). Keep this small for low-latency API consumers.
 xspct_text_preview_length: 2000
 
-# Maximum characters for internal full-text extraction used by iocsearcher
+# Maximum characters per extracted-text segment, used by iocsearcher
 # and (when xspct_include_text_full is true) for the 'text_full' report field.
 # Set higher to improve IOC recall on long documents.
 xspct_text_max_length: 50000
