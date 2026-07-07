@@ -154,7 +154,8 @@ Key settings:
 | `xspct_password_file` | | Path to wordlist for decrypting encrypted files |
 | `xspct_analyzers` | _(all enabled)_ | Per-analyzer enable/disable + options |
 | `xspct_analyzers.javascript.quickjs` | `false` | Enable QuickJS sandbox emulation for JS |
-| `xspct_include_text` | `false` | Include full extracted text in reports |
+| `xspct_include_text_preview` | `true` | Include the truncated `text_preview` segments (`[{source, text}]`) in reports |
+| `xspct_include_text_full` | `false` | Include full extracted text as `text_full` segments (`[{source, text}]`) in reports |
 | `xspct_response_format` | `auto` | Response serialization: `auto` (negotiate via `Accept` header), `json`, `msgpack`, or `cbor` |
 | `xspct_archive_max_depth` | `2` | Recursion limit for archive extraction |
 | `xspct_foreground_slots` | `16` | Max concurrent scans holding a client connection open |
@@ -211,7 +212,7 @@ Example response:
   "pdfid_keywords": null,
   "archive_files": [],
   "exif": {},
-  "text_preview": "...",
+  "text_preview": [{"source": "office", "text": "..."}],
   "analyzers_completed": ["office", "yara", "iocs"],
   "analyzers_pending": [],
   "status": "finished",

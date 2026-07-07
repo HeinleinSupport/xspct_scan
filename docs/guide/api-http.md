@@ -122,7 +122,8 @@ New report fields (v0.2.0+):
 | `pdfid_meta` | dict/null | pdfid metadata record for PDF files. |
 | `archive_files` | list | Files extracted from archives (`{name, size}`). When `SFlock2` is installed extraction runs in-sandbox and covers ZIP, 7z, RAR, TAR, CAB, ACE, ISO, EML, MSG, and more. Without sflock2 only ZIP and 7z are supported. EML and MSG attachments are included when sflock2 is available. All member types — PDF, HTML, Office, text, image, unknown — are individually analysed and their results merged into the top-level report. |
 | `exif` | dict | EXIF metadata extracted from image files. |
-| `text_full` | str/null | Full text extraction up to `xspct_text_max_length`. Only populated when `xspct_include_text: true`. |
+| `text_preview` | list | Extracted text segments, each `{source, text}`, with `text` truncated to `xspct_text_preview_length`. One entry per extractor (document body, image OCR/QR, macros, archive members, …). Included when `xspct_include_text_preview: true` (default). |
+| `text_full` | list | Extracted text segments, each `{source, text}`, with `text` up to `xspct_text_max_length`. Only populated when `xspct_include_text_full: true`. |
 | `analyzers_completed` | list | Analyzer names that finished. |
 | `analyzers_pending` | list | Analyzer names still running (non-empty only in `202` responses). |
 

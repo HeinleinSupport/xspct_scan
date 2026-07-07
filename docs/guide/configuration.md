@@ -142,9 +142,10 @@ and unknown blobs.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `xspct_include_text` | `false` | When `true`, the `text_full` field is included in scan reports. |
-| `xspct_text_preview_length` | `2000` | Maximum characters for `text_preview` — the short excerpt included in every response. |
-| `xspct_text_max_length` | `50000` | Maximum characters for internal full-text extraction. Used by iocsearcher and (when `xspct_include_text` is `true`) for `text_full`. Higher values improve IOC recall on long documents at the cost of more memory and CPU per scan. |
+| `xspct_include_text_preview` | `true` | When `true`, the `text_preview` field (a list of `{source, text}` segments) is included in scan reports. |
+| `xspct_include_text_full` | `false` | When `true`, the `text_full` field (a list of `{source, text}` segments) is included in scan reports. |
+| `xspct_text_preview_length` | `2000` | Maximum characters per `text_preview` segment — the short excerpt included in every response. |
+| `xspct_text_max_length` | `50000` | Maximum characters per extracted-text segment. Used by iocsearcher and (when `xspct_include_text_full` is `true`) for `text_full`. Higher values improve IOC recall on long documents at the cost of more memory and CPU per scan. |
 
 ### Response serialization
 
