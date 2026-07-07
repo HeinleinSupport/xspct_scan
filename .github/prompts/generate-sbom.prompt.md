@@ -11,7 +11,7 @@ Generate the dependency SBOM for xspct_scan and commit the result.
 The active virtualenv must have all optional extras installed for full dependency coverage:
 
 ```bash
-pip install -e ".[all,dev]"
+pip install -e ".[uvloop,redis,enrichment,openapi,advanced,dev]"
 ```
 
 ## Steps (run in order — stop and report on failure)
