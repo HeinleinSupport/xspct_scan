@@ -16,6 +16,7 @@ Public API
 """
 
 import asyncio
+import concurrent.futures
 import contextvars
 import hashlib
 import hmac
@@ -173,6 +174,13 @@ except ImportError:
     HAS_TLDEXTRACT = False
 
 try:
+    from odfdo import Document as _OdfDocument
+    HAS_ODFDO = True
+except ImportError:
+    _OdfDocument = None   # type: ignore[assignment,misc]
+    HAS_ODFDO = False
+
+try:
     import importlib.util as _ilu
     _vendor_dir = os.path.join(os.path.dirname(__file__), 'vendor')
     _pdfid_path = os.path.join(_vendor_dir, 'pdfid.py')
@@ -326,16 +334,17 @@ config: dict = {
         'javascript': {'enabled': True, 'quickjs': False},
         'text':       {'enabled': True},
     },
-    # When True, 'text_preview' (truncated excerpt) is included in the report.
-    # Enabled by default. Disable to reduce response size.
+    # When True, 'text_preview' (a list of {source, text} truncated excerpts,
+    # one per extractor) is included in the report. Enabled by default.
     'xspct_include_text_preview': True,
-    # When True, the full extracted text is included in the report as 'text_full'.
+    # When True, 'text_full' (a list of {source, text} segments, one per
+    # extractor, at full length) is included in the report.
     'xspct_include_text_full': False,
-    # Maximum characters for 'text_preview' (the short excerpt sent in every
-    # response). Independent of xspct_text_max_length.
+    # Maximum characters per 'text_preview' segment (the short excerpt sent in
+    # every response). Independent of xspct_text_max_length.
     'xspct_text_preview_length': 2000,
-    # Maximum characters for internal full-text extraction used by iocsearcher
-    # and (when xspct_include_text_full is true) for the 'text_full' report field.
+    # Maximum characters per extracted-text segment, used by iocsearcher and for
+    # the 'text_full' report field.
     'xspct_text_max_length': 50000,
     # Maximum archive recursion depth (0 = no extraction).
     'xspct_archive_max_depth': 2,
@@ -723,6 +732,10 @@ if HAS_PYDANTIC:
         ips:     list[str] = []
         domains: list[str] = []
 
+    class _TextSegment(_pydantic.BaseModel):
+        source: str
+        text:   str
+
     class _MetaInfo(_pydantic.BaseModel):
         script_name: str
         version:     str
@@ -749,8 +762,8 @@ if HAS_PYDANTIC:
         analyses:            list[_AnalysisHit]  = []
         rtf_objects:         list[Any]           = []
         iocs:                _IocReport           = _pydantic.Field(default_factory=_IocReport)
-        text_preview:        str                  = ''
-        text_full:           Optional[str]         = None
+        text_preview:        list[_TextSegment]   = []
+        text_full:           list[_TextSegment]   = []
         meta_document:       Optional[dict]        = None
         meta:                _MetaInfo
         analyzers_completed: list[str]             = []
@@ -791,7 +804,7 @@ if HAS_PYDANTIC:
     def _build_openapi_spec() -> dict:
         """Build and return the OpenAPI 3.0 spec dict."""
         schemas = {}
-        for model in (_AnalysisHit, _IocReport, _MetaInfo, _ScanReport,
+        for model in (_AnalysisHit, _IocReport, _TextSegment, _MetaInfo, _ScanReport,
                        _ScanResponse, _ProcessingResponse, _QueryResponse,
                        _ErrorResponse):
             s = model.model_json_schema()
@@ -1323,6 +1336,7 @@ class InspectorDaemon:
             ('core',       'python-magic',   HAS_MAGIC,        True,                                             'pip install python-magic'),
             ('office',     'msoffcrypto',    HAS_MSOFFCRYPTO,  _az.get('office',     {}).get('enabled', True),   'pip install msoffcrypto-tool'),
             ('office',     'olefile',        HAS_OLEFILE,      _az.get('office',     {}).get('enabled', True),   'pip install olefile'),
+            ('office',     'odfdo',          HAS_ODFDO,        _az.get('office',     {}).get('enabled', True),   'pip install "xspct-scan[advanced]"'),
             ('office',     'oletools',       HAS_OLETOOLS,     _az.get('office',     {}).get('enabled', True),   'pip install oletools'),
             ('iocs',       'iocsearcher',    HAS_IOCSEARCHER,  _az.get('iocs',       {}).get('enabled', True),   'pip install "xspct-scan[advanced]"'),
             ('image',      'pyzbar',         HAS_PYZBAR,       _az.get('image',      {}).get('enabled', True),   'pip install "xspct-scan[enrichment]"  # also: apt install libzbar0'),
@@ -2142,7 +2156,6 @@ class InspectorDaemon:
         if HAS_QUICKJS and _quickjs_enabled and len(js_src) <= _JS_EMULATE_LIMIT:
             try:
                 ctx = _quickjs.Context()
-                output: list[str] = []
 
                 # Stub out browser/PDF globals that the sandbox doesn't have
                 ctx.eval('''
@@ -2302,6 +2315,7 @@ class InspectorDaemon:
                         value = repr(sym.data)
                     if value:
                         result['qr_codes'].append(value)
+                        self._add_text_segment(result, 'image-qr', value)
                         result['analyses'].append({
                             'type': 'QRCode',
                             'keyword': sym.type,
@@ -2447,6 +2461,9 @@ class InspectorDaemon:
                 result['ocr_text'] = _ocr_texts
                 _timing_str = ', '.join(f'{eng}={t}s' for eng, t in _ocr_timings.items())
                 logger.debug('%s OCR timings (%s): %s', s, label, _timing_str or 'none')
+                # Expose OCR text as a text segment for report-level text fields.
+                for _e in _ocr_texts:
+                    self._add_text_segment(result, 'image-ocr', _e.get('text', ''))
                 # Extract IOCs from all engine results combined.
                 _all_ocr_text = '\n'.join(e['text'] for e in _ocr_texts)
                 if _all_ocr_text:
@@ -2783,16 +2800,16 @@ class InspectorDaemon:
         """
         if not data:
             return None
-        preview_limit = int(config.get('xspct_text_preview_length', 2000))
+        text_max = int(config.get('xspct_text_max_length', 50000))
         try:
             text = data.decode('utf-8', errors='replace')
         except Exception:
             text = data.decode('latin-1', errors='replace')
         report: dict = {
-            'text_preview': text[:preview_limit],
             'analyses':     [],
             'iocs':         self.extract_iocs(data),
         }
+        self._add_text_segment(report, 'text', text[:text_max])
         logger.debug('analyze_text: %s — %d chars', filename, len(text))
         return report
 
@@ -2862,7 +2879,12 @@ class InspectorDaemon:
         body_iocs = self.extract_iocs(data)
         for k in ('urls', 'ips', 'domains'):
             report['iocs'][k] = sorted(set(report['iocs'][k] + body_iocs[k]))
-        report['text_preview'] = self.extract_text_preview(data, 'application/pdf')
+        _text_max = int(config.get('xspct_text_max_length', 50000))
+        self._add_text_segment(
+            report, 'pdf', self.extract_text_preview(data, 'application/pdf', _text_max)
+        )
+        # OCR text from embedded images is added as segments during
+        # _analyze_pdf_pymupdf via _merge_image_result.
         # Supplement with pdfid keyword-count heuristics when available.
         self._analyze_pdf_pdfid(data, report)
         return report
@@ -3020,8 +3042,9 @@ class InspectorDaemon:
                     for i in range(ef_count):
                         info = doc.embfile_info(i)
                         names.append(info.get('filename', f'file{i}'))
+                    embedded_names = ', '.join(names[:5])
                     _add('EmbeddedFile', '/EmbeddedFiles',
-                         f'{ef_count} embedded file(s): {', '.join(names[:5])}')
+                        f'{ef_count} embedded file(s): {embedded_names}')
             except Exception as exc:
                 logger.debug('PDF embedded file check failed: %s', exc)
 
@@ -3095,13 +3118,9 @@ class InspectorDaemon:
                                     img_bytes,
                                     label=f'PDF page {page.number} xref {xref}',
                                 )
-                                for hit in img_result.get('analyses', []):
-                                    if hit not in report['analyses']:
-                                        report['analyses'].append(hit)
-                                for k in ('urls', 'ips', 'domains'):
-                                    report['iocs'][k] = sorted(
-                                        set(report['iocs'][k] + img_result['iocs'][k])
-                                    )
+                                self._merge_image_result(
+                                    report, img_result, 'pdf-image'
+                                )
                 except Exception as exc:
                     logger.debug('PDF image extraction failed: %s', exc)
 
@@ -3152,11 +3171,16 @@ class InspectorDaemon:
                 entry = {'type': m_type, 'keyword': marker.decode('ascii'), 'description': desc}
                 if entry not in report['analyses']:
                     report['analyses'].append(entry)
-                if m_type == 'JavaScript':   report['has_javascript']     = True
-                if m_type == 'AutoExecute':  report['has_openaction']     = True
-                if m_type == 'EmbeddedFile': report['has_embedded_files'] = True
-                if m_type == 'Execution':    report['has_launch']         = True
-                if m_type == 'Encryption':   report['is_encrypted']       = True
+                if m_type == 'JavaScript':
+                    report['has_javascript'] = True
+                if m_type == 'AutoExecute':
+                    report['has_openaction'] = True
+                if m_type == 'EmbeddedFile':
+                    report['has_embedded_files'] = True
+                if m_type == 'Execution':
+                    report['has_launch'] = True
+                if m_type == 'Encryption':
+                    report['is_encrypted'] = True
         for uri in re.findall(rb'/URI\s*\((https?://[^\)]+)\)', data):
             try:
                 url = uri.decode('utf-8', 'ignore').strip()
@@ -3505,16 +3529,13 @@ class InspectorDaemon:
                     img_result = self.analyze_image(
                         img_bytes, label=f'HTML data-URI image {i+1} ({mime_hint})'
                     )
-                    for hit in img_result.get('analyses', []):
-                        if hit not in report['analyses']:
-                            report['analyses'].append(hit)
-                    for k in ('urls', 'ips', 'domains'):
-                        report['iocs'][k] = sorted(
-                            set(report['iocs'].get(k, []) + img_result['iocs'][k])
-                        )
+                    self._merge_image_result(report, img_result, 'html-image')
                 except Exception as exc:
                     logger.debug('HTML inline image %d decode failed: %s', i + 1, exc)
-        report['text_preview'] = self.extract_text_preview(data, 'text/html')
+        _text_max = int(config.get('xspct_text_max_length', 50000))
+        self._add_text_segment(
+            report, 'html', self.extract_text_preview(data, 'text/html', _text_max)
+        )
         return report
 
     # ------------------------------------------------------------------
@@ -3644,7 +3665,7 @@ class InspectorDaemon:
         # Office filename extensions → office
         _OFFICE_EXTS = (
             '.doc', '.docx', '.xls', '.xlsx', '.xlsm', '.xlsb',
-            '.ppt', '.pptx', '.odt', '.ods', '.odp',
+            '.ppt', '.pptx', '.odt', '.ods', '.odp', '.odg', '.odf',
         )
         if any(filename.endswith(e) for e in _OFFICE_EXTS):
             return 'office'
@@ -3721,8 +3742,10 @@ class InspectorDaemon:
               duplicates.
             - ``iocs`` sub-dicts are union-merged and sorted.
             - Boolean indicator flags are OR-ed together.
-            - String fields (``decryption_password``, ``text_preview``) keep
-              the longest non-empty value.
+            - ``text_segments`` (and ``text_full`` from finalized sub-reports)
+              accumulate deduplicated ``{source, text}`` entries; ``text_preview``
+              is derived at finalize time and never merged directly.
+              ``decryption_password`` keeps the longest non-empty value.
             - ``meta_document``: the first non-``None`` value wins (PDF and
               OLE never both produce metadata for the same file).
             - The ``meta`` key is never overwritten.
@@ -3786,18 +3809,26 @@ class InspectorDaemon:
                 target.setdefault('analyzer_errors', {}).update(value)
             elif key == 'analyzer_timings':
                 target.setdefault('analyzer_timings', {}).update(value)
+            elif key == 'text_segments':
+                for seg in (value or []):
+                    if isinstance(seg, dict):
+                        self._add_text_segment(target, seg.get('source', ''), seg.get('text', ''))
             elif key == 'text_full':
-                # Keep the longest full-text across merged reports
-                if value:
-                    existing = target.get('text_full') or ''
-                    target['text_full'] = value if len(value) > len(existing) else existing
+                # Finalized sub-reports (e.g. archive members) expose text as a
+                # list of {source, text}; fold it back into the accumulator so
+                # the parent's text_preview/text_full include the member text.
+                for seg in (value or []):
+                    if isinstance(seg, dict):
+                        self._add_text_segment(target, seg.get('source', ''), seg.get('text', ''))
+            elif key == 'text_preview':
+                continue  # derived from text_segments; never merged directly
             elif key in ('has_macro', 'has_javascript', 'has_openaction',
                          'has_embedded_files', 'has_launch', 'is_encrypted',
                          'has_scripts', 'has_forms', 'has_iframes',
                          'has_meta_refresh', 'decrypted'):
                 if isinstance(value, bool):
                     target[key] = target.get(key, False) or value
-            elif key in ('decryption_password', 'text_preview'):
+            elif key == 'decryption_password':
                 if value and (
                     not target.get(key)
                     or len(str(value)) > len(str(target.get(key, '')))
@@ -3816,6 +3847,321 @@ class InspectorDaemon:
     # ------------------------------------------------------------------
     # Office / OLE / RTF analysis
     # ------------------------------------------------------------------
+
+    _ODF_MIMES = (
+        'application/vnd.oasis.opendocument.text',
+        'application/vnd.oasis.opendocument.spreadsheet',
+        'application/vnd.oasis.opendocument.presentation',
+        'application/vnd.oasis.opendocument.graphics',
+        'application/vnd.oasis.opendocument.formula',
+    )
+    _ODF_EXTS = ('.odt', '.ods', '.odp', '.odg', '.odf')
+
+    @staticmethod
+    def _is_odf(data: bytes, file_mime: 'str | None', filename: str) -> bool:
+        """Return True if the file is an OpenDocument Format (ODF) document.
+
+        Checks MIME type prefix, filename extension, and the ``mimetype``
+        entry inside the ZIP archive (the most reliable indicator).
+
+        Args:
+            data: Raw file bytes.
+            file_mime: MIME type string, or None.
+            filename: Original filename (used for extension check).
+
+        Returns:
+            True when the file is identified as ODF, False otherwise.
+        """
+        mime = (file_mime or '').lower()
+        if mime.startswith('application/vnd.oasis.opendocument'):
+            return True
+        name = filename.lower()
+        if any(name.endswith(e) for e in InspectorDaemon._ODF_EXTS):
+            return True
+        # Check the ZIP mimetype entry — the most authoritative indicator.
+        # All conformant ODF files store their MIME type as the first entry
+        # in the ZIP archive (uncompressed) at path "mimetype".
+        if data[:2] == b'PK':
+            try:
+                with zipfile.ZipFile(io.BytesIO(data)) as z:
+                    if 'mimetype' in z.namelist():
+                        mt = z.read('mimetype').strip().decode('ascii', 'ignore').lower()
+                        if mt.startswith('application/vnd.oasis.opendocument'):
+                            return True
+            except Exception:
+                pass
+        return False
+
+    def _analyze_odf(self, s: str, filename: str, data: bytes,
+                     file_mime: 'str | None') -> dict:
+        """Analyse an ODF document for malware indicators.
+
+        Extracts plain text, hyperlinks, metadata, and StarBasic macros from
+        OpenDocument Format files (.odt, .ods, .odp, .odg).  Uses
+        :mod:`odfdo` when available; falls back to raw ZIP + XML parsing.
+
+        Args:
+            s: Session tag for log messages.
+            filename: Original filename.
+            data: Raw file bytes.
+            file_mime: MIME type of the file.
+
+        Returns:
+            A report dict with the same keys as :meth:`analyze_office`:
+            ``has_macro``, ``analyses``, ``rtf_objects``, ``decrypted``,
+            ``decryption_password``, ``iocs``, ``text_preview``,
+            ``meta_document``.
+        """
+        report: dict = {
+            'has_macro':            False,
+            'analyses':             [],
+            'rtf_objects':          [],
+            'decrypted':            False,
+            'decryption_password':  None,
+            'iocs':                 {'urls': [], 'ips': [], 'domains': []},
+        }
+
+        def _sclean(v: object) -> str:
+            if v is None:
+                return ''
+            raw = str(v)
+            return re.sub(r'[\x00-\x1f\x7f]', '', raw)[:256]
+
+        # ----------------------------------------------------------------
+        # Primary path: odfdo
+        # ----------------------------------------------------------------
+        if HAS_ODFDO:
+            try:
+                doc = _OdfDocument(io.BytesIO(data))
+
+                # --- Text extraction ---
+                try:
+                    body_text = doc.get_formatted_text()
+                except Exception:
+                    body_text = ''
+
+                # --- Hyperlink extraction ---
+                try:
+                    body = doc.body
+                    links = body.get_links() if hasattr(body, 'get_links') else []
+                    for lnk in links:
+                        url = getattr(lnk, 'url', None)
+                        if url and '://' in url:
+                            if url not in report['iocs']['urls']:
+                                report['iocs']['urls'].append(url)
+                except Exception as exc:
+                    logger.debug('%s - ODF link extraction error: %s', s, exc)
+
+                # --- Metadata ---
+                try:
+                    m = doc.meta
+                    creation_dt = m.creation_date
+                    mod_dt = getattr(m, 'date', None)
+                    report['meta_document'] = {
+                        'title':         _sclean(m.title),
+                        'author':        _sclean(m.initial_creator),
+                        'subject':       _sclean(m.subject),
+                        'keywords':      _sclean(m.keywords),
+                        'last_saved_by': _sclean(getattr(m, 'creator', None)),
+                        'company':       '',
+                        'app_name':      _sclean(m.generator),
+                        'revision_num':  str(m.editing_cycles or ''),
+                        'creation_date': str(creation_dt or ''),
+                        'mod_date':      str(mod_dt or ''),
+                    }
+                except Exception as exc:
+                    logger.debug('%s - ODF metadata extraction error: %s', s, exc)
+
+                # --- IOC scan on extracted text ---
+                if body_text:
+                    iocs = self.extract_iocs(body_text.encode('utf-8', 'ignore'))
+                    for k in ('urls', 'ips', 'domains'):
+                        report['iocs'][k] = sorted(
+                            set(report['iocs'][k] + iocs[k])
+                        )
+                    self._add_text_segment(report, 'odf', body_text)
+
+            except Exception as exc:
+                logger.error('%s - odfdo parsing error for %s: %s', s, filename, exc)
+                # fall through to ZIP fallback below
+
+        # ----------------------------------------------------------------
+        # Raw ZIP parsing — always runs.
+        # Macro scanning and broad hyperlink extraction have no odfdo
+        # equivalent; text/metadata extraction here also fills gaps when
+        # odfdo is unavailable or returned nothing.
+        # ----------------------------------------------------------------
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                names = z.namelist()
+
+                # Read content.xml once and reuse for text + hyperlink scans.
+                content_xml = b''
+                if 'content.xml' in names:
+                    try:
+                        content_xml = z.read('content.xml')
+                    except Exception as exc:
+                        logger.debug('%s - ODF content.xml read error: %s', s, exc)
+
+                # --- Text extraction (fill gap when odfdo produced no text) ---
+                _have_body = any(
+                    seg.get('source') == 'odf'
+                    for seg in report.get('text_segments', [])
+                )
+                if content_xml and not _have_body:
+                    try:
+                        # Strip XML tags to get plain text
+                        plain = re.sub(rb'<[^>]+>', b' ', content_xml)
+                        plain = re.sub(rb'\s+', b' ', plain).strip()
+                        iocs = self.extract_iocs(plain)
+                        for k in ('urls', 'ips', 'domains'):
+                            report['iocs'][k] = sorted(
+                                set(report['iocs'][k] + iocs[k])
+                            )
+                        self._add_text_segment(
+                            report, 'odf', plain.decode('utf-8', 'ignore')
+                        )
+                    except Exception as exc:
+                        logger.debug('%s - ODF content.xml text error: %s', s, exc)
+
+                # --- Hyperlink extraction (always) ---
+                # doc.get_links() in the odfdo path only returns text:a links;
+                # scanning every xlink:href additionally covers draw:a
+                # (shape/image links), form control actions, and
+                # office:event-listeners URLs that odfdo would otherwise miss.
+                if content_xml:
+                    try:
+                        for m_url in re.finditer(
+                            rb'xlink:href=["\']([^"\']+)["\']', content_xml
+                        ):
+                            url = m_url.group(1).decode('utf-8', 'ignore').strip()
+                            if '://' in url and url not in report['iocs']['urls']:
+                                report['iocs']['urls'].append(url)
+                    except Exception as exc:
+                        logger.debug('%s - ODF hyperlink scan error: %s', s, exc)
+
+                # --- Metadata fallback (when odfdo did not populate it) ---
+                if not report.get('meta_document') and 'meta.xml' in names:
+                    try:
+                        meta_xml = z.read('meta.xml')
+                        # Regex extraction (not an XML parser) avoids
+                        # entity-expansion DoS (billion-laughs / quadratic
+                        # blowup) on hostile meta.xml input.
+                        def _mget(tag: str) -> str:
+                            tb = re.escape(tag).encode()
+                            mm = re.search(
+                                rb'<' + tb + rb'[^>]*>(.*?)</' + tb + rb'>',
+                                meta_xml, re.DOTALL,
+                            )
+                            return _sclean(mm.group(1).decode('utf-8', 'ignore')) if mm else ''
+                        report['meta_document'] = {
+                            'title':         _mget('dc:title'),
+                            'author':        _mget('meta:initial-creator'),
+                            'subject':       _mget('dc:subject'),
+                            'keywords':      _mget('meta:keyword'),
+                            'last_saved_by': _mget('dc:creator'),
+                            'company':       '',
+                            'app_name':      _mget('meta:generator'),
+                            'revision_num':  _mget('meta:editing-cycles'),
+                            'creation_date': _mget('meta:creation-date'),
+                            'mod_date':      _mget('dc:date'),
+                        }
+                    except Exception as exc:
+                        logger.debug('%s - ODF meta.xml fallback error: %s', s, exc)
+
+                # --- Macro detection (always via ZIP, odfdo has no macro API) ---
+                macro_entries = [n for n in names if n.startswith('Basic/')]
+                if macro_entries:
+                    report['has_macro'] = True
+                    report['analyses'].append({
+                        'type':        'AutoExec',
+                        'keyword':     'StarBasic macro',
+                        'description': (
+                            'ODF document contains StarBasic macros '
+                            f'({len(macro_entries)} entries in Basic/)'
+                        ),
+                    })
+                    # Extract macro source from XML module files and scan for IOCs
+                    macro_text_parts: list[str] = []
+                    for entry in macro_entries:
+                        if not entry.endswith('.xml'):
+                            continue
+                        try:
+                            raw = z.read(entry)
+                            # Extract text content from <script:module> elements
+                            for m_mod in re.finditer(
+                                rb'<script:module[^>]*>(.*?)</script:module>',
+                                raw, re.DOTALL
+                            ):
+                                code = m_mod.group(1).decode('utf-8', 'ignore')
+                                macro_text_parts.append(code)
+                        except Exception:
+                            continue
+                    if macro_text_parts:
+                        macro_combined = '\n'.join(macro_text_parts)
+                        self._add_text_segment(report, 'odf-macro', macro_combined)
+                        macro_iocs = self.extract_iocs(
+                            macro_combined.encode('utf-8', 'ignore')
+                        )
+                        for k in ('urls', 'ips', 'domains'):
+                            report['iocs'][k] = sorted(
+                                set(report['iocs'][k] + macro_iocs[k])
+                            )
+                        # Feed to VBA_Scanner for keyword analysis if available
+                        if HAS_OLETOOLS:
+                            try:
+                                from oletools.olevba import VBA_Scanner as _VBA_Scanner_cls
+                                scanner = _VBA_Scanner_cls(macro_combined)
+                                vba_results = scanner.scan(include_decoded_strings=False)
+                                vba_string_count = 0
+                                for kw_type, keyword, description in vba_results:
+                                    if kw_type == 'VBA string':
+                                        vba_string_count += 1
+                                    elif kw_type != 'IOC':
+                                        entry_item = {
+                                            'type': kw_type,
+                                            'keyword': keyword,
+                                            'description': description,
+                                        }
+                                        if entry_item not in report['analyses']:
+                                            report['analyses'].append(entry_item)
+                                if vba_string_count:
+                                    report['analyses'].append({
+                                        'type': 'VBA string',
+                                        'keyword': f'{vba_string_count} obfuscated string(s)',
+                                        'description': (
+                                            f'{vba_string_count} VBA obfuscated string '
+                                            'expression(s) detected'
+                                        ),
+                                    })
+                            except Exception as exc:
+                                logger.debug(
+                                    '%s - ODF VBA_Scanner error: %s', s, exc
+                                )
+
+                # --- Embedded OLE objects ---
+                obj_entries = [n for n in names if re.match(r'Object \d+/', n)]
+                unique_objs = {n.split('/')[0] for n in obj_entries}
+                if unique_objs:
+                    report['analyses'].append({
+                        'type':        'Suspicious',
+                        'keyword':     'EmbeddedObject',
+                        'description': (
+                            f'ODF document contains {len(unique_objs)} '
+                            'embedded object(s)'
+                        ),
+                    })
+
+        except zipfile.BadZipFile:
+            logger.warning('%s - ODF file is not a valid ZIP archive: %s', s, filename)
+        except Exception as exc:
+            logger.error('%s - ODF ZIP analysis error for %s: %s', s, filename, exc)
+
+        # Final IOC sort/dedup
+        for k in ('urls', 'ips', 'domains'):
+            report['iocs'][k] = sorted(set(report['iocs'][k]))
+
+        return report
 
     def analyze_office(self, s: str, filename: str, data: bytes,
                        file_mime: 'str | None', rtf_eval: bool = False,
@@ -3857,11 +4203,16 @@ class InspectorDaemon:
                   ``revision_num``, ``creation_date``, ``mod_date``).
                   ``None`` for non-OLE2 formats (OOXML, RTF).
         """
+        # ODF files share the .odt/.ods/.odp extensions and MIME prefix with the
+        # office analyzer, but oletools cannot parse them.  Dispatch early to the
+        # dedicated ODF path before attempting VBA_Parser.
+        if self._is_odf(data, file_mime, filename):
+            return self._analyze_odf(s, filename, data, file_mime)
+
         office_report: dict = {
             'has_macro': False, 'analyses': [], 'rtf_objects': [],
             'decrypted': False, 'decryption_password': None,
             'iocs': {'urls': [], 'ips': [], 'domains': []},
-            'text_preview': '',
         }
         if HAS_OLETOOLS and rtf_eval and (
             file_mime in ('text/rtf', 'application/rtf') or data.startswith(b'{\\rt')
@@ -3985,7 +4336,20 @@ class InspectorDaemon:
                 office_report['iocs'][k] = sorted(
                     set(office_report['iocs'][k] + body_iocs[k])
                 )
-            office_report['text_preview'] = self.extract_text_preview(effective, file_mime)
+            _office_text_max = int(config.get('xspct_text_max_length', 50000))
+            self._add_text_segment(
+                office_report, 'office',
+                self.extract_text_preview(effective, file_mime, _office_text_max),
+            )
+            # Full VBA/XLM macro source as a text segment (IOC-scanned + reported).
+            try:
+                _macro_src = '\n'.join(
+                    code for (_fn, _sp, _vf, code) in vba_parser.extract_all_macros()
+                    if code
+                )
+                self._add_text_segment(office_report, 'office-macro', _macro_src)
+            except Exception:
+                pass
 
             # -- OLE2 document properties (SummaryInformation stream) -------
             if HAS_OLEFILE and _olefile.isOleFile(io.BytesIO(effective)):
@@ -4017,7 +4381,13 @@ class InspectorDaemon:
             logger.error('%s - OLE analysis error for %s: %s', s, filename, exc)
             effective = working_data if working_data is not None else data
             office_report['iocs']         = self.extract_iocs(effective)
-            office_report['text_preview'] = self.extract_text_preview(effective, file_mime)
+            self._add_text_segment(
+                office_report, 'office',
+                self.extract_text_preview(
+                    effective, file_mime,
+                    int(config.get('xspct_text_max_length', 50000)),
+                ),
+            )
         finally:
             if vba_parser is not None:
                 try:
@@ -4121,8 +4491,18 @@ class InspectorDaemon:
         report['detected_type'] = (
             ','.join(sorted(successful_types)) if successful_types else 'unknown'
         )
-        if not report['text_preview']:
-            report['text_preview'] = self.extract_text_preview(data, file_mime)
+        _text_max = int(config.get('xspct_text_max_length', 50000))
+        # Embedded-image OCR/QR text (adds segments) — before iocsearcher.
+        if (HAS_OCR or HAS_PYZBAR) and file_mime and 'openxmlformats' in file_mime.lower():
+            self._extract_ooxml_images(s, data, report)
+        if (HAS_OCR or HAS_PYZBAR) and self._is_odf(data, file_mime, filename):
+            self._extract_odf_images(s, data, report)
+        # Ensure at least one text segment exists (unknown/empty extractions).
+        if not report.get('text_segments'):
+            self._add_text_segment(
+                report, report.get('detected_type') or 'raw',
+                self.extract_text_preview(data, file_mime, _text_max),
+            )
         # YARA — always scan raw bytes when rules are loaded, regardless of file type
         _yara_ok = (
             ('yara'   in enabled and getattr(self, '_yara_rules',   None) is not None) or
@@ -4132,17 +4512,16 @@ class InspectorDaemon:
             yara_res = self.analyze_yara(data, filename, file_mime or '', s)
             if yara_res:
                 self.merge_reports(report, yara_res)
-        # iocsearcher — extended IOC extraction on full text
+        # iocsearcher — extended IOC extraction over ALL accumulated text.
         if HAS_IOCSEARCHER and 'iocs' in enabled:
-            _text_max = int(config.get('xspct_text_max_length', 50000))
             # For HTML, use raw decoded source so href/src/action attributes are visible
             if 'html' in report.get('detected_type', ''):
                 try:
                     _ios_text = data.decode('utf-8', 'ignore')[:_text_max]
                 except Exception:
-                    _ios_text = report.get('text_preview', '')
+                    _ios_text = self._aggregate_text(report)[:_text_max]
             else:
-                _ios_text = self.extract_text_preview(data, file_mime, _text_max)
+                _ios_text = self._aggregate_text(report)[:_text_max]
             if _ios_text:
                 iocs_res = self.analyze_iocsearcher(_ios_text, filename)
                 if iocs_res:
@@ -4155,9 +4534,8 @@ class InspectorDaemon:
             cv_res = self.analyze_clamav(data, filename, s)
             if cv_res:
                 self.merge_reports(report, cv_res)
-        # Image OCR / QR analysis for OOXML (contains media/ entries in ZIP)
-        if (HAS_OCR or HAS_PYZBAR) and file_mime and 'openxmlformats' in file_mime.lower():
-            self._extract_ooxml_images(s, data, report)
+        # Derive text_preview/text_full lists from accumulated segments.
+        self._finalize_text_fields(report)
         return report
 
     # ------------------------------------------------------------------
@@ -4184,8 +4562,9 @@ class InspectorDaemon:
             'decrypted':           False,
             'decryption_password': None,
             'iocs':                {'urls': [], 'ips': [], 'domains': []},
-            'text_preview':        '',
-            'text_full':           None,
+            'text_preview':        [],
+            'text_full':           [],
+            'text_segments':       [],
             'meta_document':       None,
             'yara_matches':        [],
             'iocs_extended':       {},
@@ -4196,6 +4575,75 @@ class InspectorDaemon:
             'analyzer_errors':     {},
             'analyzer_timings':    {},
         }
+
+    # ------------------------------------------------------------------
+    # Extracted-text accumulation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _add_text_segment(report: dict, source: str, text: 'str | None') -> None:
+        """Append an extracted-text segment to *report* (deduplicated).
+
+        Segments accumulate under the internal ``text_segments`` key. The
+        pipeline later derives ``text_preview`` and ``text_full`` (both
+        lists of ``{source, text}``) from them via
+        :meth:`_finalize_text_fields`, and feeds the aggregated text to the
+        IOC catchers.  Empty/whitespace-only text is ignored.
+        """
+        if not text:
+            return
+        text = text.strip()
+        if not text:
+            return
+        segs = report.setdefault('text_segments', [])
+        for seg in segs:
+            if seg.get('source') == source and seg.get('text') == text:
+                return
+        segs.append({'source': source, 'text': text})
+
+    @staticmethod
+    def _aggregate_text(report: dict) -> str:
+        """Return all accumulated segment text joined for IOC scanning."""
+        return '\n'.join(
+            seg['text'] for seg in report.get('text_segments', []) if seg.get('text')
+        )
+
+    def _finalize_text_fields(self, report: dict) -> None:
+        """Derive ``text_preview``/``text_full`` lists from ``text_segments``.
+
+        ``text_preview`` truncates each segment to
+        ``xspct_text_preview_length``; ``text_full`` truncates to
+        ``xspct_text_max_length``.  The internal ``text_segments`` key is
+        removed so it never leaks into the response.
+        """
+        segs = report.pop('text_segments', None) or []
+        preview_limit = int(config.get('xspct_text_preview_length', 2000))
+        text_max = int(config.get('xspct_text_max_length', 50000))
+        report['text_preview'] = [
+            {'source': seg['source'], 'text': seg['text'][:preview_limit]}
+            for seg in segs if seg.get('text')
+        ]
+        report['text_full'] = [
+            {'source': seg['source'], 'text': seg['text'][:text_max]}
+            for seg in segs if seg.get('text')
+        ]
+
+    def _merge_image_result(self, report: dict, img_result: dict, source: str) -> None:
+        """Merge an :meth:`analyze_image` result (analyses, IOCs, and text).
+
+        OCR/QR text is added as ``text_segments`` under *source* so it reaches
+        both ``text_preview``/``text_full`` and the IOC catchers.
+        """
+        for hit in img_result.get('analyses', []):
+            if hit not in report['analyses']:
+                report['analyses'].append(hit)
+        _img_iocs = img_result.get('iocs', {})
+        for k in ('urls', 'ips', 'domains'):
+            report['iocs'][k] = sorted(
+                set(report['iocs'].get(k, []) + _img_iocs.get(k, []))
+            )
+        for seg in img_result.get('text_segments', []):
+            self._add_text_segment(report, source, seg.get('text', ''))
 
     async def analyze_pipeline(self, s: str, filename: str, data: bytes,
                                 file_mime: 'str | None',
@@ -4236,12 +4684,18 @@ class InspectorDaemon:
         # Determine which analyzers will actually run so the pending list is accurate.
         pending: list[str] = []
         for t in types_to_run:
-            if t == 'pdf'    and 'pdf'    in enabled: pending.append('pdf')
-            elif t == 'html' and 'html'   in enabled: pending.append('html')
-            elif t == 'office' and 'office' in enabled: pending.append('office')
-            elif t == 'image'   and 'image'   in enabled: pending.append('image')
-            elif t == 'archive' and 'archive' in enabled: pending.append('archive')
-            elif t == 'text'    and 'text'    in enabled: pending.append('text')
+            if t == 'pdf' and 'pdf' in enabled:
+                pending.append('pdf')
+            elif t == 'html' and 'html' in enabled:
+                pending.append('html')
+            elif t == 'office' and 'office' in enabled:
+                pending.append('office')
+            elif t == 'image' and 'image' in enabled:
+                pending.append('image')
+            elif t == 'archive' and 'archive' in enabled:
+                pending.append('archive')
+            elif t == 'text' and 'text' in enabled:
+                pending.append('text')
             # 'unknown': no dedicated analyzer; text_preview extracted in pre-Group-2 block
         # YARA runs regardless of file type (always on raw bytes).
         # Either or both engines may be active simultaneously.
@@ -4324,73 +4778,70 @@ class InspectorDaemon:
         if tasks:
             await asyncio.gather(*tasks)
 
-        # --- Pre-Group-2: ensure full text is available for internal analysis ---
-        # text_preview (≤2000 chars) may already be set by a document analyzer.
-        # For internal consumers (iocsearcher, text/unknown dispatch) always use
-        # the full extraction up to xspct_text_max_length so that IOCs beyond
-        # the first 2000 characters are not silently missed.
+        # --- Post-analyzer: embedded-image text + aggregated IOC search ---
         _text_max = int(config.get('xspct_text_max_length', 50000))
-        _preview_limit = int(config.get('xspct_text_preview_length', 2000))
-        if not partial.report.get('text_preview'):
-            partial.report['text_preview'] = await loop.run_in_executor(
-                self._executor, self.extract_text_preview, data, file_mime, _preview_limit
+        report = partial.report
+        # OOXML/ODF embedded images (adds OCR/QR text segments) — run before
+        # iocsearcher so image text also reaches the extended IOC catcher.
+        if (HAS_OCR or HAS_PYZBAR) and file_mime and 'openxmlformats' in file_mime.lower():
+            await loop.run_in_executor(
+                self._executor, self._extract_ooxml_images, s, data, report
             )
-        # Full text for internal analysis (may equal text_preview when
-        # xspct_text_max_length <= 2000, but never shorter).
-        if _text_max > _preview_limit or not partial.report.get('text_preview'):
-            _full_text_for_analysis = await loop.run_in_executor(
+        if (HAS_OCR or HAS_PYZBAR) and self._is_odf(data, file_mime, filename):
+            await loop.run_in_executor(
+                self._executor, self._extract_odf_images, s, data, report
+            )
+        # Fallback: if no analyzer produced text (unknown/text types, or a
+        # document with no extractable text layer), extract byte-level text.
+        if not report.get('text_segments'):
+            _fallback = await loop.run_in_executor(
                 self._executor, self.extract_text_preview, data, file_mime, _text_max
             )
-        else:
-            _full_text_for_analysis = partial.report['text_preview']
+            self._add_text_segment(
+                report,
+                self.get_detected_type(file_mime, file_desc, filename, data) or 'raw',
+                _fallback,
+            )
 
-        # --- Group 2: iocsearcher (uses full extracted text) ---
+        # --- Group 2: iocsearcher over ALL accumulated text ---
         # For HTML files we pass the raw decoded source rather than the
-        # tag-stripped preview so that URLs/FQDNs in href/src/action
-        # attributes are visible to iocsearcher.
+        # tag-stripped preview so URLs/FQDNs in href/src/action attributes
+        # are visible to iocsearcher.
         iocs_enabled = (HAS_IOCSEARCHER and 'iocs' in enabled)
-        if iocs_enabled and _full_text_for_analysis:
+        if iocs_enabled:
             if file_mime and 'html' in file_mime.lower():
                 try:
                     _iocsearcher_text = data.decode('utf-8', 'ignore')[:_text_max]
                 except Exception:
-                    _iocsearcher_text = _full_text_for_analysis
+                    _iocsearcher_text = self._aggregate_text(report)[:_text_max]
             else:
-                _iocsearcher_text = _full_text_for_analysis
-            _iocs_t0 = time.monotonic()
-            try:
-                iocs_result = await loop.run_in_executor(
-                    self._executor, self.analyze_iocsearcher, _iocsearcher_text, filename
-                )
-            except Exception as exc:
-                logger.error('%s - analyzer iocs raised: %s', s, exc)
-                iocs_result = {'analyzer_errors': {'iocs': type(exc).__name__}}
-            _iocs_ms = int((time.monotonic() - _iocs_t0) * 1000)
-            _record_analyzer_stats('iocs', _iocs_ms, iocs_result)
-            if iocs_result:
-                iocs_payload = dict(iocs_result)
-                iocs_payload['analyzer_timings'] = {'iocs': round(_iocs_ms / 1000, 3)}
-                await partial.merge('iocs', iocs_payload, self)
+                _iocsearcher_text = self._aggregate_text(report)[:_text_max]
+            if _iocsearcher_text:
+                _iocs_t0 = time.monotonic()
+                try:
+                    iocs_result = await loop.run_in_executor(
+                        self._executor, self.analyze_iocsearcher, _iocsearcher_text, filename
+                    )
+                except Exception as exc:
+                    logger.error('%s - analyzer iocs raised: %s', s, exc)
+                    iocs_result = {'analyzer_errors': {'iocs': type(exc).__name__}}
+                _iocs_ms = int((time.monotonic() - _iocs_t0) * 1000)
+                _record_analyzer_stats('iocs', _iocs_ms, iocs_result)
+                if iocs_result:
+                    iocs_payload = dict(iocs_result)
+                    iocs_payload['analyzer_timings'] = {'iocs': round(_iocs_ms / 1000, 3)}
+                    await partial.merge('iocs', iocs_payload, self)
 
         # --- Finalise ---
-        report = partial.report
-        # detected_type reflects only primary content-type analyzers (pdf/html/office/image/archive).
-        # Supplementary analyzers (iocs, yara, javascript) are excluded.
+        # detected_type reflects only primary content-type analyzers
+        # (pdf/html/office/image/archive); supplementary analyzers excluded.
         _SUPPLEMENTARY = frozenset({'iocs', 'yara', 'javascript', 'clamav'})
         successful = [a for a in partial.successful if a not in _SUPPLEMENTARY]
         report['detected_type'] = (
             ','.join(sorted(successful)) if successful else 'unknown'
         )
-        # text_preview already populated above; no second extraction needed.
-        # text_full: store when xspct_include_text_full is enabled.
-        if config.get('xspct_include_text_full'):
-            report['text_full'] = _full_text_for_analysis if _text_max > _preview_limit \
-                else partial.report['text_preview']
-        # OOXML embedded images: analyse in thread pool.
-        if (HAS_OCR or HAS_PYZBAR) and file_mime and 'openxmlformats' in file_mime.lower():
-            await loop.run_in_executor(
-                self._executor, self._extract_ooxml_images, s, data, report
-            )
+        # Derive text_preview/text_full lists from accumulated segments.
+        self._finalize_text_fields(report)
         return partial
 
     def _extract_ooxml_images(self, s: str, data: bytes, report: dict) -> None:
@@ -4410,15 +4861,32 @@ class InspectorDaemon:
                     if re.match(r'(?:word|xl|ppt)/media/', name, re.I):
                         img_bytes = z.read(name)
                         img_result = self.analyze_image(img_bytes, label=f'OOXML {name}', s=s)
-                        for hit in img_result.get('analyses', []):
-                            if hit not in report['analyses']:
-                                report['analyses'].append(hit)
-                        for k in ('urls', 'ips', 'domains'):
-                            report['iocs'][k] = sorted(
-                                set(report['iocs'].get(k, []) + img_result['iocs'][k])
-                            )
+                        self._merge_image_result(report, img_result, 'ooxml-image')
         except Exception as exc:
             logger.debug('%s - OOXML image extraction failed: %s', s, exc)
+
+    def _extract_odf_images(self, s: str, data: bytes, report: dict) -> None:
+        """Extract and analyse images embedded in an ODF ZIP archive.
+
+        Iterates the ``Pictures/`` directory inside the ODF ZIP container,
+        passing each image to :meth:`analyze_image` and merging the results
+        into *report* in-place.  Called from :meth:`analyze_pipeline` via
+        :meth:`~asyncio.loop.run_in_executor`.
+
+        Args:
+            s: Session tag for log messages.
+            data: Raw ODF file bytes.
+            report: Report dict to merge image analysis results into.
+        """
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                for name in z.namelist():
+                    if re.match(r'Pictures/', name, re.I) and not name.endswith('/'):
+                        img_bytes = z.read(name)
+                        img_result = self.analyze_image(img_bytes, label=f'ODF {name}', s=s)
+                        self._merge_image_result(report, img_result, 'odf-image')
+        except Exception as exc:
+            logger.debug('%s - ODF image extraction failed: %s', s, exc)
 
     async def analyze_task(self, s: str, file_hash: str, filename: str,
                            data: bytes, file_mime: 'str | None',
@@ -4505,9 +4973,9 @@ class InspectorDaemon:
         await self.cache_report(s, file_hash, report)
         # Strip disabled text fields from the cached/returned report.
         if not config.get('xspct_include_text_preview', True):
-            report['text_preview'] = ''
+            report['text_preview'] = []
         if not config.get('xspct_include_text_full', False):
-            report.pop('text_full', None)
+            report['text_full'] = []
         return report
 
     # ------------------------------------------------------------------
