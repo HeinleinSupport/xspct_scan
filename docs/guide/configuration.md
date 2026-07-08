@@ -110,7 +110,11 @@ xspct_analyzers:
   pdf:        { enabled: true }
   html:       { enabled: true }
   office:     { enabled: true }
-  image:      { enabled: true }
+  image:
+    enabled: true
+    ocr_max_bytes:   2097152   # skip OCR for files > 2 MB (camera JPEGs)
+    ocr_max_pixels:  4000000   # skip OCR for images > 4 megapixels
+    ocr_skip_camera: true      # skip OCR when EXIF Make/Model present
   archive:    { enabled: true }
   text:       { enabled: true }
   iocs:       { enabled: true }
@@ -125,6 +129,31 @@ xspct_analyzers:
 | `xspct_analyzers.javascript.quickjs` | `false` | Enable sandboxed JS emulation via QuickJS. Disabled by default because it adds significant per-request CPU time. Set to `true` to activate (requires the `enrichment` extra). |
 | `xspct_analyzers.yara.rules_path` | `` | Path to a YARA rules file or directory. Required when `yara.enabled` is `true`. |
 | `xspct_analyzers.yara_x.rules_path` | `` | Same as above for the yara-x engine. |
+
+#### Image OCR exclusion gates
+
+Large natural-photo images (camera JPEGs, scanned pages) can take minutes in
+OCR.  These gates skip OCR automatically when the image is unlikely to contain
+document text.  Set any gate to `0` to disable it.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `xspct_analyzers.image.ocr_max_bytes` | `2097152` | Skip OCR when the raw file exceeds this many bytes (2 MiB). Camera JPEGs are typically 3–15 MB; phishing screenshots and QR images are usually <500 KB. |
+| `xspct_analyzers.image.ocr_max_pixels` | `4000000` | Skip OCR when `width × height` exceeds this value (4 MP = 2000×2000). |
+| `xspct_analyzers.image.ocr_skip_camera` | `true` | Skip OCR when EXIF tags `Make` or `Model` are present, indicating a camera photo rather than a document scan or screenshot. |
+
+When a gate triggers the reason is reported in `scan.exclusions`:
+
+```json
+"scan": {
+  "exclusions": {
+    "image.ocr": "camera photo detected via EXIF (OnePlus/OnePlus 12)"
+  }
+}
+```
+
+To override a gate for a single request use `?force_analyzers=image.ocr`
+(API) or `--force-ocr` / `--force-analyzers image.ocr` (CLI).
 
 The **`text`** analyzer handles files detected as `text/plain`, ASCII, UTF-8, or any
 script not matched by the other analyzers.  It decodes the content, populates

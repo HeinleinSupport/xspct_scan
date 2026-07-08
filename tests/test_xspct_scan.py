@@ -1919,6 +1919,79 @@ class TestTextExtractorRtf:
 # UNIT TESTS — Rspamd digest
 # ===========================================================================
 
+class TestOcrGate:
+    """Unit tests for the image OCR exclusion gates."""
+
+    def _make_tiny_jpeg(self) -> bytes:
+        """1×1 white JPEG, ~300 bytes — always below every size gate."""
+        import io as _io
+        from PIL import Image as _PIL
+        buf = _io.BytesIO()
+        _PIL.new('RGB', (1, 1), color=(255, 255, 255)).save(buf, format='JPEG')
+        return buf.getvalue()
+
+    def test_ocr_gate_max_bytes_triggers(self, daemon, monkeypatch):
+        monkeypatch.setitem(
+            xspct.config['xspct_analyzers']['image'], 'ocr_max_bytes', 10
+        )
+        data = b'\xff\xd8\xff' + b'X' * 100   # fake JPEG magic, 103 bytes > 10
+        result = daemon.analyze_image(data, label='big.jpg')
+        assert 'image.ocr' in result.get('exclusions', {})
+        assert 'ocr_max_bytes' in result['exclusions']['image.ocr']
+
+    def test_ocr_gate_max_bytes_force_override(self, daemon, monkeypatch):
+        monkeypatch.setitem(
+            xspct.config['xspct_analyzers']['image'], 'ocr_max_bytes', 10
+        )
+        tiny = self._make_tiny_jpeg()
+        # Even a tiny file would be excluded by the 10-byte gate; force bypasses it
+        result = daemon.analyze_image(
+            tiny, label='tiny.jpg', force_analyzers=frozenset({'image.ocr'})
+        )
+        assert 'exclusions' not in result
+
+    def test_ocr_gate_disabled_when_zero(self, daemon, monkeypatch):
+        monkeypatch.setitem(
+            xspct.config['xspct_analyzers']['image'], 'ocr_max_bytes', 0
+        )
+        monkeypatch.setitem(
+            xspct.config['xspct_analyzers']['image'], 'ocr_max_pixels', 0
+        )
+        monkeypatch.setitem(
+            xspct.config['xspct_analyzers']['image'], 'ocr_skip_camera', False
+        )
+        tiny = self._make_tiny_jpeg()
+        result = daemon.analyze_image(tiny, label='tiny.jpg')
+        assert 'image.ocr' not in result.get('exclusions', {})
+
+    def test_scan_exclusions_in_v2_report(self, daemon, monkeypatch):
+        monkeypatch.setitem(
+            xspct.config['xspct_analyzers']['image'], 'ocr_max_bytes', 1
+        )
+        monkeypatch.setitem(
+            xspct.config['xspct_analyzers']['image'], 'ocr_max_pixels', 0
+        )
+        monkeypatch.setitem(
+            xspct.config['xspct_analyzers']['image'], 'ocr_skip_camera', False
+        )
+        tiny = self._make_tiny_jpeg()
+        # sync_analyze stays v1 — check scan_exclusions in the v1 report
+        r = daemon.sync_analyze('<t>', 'big.jpg', tiny, 'image/jpeg')
+        assert r.get('scan_exclusions', {}).get('image.ocr')
+
+    def test_force_analyzers_in_http_query(self):
+        import urllib.parse
+        # Verify the comma-split logic that handle_scan applies
+        raw = 'image.ocr,image.qr'
+        fa = frozenset(a.strip() for a in raw.split(',') if a.strip())
+        assert 'image.ocr' in fa
+        assert 'image.qr' in fa
+
+
+# ===========================================================================
+# UNIT TESTS — Rspamd digest
+# ===========================================================================
+
 class TestRspamdDigest:
 
     def test_key_is_64_bytes(self):

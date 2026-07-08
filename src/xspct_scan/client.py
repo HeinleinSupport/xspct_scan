@@ -256,6 +256,7 @@ async def scan_file(
     poll: bool,
     poll_interval: float,
     no_color: bool,
+    force_analyzers: str | None = None,
 ) -> dict[str, Any] | None:
     """POST *path* to /v1/scan. Returns the result dict or None on error."""
     headers: dict[str, str] = {}
@@ -265,6 +266,8 @@ async def scan_file(
     params: dict[str, str] = {"timeout": str(timeout)}
     if rtf:
         params["rtf"] = "true"
+    if force_analyzers:
+        params["force_analyzers"] = force_analyzers
 
     try:
         with path.open("rb") as fh:
@@ -369,6 +372,7 @@ async def _run(args: argparse.Namespace) -> int:
                 poll=args.poll,
                 poll_interval=args.poll_interval,
                 no_color=args.no_color,
+                force_analyzers=args.force_analyzers,
             )
             for p in files
         ]
@@ -438,6 +442,24 @@ def main() -> None:
         "--rtf",
         action="store_true",
         help="Enable RTF object extraction",
+    )
+    parser.add_argument(
+        "--force-analyzers",
+        metavar="LIST",
+        default=None,
+        dest="force_analyzers",
+        help=(
+            "Comma-separated analyzer paths to bypass exclusion gates for this request.\n"
+            "Example: image.ocr  (disables the camera/size OCR gate)\n"
+            "Equivalent to --force-ocr when set to 'image.ocr'"
+        ),
+    )
+    parser.add_argument(
+        "--force-ocr",
+        action="store_const",
+        const="image.ocr",
+        dest="force_analyzers",
+        help="Force OCR even when the camera-photo/size exclusion gate would skip it",
     )
     parser.add_argument(
         "--poll",

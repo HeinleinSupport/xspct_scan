@@ -60,6 +60,7 @@ Pass optional metadata as query parameters (`filename`, `file_mime`, `file_type`
 |-----------|---------|-------------|
 | `timeout` | `10` | Max seconds to wait for analysis before returning `202`. |
 | `rtf` | `false` | Set to `true` to enable RTF object extraction via `rtfobj`. |
+| `force_analyzers` | | Comma-separated analyzer paths to bypass exclusion gates for this request (e.g. `image.ocr`). |
 
 `detected_type` (inside `file.type`) will be one of: `pdf`, `html`, `office`,
 `odf`, `image`, `archive`, `text`, or `unknown`.
@@ -72,7 +73,7 @@ Sections are **omitted when empty** (no null/empty noise).
 ```json
 {
   "schema_version": "2.0",
-  "engine": { "name": "xspct-scan", "version": "0.4.0" },
+  "engine": { "name": "xspct-scan", "version": "0.5.0" },
 
   "file": {
     "name": "invoice.docx",
@@ -161,10 +162,13 @@ Sections are **omitted when empty** (no null/empty noise).
 |-----|------|-------------|
 | `name` | string | URL-decoded filename |
 | `sha256` | string | SHA-256 hex digest |
+| `sha1` | string | SHA-1 hex digest |
+| `rspamd_digest` | string | Rspamd-compatible keyed BLAKE2b-512 digest (128 hex chars) — matches `part->digest` in Rspamd's MIME parser |
 | `size` | int | File size in bytes |
 | `mime` | string/null | libmagic MIME type |
 | `magic` | string/null | libmagic description |
 | `type` | string | `pdf`\|`html`\|`office`\|`odf`\|`image`\|`archive`\|`text`\|`unknown` |
+| `resolution` | string | `WxH` pixel dimensions for image files (e.g. `2096x4608`); absent for non-image files |
 
 #### `scan`
 
@@ -177,6 +181,12 @@ Sections are **omitted when empty** (no null/empty noise).
 | `analyzers.pending` | list | Analyzer names still running (non-empty in `202` only) |
 | `analyzers.timings_s` | object | `{analyzer: seconds}` |
 | `analyzers.errors` | object | Present only when ≥1 analyzer errored |
+
+`scan.exclusions` is added when at least one analyzer gate was triggered:
+
+| Key | Description |
+|-----|-------------|
+| `image.ocr` | OCR was skipped; value is a human-readable reason (e.g. `camera photo detected via EXIF (OnePlus/OnePlus 12)` or `file exceeds ocr_max_bytes (5,617,053 > 2,097,152)`) |
 
 #### `verdict`
 

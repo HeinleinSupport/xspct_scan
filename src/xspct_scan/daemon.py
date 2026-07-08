@@ -389,7 +389,14 @@ config: dict = {
         'office':     {'enabled': True},
         'yara':       {'enabled': False, 'rules_path': ''},
         'yara_x':     {'enabled': False, 'rules_path': ''},
-        'image':      {'enabled': True},
+        'image':      {
+            'enabled': True,
+            # --- OCR exclusion gates ---
+            # Set to 0 to disable a gate; use force_analyzers to override per-request.
+            'ocr_max_bytes':      2 * 1024 * 1024,   # skip OCR when file > 2 MB (camera JPEGs)
+            'ocr_max_pixels':     4_000_000,           # skip OCR when W×H > 4 MP
+            'ocr_skip_camera':    True,               # skip OCR when EXIF Make/Model present
+        },
         'archive':    {'enabled': True},
         'iocs':       {'enabled': True},
         'javascript': {'enabled': True, 'quickjs': False},
@@ -2407,7 +2414,8 @@ class InspectorDaemon:
     # Image analysis — OCR + QR/barcode
     # ------------------------------------------------------------------
 
-    def analyze_image(self, image_data: bytes, label: str = '', s: str = '') -> dict:
+    def analyze_image(self, image_data: bytes, label: str = '', s: str = '',
+                       force_analyzers: 'frozenset | None' = None) -> dict:
         """Run OCR and QR/barcode decoding on raw image bytes.
 
         Uses ``pytesseract`` for OCR (English + German) and ``pyzbar`` for
@@ -2415,8 +2423,10 @@ class InspectorDaemon:
         unavailable.
 
         Args:
-            image_data: Raw image bytes (PNG, JPEG, BMP, TIFF, …).
-            label: Human-readable source label for log messages.
+            image_data:       Raw image bytes (PNG, JPEG, BMP, TIFF, …).
+            label:            Human-readable source label for log messages.
+            force_analyzers:  Set of analyzer names whose exclusion gates are
+                              bypassed (e.g. ``frozenset({'image.ocr'})``).
 
         Returns:
             A dict with keys:
@@ -2427,6 +2437,7 @@ class InspectorDaemon:
             - **qr_codes** (list[str]): Decoded QR/barcode values.
             - **analyses** (list[dict]): Suspicious findings from OCR text.
             - **iocs** (dict): URLs/IPs/domains extracted from OCR text.
+            - **exclusions** (dict): Gates that blocked an analyzer for this image.
         """
         result: dict = {
             'ocr_text': [],
@@ -2437,6 +2448,22 @@ class InspectorDaemon:
         }
         if not image_data:
             return result
+
+        # Byte-size OCR gate runs before PIL — no image open required.
+        _force_analyzers = force_analyzers or frozenset()
+        _img_cfg = config.get('xspct_analyzers', {}).get('image', {})
+        _ocr_max_bytes = int(_img_cfg.get('ocr_max_bytes', 0))
+        if ('image.ocr' not in _force_analyzers
+                and _ocr_max_bytes
+                and len(image_data) > _ocr_max_bytes):
+            result['exclusions'] = {
+                'image.ocr': (
+                    f'file exceeds ocr_max_bytes '
+                    f'({len(image_data):,} > {_ocr_max_bytes:,})'
+                )
+            }
+            logger.debug('%s OCR gate (%s): %s', s, label,
+                         result['exclusions']['image.ocr'])
 
         img = None
         if HAS_OCR or HAS_PYZBAR:
@@ -2474,10 +2501,39 @@ class InspectorDaemon:
             except Exception as exc:
                 logger.debug('pyzbar decoding failed (%s): %s', label, exc)
 
-        # -- OCR -------------------------------------------------------------
+        # -- OCR gate: resolution and camera EXIF (requires PIL) -------------
+        # Byte-size gate was already applied above (before PIL open).
+        # Pixel/EXIF gates run here after we know the image dimensions.
         class _OcrSkipped(Exception):
             pass
-        if (HAS_OCR or HAS_EASYOCR) and img is not None:
+        _ocr_exclusion: str = result.get('exclusions', {}).get('image.ocr', '')
+        if not _ocr_exclusion and 'image.ocr' not in _force_analyzers and img is not None:
+            _w, _h = img.width, img.height
+            _ocr_max_px = int(_img_cfg.get('ocr_max_pixels', 0))
+            if _ocr_max_px and _w * _h > _ocr_max_px:
+                _ocr_exclusion = (
+                    f'image exceeds ocr_max_pixels '
+                    f'({_w * _h:,} > {_ocr_max_px:,})'
+                )
+            elif _img_cfg.get('ocr_skip_camera', True):
+                # Quick camera check: EXIF tag 271=Make, 272=Model.
+                try:
+                    _raw_exif = img._getexif() or {}
+                    if _raw_exif.get(271) or _raw_exif.get(272):
+                        _make = str(_raw_exif.get(271, '')).strip()
+                        _model = str(_raw_exif.get(272, '')).strip()
+                        _ocr_exclusion = (
+                            f'camera photo detected via EXIF'
+                            f'{" (" + _make + "/" + _model + ")" if _make or _model else ""}'
+                        )
+                except Exception:
+                    pass
+            if _ocr_exclusion:
+                result['exclusions'] = {'image.ocr': _ocr_exclusion}
+                logger.debug('%s OCR gate (%s): %s', s, label, _ocr_exclusion)
+
+        # -- OCR -------------------------------------------------------------
+        if (HAS_OCR or HAS_EASYOCR) and img is not None and not _ocr_exclusion:
             try:
                 import numpy as _np
 
@@ -3956,6 +4012,9 @@ class InspectorDaemon:
                     target['clamav'] = value
             elif key == 'analyzer_errors':
                 target.setdefault('analyzer_errors', {}).update(value)
+            elif key == 'exclusions':
+                # Per-image OCR-gate reasons → aggregate into scan_exclusions.
+                target.setdefault('scan_exclusions', {}).update(value)
             elif key == 'analyzer_timings':
                 target.setdefault('analyzer_timings', {}).update(value)
             elif key == 'text_segments':
@@ -4594,7 +4653,8 @@ class InspectorDaemon:
                      file_mime: 'str | None', file_desc: 'str | None' = None,
                      rtf_eval: bool = False,
                      custom_passwords: 'list | None' = None,
-                     types_to_run: 'list | None' = None) -> dict:
+                     types_to_run: 'list | None' = None,
+                     force_analyzers: 'frozenset | None' = None) -> dict:
         """Run the full analysis pipeline synchronously and return a report.
 
         Detects the file type, dispatches to the appropriate
@@ -4638,7 +4698,8 @@ class InspectorDaemon:
                     s, filename, data, file_mime, rtf_eval, custom_passwords
                 )
             elif t == 'image' and 'image' in enabled:
-                res = self.analyze_image(data, label=filename, s=s)
+                res = self.analyze_image(data, label=filename, s=s,
+                                        force_analyzers=force_analyzers or frozenset())
             elif t == 'archive' and 'archive' in enabled:
                 res = self.analyze_archive(s, filename, data, 0)
             elif t == 'text' and 'text' in enabled:
@@ -4734,6 +4795,7 @@ class InspectorDaemon:
             'exif':                {},
             'analyzer_errors':     {},
             'analyzer_timings':    {},
+            'scan_exclusions':     {},
         }
 
     # ------------------------------------------------------------------
@@ -4869,12 +4931,23 @@ class InspectorDaemon:
         }
         if v1.get('analyzer_errors'):
             analyzers['errors'] = v1['analyzer_errors']
-        v2['scan'] = {
+        _scan = {
             'status':     v1.get('status', 'finished'),
             'duration_s': v1.get('time_taken', 0.0),
             'cache_hit':  bool(v1.get('cache_hit', False)),
             'analyzers':  analyzers,
         }
+        _scan_excl = dict(v1.get('scan_exclusions', {}))
+        # Surface unavailable/skipped engine statuses in scan.exclusions so
+        # consumers don't have to dig into engines.* to understand the gap.
+        _clamav_v1 = v1.get('clamav', {})
+        if isinstance(_clamav_v1, dict) and _clamav_v1.get('status') in (
+            'unavailable', 'skipped', 'error',
+        ):
+            _scan_excl.setdefault('clamav', _clamav_v1['status'])
+        if _scan_excl:
+            _scan['exclusions'] = _scan_excl
+        v2['scan'] = _scan
 
         # verdict  (scoring/labels populated in a later iteration)
         v2['verdict'] = {
@@ -5060,7 +5133,8 @@ class InspectorDaemon:
                                 file_desc: 'str | None' = None,
                                 rtf_eval: bool = False,
                                 custom_passwords: 'list | None' = None,
-                                types_to_run: 'list | None' = None) -> PartialReport:
+                                types_to_run: 'list | None' = None,
+                                force_analyzers: 'frozenset | None' = None) -> PartialReport:
         """Run analyzers in parallel and return a populated :class:`PartialReport`.
 
         Dispatches each applicable analyzer to the thread-pool executor as
@@ -5167,7 +5241,11 @@ class InspectorDaemon:
                 ))
             elif t == 'image' and 'image' in enabled:
                 tasks.append(asyncio.create_task(
-                    _run('image', self.analyze_image, data, filename)
+                    _run('image',
+                         __import__('functools').partial(
+                             self.analyze_image, s=s,
+                             force_analyzers=force_analyzers or frozenset()),
+                         data, filename)
                 ))
             elif t == 'archive' and 'archive' in enabled:
                 tasks.append(asyncio.create_task(
@@ -5304,7 +5382,8 @@ class InspectorDaemon:
                            file_desc: 'str | None' = None,
                            rtf_eval: bool = False,
                            custom_passwords: 'list | None' = None,
-                           types_to_run: 'list | None' = None) -> dict:
+                           types_to_run: 'list | None' = None,
+                           force_analyzers: 'frozenset | None' = None) -> dict:
         """Run :meth:`analyze_pipeline` and cache the final report.
 
         Drives the parallel analyzer pipeline via :meth:`analyze_pipeline`,
@@ -5329,6 +5408,7 @@ class InspectorDaemon:
         partial = await self.analyze_pipeline(
             s, filename, data, file_mime,
             file_desc, rtf_eval, custom_passwords, types_to_run,
+            force_analyzers,
         )
         report = partial.report
         _elapsed = time.monotonic() - _t0
@@ -5678,6 +5758,11 @@ class InspectorDaemon:
         try:
             timeout  = float(request.query.get('timeout', 10))
             rtf_eval = request.query.get('rtf', 'false').lower() == 'true'
+            _fa_param = request.query.get('force_analyzers', '')
+            force_analyzers: 'frozenset | None' = (
+                frozenset(a.strip() for a in _fa_param.split(',') if a.strip())
+                if _fa_param else None
+            )
 
             content_type = request.headers.get('Content-Type', '')
             filedata:           'bytes | None' = None
@@ -5806,6 +5891,7 @@ class InspectorDaemon:
                     self.analyze_task(
                         s, file_hash, filename, filedata, file_mime,
                         file_desc, rtf_eval, custom_passwords, list(types_to_run),
+                        force_analyzers,
                     )
                 )
                 self.tasks[file_hash] = task

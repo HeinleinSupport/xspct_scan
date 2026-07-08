@@ -210,6 +210,9 @@ Key settings:
 | `xspct_password_file` | | Path to wordlist for decrypting encrypted files |
 | `xspct_analyzers` | _(all enabled)_ | Per-analyzer enable/disable + options |
 | `xspct_analyzers.javascript.quickjs` | `false` | Enable QuickJS sandbox emulation for JS |
+| `xspct_analyzers.image.ocr_max_bytes` | `2097152` | Skip OCR for images larger than this (bytes). `0` = disabled. |
+| `xspct_analyzers.image.ocr_max_pixels` | `4000000` | Skip OCR when `W×H` exceeds this (pixels). `0` = disabled. |
+| `xspct_analyzers.image.ocr_skip_camera` | `true` | Skip OCR when EXIF Make/Model tag present (camera shot) |
 | `xspct_include_text_preview` | `true` | Include `text_preview` segments (`[{source, text}]`) in reports |
 | `xspct_include_text_full` | `false` | Include `text_full` segments (`[{source, text}]`) at full length |
 | `xspct_text_preview_length` | `2000` | Max characters per `text_preview` segment |
@@ -258,8 +261,9 @@ Example response (schema v2.0 — omit-empty, grouped):
 ```json
 {
   "schema_version": "2.0",
-  "engine":  { "name": "xspct-scan", "version": "0.4.0" },
-  "file":    { "name": "malware.xlsm", "sha256": "sha256...", "size": 48291,
+  "engine":  { "name": "xspct-scan", "version": "0.5.0" },
+  "file":    { "name": "malware.xlsm", "sha256": "sha256...", "sha1": "sha1...",
+               "rspamd_digest": "blake2b...", "size": 48291,
                "mime": "application/vnd.openxmlformats-officedocument...",
                "magic": "Microsoft Word 2007+", "type": "office" },
   "scan":    { "status": "finished", "duration_s": 0.18, "cache_hit": false,
@@ -381,6 +385,30 @@ WebP, ICO) and images embedded in PDFs, OOXML, and ODF documents are analysed:
 2. **QR / barcode decode** — pyzbar decodes QR codes and 1-D barcodes;
    decoded payloads are surfaced in `qr_codes` and as `image-qr` text
    segments, also feeding IOC extraction.
+
+### OCR exclusion gates
+
+Large natural-photo images (camera JPEGs, scanned outdoor photos) can take
+minutes in OCR and yield no useful output. Three configurable gates skip OCR
+automatically:
+
+| Config key | Default | Trigger condition |
+|---|---|---|
+| `ocr_max_bytes` | 2 MiB | Raw file size exceeds threshold |
+| `ocr_max_pixels` | 4 MP (2000×2000) | `width × height` exceeds threshold |
+| `ocr_skip_camera` | `true` | EXIF `Make` or `Model` tag present |
+
+When a gate fires the reason appears in `scan.exclusions.image.ocr`. Set any
+threshold to `0` to disable that gate. Override gates for a single scan:
+
+```bash
+# API — query parameter
+curl -F "doc=@photo.jpg" 'http://localhost:8080/v1/scan?force_analyzers=image.ocr'
+
+# CLI
+xspct-scan-client --force-ocr photo.jpg
+xspct-scan-client --force-analyzers image.ocr photo.jpg
+```
 
 ### System dependencies
 
