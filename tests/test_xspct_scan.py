@@ -1916,6 +1916,49 @@ class TestTextExtractorRtf:
 # ===========================================================================
 # UNIT TESTS — load_config
 # ===========================================================================
+# UNIT TESTS — Rspamd digest
+# ===========================================================================
+
+class TestRspamdDigest:
+
+    def test_key_is_64_bytes(self):
+        """The Rspamd key is BLAKE2b-512 of b'rspamd' = 64 bytes."""
+        import hashlib
+        assert len(hashlib.blake2b(b'rspamd').digest()) == 64
+
+    def test_digest_length(self):
+        """Result is always 128 hex chars (64 bytes = BLAKE2b-512)."""
+        assert len(xspct._rspamd_digest(b'')) == 128
+        assert len(xspct._rspamd_digest(b'hello')) == 128
+
+    def test_digest_deterministic(self):
+        data = b'test attachment content'
+        assert xspct._rspamd_digest(data) == xspct._rspamd_digest(data)
+
+    def test_digest_differs_from_plain_blake2b(self):
+        import hashlib
+        data = b'some data'
+        plain = hashlib.blake2b(data).hexdigest()
+        keyed = xspct._rspamd_digest(data)
+        assert plain != keyed  # keyed != unkeyed
+
+    def test_digest_in_file_section(self):
+        """Finished v2 report contains a non-empty rspamd_digest in file section."""
+        d = xspct.InspectorDaemon()
+        v1 = d._make_base_report('test.pdf', 'a' * 64, 'application/pdf', 'PDF')
+        v1['detected_type'] = 'pdf'
+        v1['text_preview'] = []
+        v1['text_full'] = []
+        rdigest = xspct._rspamd_digest(PDF_CLEAN)
+        v2 = d._to_v2_report(v1, 'test.pdf', len(PDF_CLEAN),
+                              sha1='deadbeef', rspamd_digest=rdigest)
+        assert v2['file']['rspamd_digest'] == rdigest
+        assert len(v2['file']['rspamd_digest']) == 128
+
+
+# ===========================================================================
+# UNIT TESTS — load_config
+# ===========================================================================
 
 class TestLoadConfig:
 

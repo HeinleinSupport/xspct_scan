@@ -42,6 +42,25 @@ from aiohttp import web
 _REPORT_SCHEMA_VERSION = '2.0'
 _ENGINE_VERSION = '0.5.0'
 
+# Rspamd-compatible attachment digest key.
+# Rspamd computes keyed BLAKE2b-512 over decoded MIME-part content, keyed
+# with the 64-byte BLAKE2b hash of the literal string b"rspamd".
+# (see rspamd/src/libmime/mime_parser.c, Blake2b applied to string 'rspamd')
+_RSPAMD_BLAKE2_KEY = hashlib.blake2b(b'rspamd').digest()  # 64 bytes, computed once
+
+
+def _rspamd_digest(data: bytes) -> str:
+    """Return the Rspamd-compatible keyed BLAKE2b-512 digest of *data*.
+
+    This matches the ``part->digest`` value Rspamd stores for every decoded
+    MIME part, enabling direct correlation between Rspamd scan tasks and
+    xspct-scan reports.
+
+    Returns:
+        128-character lowercase hex string.
+    """
+    return hashlib.blake2b(data, key=_RSPAMD_BLAKE2_KEY).hexdigest()
+
 
 def _normalize_pdf_date(date_str: str) -> 'str | None':
     """Convert a PDF date string to ISO-8601.
@@ -790,14 +809,15 @@ if HAS_PYDANTIC:
         version: str
 
     class _V2File(_pydantic.BaseModel):
-        name:       str
-        sha256:     str
-        sha1:       str
-        size:       int
-        mime:       Optional[str] = None
-        magic:      Optional[str] = None
-        type:       str
-        resolution: Optional[str] = None   # 'WxH' for image/video files
+        name:           str
+        sha256:         str
+        sha1:           str
+        rspamd_digest:  str             # keyed BLAKE2b-512, Rspamd-compatible
+        size:           int
+        mime:           Optional[str] = None
+        magic:          Optional[str] = None
+        type:           str
+        resolution:     Optional[str] = None   # 'WxH' for image/video files
 
     class _V2AnalyzerInfo(_pydantic.BaseModel):
         completed: list[str] = []
@@ -2769,6 +2789,8 @@ class InspectorDaemon:
             report['archive_files'].append({
                 'name':           name,
                 'size':           len(member_data),
+                'sha256':         hashlib.sha256(member_data).hexdigest(),
+                'rspamd_digest':  _rspamd_digest(member_data),
                 'detected_type':  detected,
                 'analyzers_run':  analyzers_run,
                 'findings':       len(report['analyses']) - findings_before,
@@ -4798,7 +4820,8 @@ class InspectorDaemon:
     # ------------------------------------------------------------------
 
     def _to_v2_report(self, v1: dict, filename: str, filesize: int,
-                      sha1: 'str | None' = None) -> dict:
+                      sha1: 'str | None' = None,
+                      rspamd_digest: 'str | None' = None) -> dict:
         """Transform a finalized v1-internal report dict into the v2 schema.
 
         This is the single serialization boundary: all internal accumulation
@@ -4806,10 +4829,11 @@ class InspectorDaemon:
         :meth:`analyze_task` before caching and returning.
 
         Args:
-            v1:       Completed v1 report dict (after _finalize_text_fields).
-            filename: Original filename (URL-decoded in the output).
-            filesize: Raw byte length of the scanned file.
-            sha1:     Pre-computed SHA-1 hex digest (optional).
+            v1:             Completed v1 report dict (after _finalize_text_fields).
+            filename:       Original filename (URL-decoded in the output).
+            filesize:       Raw byte length of the scanned file.
+            sha1:           Pre-computed SHA-1 hex digest (optional).
+            rspamd_digest:  Rspamd-compatible keyed BLAKE2b-512 digest (optional).
 
         Returns:
             A v2 report dict ready for serialization and caching.
@@ -4822,13 +4846,14 @@ class InspectorDaemon:
 
         # file
         _file: dict = {
-            'name':   urllib.parse.unquote(filename or ''),
-            'sha256': v1.get('file_hash', ''),
-            'sha1':   sha1 or '',
-            'size':   filesize,
-            'mime':   v1.get('file_type') or None,
-            'magic':  v1.get('file_description') or None,
-            'type':   v1.get('detected_type') or 'unknown',
+            'name':          urllib.parse.unquote(filename or ''),
+            'sha256':        v1.get('file_hash', ''),
+            'sha1':          sha1 or '',
+            'rspamd_digest': rspamd_digest or '',
+            'size':          filesize,
+            'mime':          v1.get('file_type') or None,
+            'magic':         v1.get('file_description') or None,
+            'type':          v1.get('detected_type') or 'unknown',
         }
         # Resolution from image analysis (image_size key set by analyze_image).
         _img_size = v1.get('image_size')
@@ -5357,8 +5382,10 @@ class InspectorDaemon:
         )
 
         # Transform v1 internal report → v2 output schema before caching.
-        _sha1 = hashlib.sha1(data).hexdigest()  # noqa: S324  (non-security use)
-        v2_report = self._to_v2_report(report, filename, len(data), sha1=_sha1)
+        _sha1   = hashlib.sha1(data).hexdigest()        # noqa: S324  (non-security use)
+        _rdigest = _rspamd_digest(data)
+        v2_report = self._to_v2_report(report, filename, len(data),
+                                        sha1=_sha1, rspamd_digest=_rdigest)
         v2_report['status'] = 'finished'
         await self.cache_report(s, file_hash, v2_report)
         return v2_report
