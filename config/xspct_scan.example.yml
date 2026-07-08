@@ -82,9 +82,13 @@ xspct_analyzers:
   image:
     enabled: true
     # --- OCR exclusion gates (0 = disabled; override per-request with ?force_analyzers=image.ocr) ---
-    ocr_max_bytes:   2097152    # skip OCR for files > 2 MB (camera JPEGs are 3–15 MB)
-    ocr_max_pixels:  4000000    # skip OCR for images > 4 megapixels (2000×2000)
-    ocr_skip_camera: true       # skip OCR when EXIF Make/Model tag is present (camera shot)
+    ocr_max_bytes:    2097152    # skip OCR for files > 2 MB (camera JPEGs are 3–15 MB)
+    ocr_max_pixels:   4000000    # skip OCR for images > 4 megapixels (2000×2000)
+    ocr_skip_camera:  true       # skip OCR when EXIF Make/Model tag is present (camera shot)
+    # When false (default), raw byte-level text extraction is disabled for image files.
+    # This prevents EXIF/XMP namespace URIs and binary noise from feeding IOC extractors.
+    # Enable only if you specifically need text content from JPEG/PNG binary streams.
+    raw_text_fallback: false
   archive:    {enabled: true}
   iocs:       {enabled: true}
   javascript: {enabled: true, quickjs: false}  # set quickjs: true to enable sandboxed JS emulation

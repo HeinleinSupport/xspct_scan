@@ -396,6 +396,10 @@ config: dict = {
             'ocr_max_bytes':      2 * 1024 * 1024,   # skip OCR when file > 2 MB (camera JPEGs)
             'ocr_max_pixels':     4_000_000,           # skip OCR when W×H > 4 MP
             'ocr_skip_camera':    True,               # skip OCR when EXIF Make/Model present
+            # When False (default), raw byte-level text extraction is skipped for
+            # image files, preventing EXIF/XMP namespace fragments from feeding
+            # the IOC extractors and producing noisy results.
+            'raw_text_fallback':  False,
         },
         'archive':    {'enabled': True},
         'iocs':       {'enabled': True},
@@ -442,6 +446,7 @@ config: dict = {
         'dublincore.org',
         'xmlsoap.org',
         'ns.adobe.com',
+        'ns.google.com',       # XMP/EXIF namespace URIs embedded in JPEG/image metadata
         'creativecommons.org',
         'opengis.net',
         'xhtml1-transitional.dtd',
@@ -849,7 +854,8 @@ if HAS_PYDANTIC:
     class _V2IocEntry(_pydantic.BaseModel):
         value:      str
         source:     str
-        confidence: str            # 'high' | 'medium' | 'low'
+        module:     Optional[str] = None   # 'regex' | 'iocsearcher'
+        confidence: str                    # 'high' | 'medium' | 'low'
         defanged:   Optional[str] = None
         context:    Optional[str] = None
 
@@ -4718,7 +4724,12 @@ class InspectorDaemon:
         if (HAS_OCR or HAS_PYZBAR) and self._is_odf(data, file_mime, filename):
             self._extract_odf_images(s, data, report)
         # Ensure at least one text segment exists (unknown/empty extractions).
-        if not report.get('text_segments'):
+        # Skip for image files when raw_text_fallback is disabled (default) to
+        # prevent EXIF/XMP fragments from feeding the IOC extractors.
+        _img_raw_fb = config.get('xspct_analyzers', {}).get('image', {}).get('raw_text_fallback', False)
+        if not report.get('text_segments') and not (
+            report.get('detected_type') == 'image' and not _img_raw_fb
+        ):
             self._add_text_segment(
                 report, report.get('detected_type') or 'raw',
                 self.extract_text_preview(data, file_mime, _text_max),
@@ -4980,44 +4991,53 @@ class InspectorDaemon:
             flags['decryption_password'] = v1['decryption_password']
         v2['flags'] = flags
 
-        # iocs — rich {value, source, confidence} objects, deduped
+        # iocs — rich {value, source, module, confidence} objects, deduped
         v2_iocs: dict = {}
         basic = v1.get('iocs', {})
         ext   = v1.get('iocs_extended', {})
 
+        # If all text segments came from the raw-bytes fallback (module='builtin')
+        # iocsearcher results are less reliable — downgrade confidence to medium.
+        _text_segs = v1.get('text_preview', []) or []
+        _has_reliable_text = any(seg.get('module') != 'builtin' for seg in _text_segs)
+        _ext_conf = 'high' if _has_reliable_text else 'medium'
+
         def _append_unique(bucket: list, value: str, source: str,
-                           confidence: str) -> None:
+                           confidence: str, module: str = '') -> None:
             if not any(e['value'] == value for e in bucket):
-                bucket.append({'value': value, 'source': source,
-                                'confidence': confidence})
+                entry: dict = {'value': value, 'source': source, 'confidence': confidence}
+                if module:
+                    entry['module'] = module
+                bucket.append(entry)
 
         urls: list = []
         for u in basic.get('urls', []):
-            _append_unique(urls, u, 'scanner', 'high')
+            _append_unique(urls, u, 'scanner', 'high', module='regex')
         for u in ext.get('url', []):
             if not any(e['value'] == u for e in urls):
-                _append_unique(urls, u, 'iocsearcher', 'high')
+                _append_unique(urls, u, 'iocsearcher', _ext_conf, module='iocsearcher')
         if urls:
             v2_iocs['urls'] = urls
 
         domains: list = []
         for d in basic.get('domains', []):
-            _append_unique(domains, d, 'scanner', 'medium')
+            _append_unique(domains, d, 'scanner', 'medium', module='regex')
         for d in ext.get('fqdn', []):
             existing = next((e for e in domains if e['value'] == d), None)
             if existing:
-                existing['confidence'] = 'high'
-                existing['source'] = 'iocsearcher'
+                existing['confidence'] = _ext_conf
+                existing['source']     = 'iocsearcher'
+                existing['module']     = 'iocsearcher'
             else:
-                _append_unique(domains, d, 'iocsearcher', 'high')
+                _append_unique(domains, d, 'iocsearcher', _ext_conf, module='iocsearcher')
         if domains:
             v2_iocs['domains'] = domains
 
         ips: list = []
         for ip in basic.get('ips', []):
-            _append_unique(ips, ip, 'scanner', 'high')
+            _append_unique(ips, ip, 'scanner', 'high', module='regex')
         for ip in ext.get('ip', []) + ext.get('ipv6', []):
-            _append_unique(ips, ip, 'iocsearcher', 'high')
+            _append_unique(ips, ip, 'iocsearcher', _ext_conf, module='iocsearcher')
         if ips:
             v2_iocs['ips'] = ips
 
@@ -5029,7 +5049,7 @@ class InspectorDaemon:
         for ext_type, v2_type in _ext_type_map:
             for val in ext.get(ext_type, []):
                 bucket = v2_iocs.setdefault(v2_type, [])
-                _append_unique(bucket, val, 'iocsearcher', 'high')
+                _append_unique(bucket, val, 'iocsearcher', _ext_conf, module='iocsearcher')
 
         v2['iocs'] = v2_iocs
 
@@ -5281,16 +5301,15 @@ class InspectorDaemon:
             )
         # Fallback: if no analyzer produced text (unknown/text types, or a
         # document with no extractable text layer), extract byte-level text.
-        if not report.get('text_segments'):
+        # Skip for image files when raw_text_fallback is disabled (default) to
+        # prevent EXIF/XMP fragments from feeding the IOC extractors.
+        _img_raw_fb = config.get('xspct_analyzers', {}).get('image', {}).get('raw_text_fallback', False)
+        _detected_fb = self.get_detected_type(file_mime, file_desc, filename, data) or 'raw'
+        if not report.get('text_segments') and not (_detected_fb == 'image' and not _img_raw_fb):
             _fallback = await loop.run_in_executor(
                 self._executor, self.extract_text_preview, data, file_mime, _text_max
             )
-            self._add_text_segment(
-                report,
-                self.get_detected_type(file_mime, file_desc, filename, data) or 'raw',
-                _fallback,
-                module='builtin',
-            )
+            self._add_text_segment(report, _detected_fb, _fallback, module='builtin')
 
         # --- Group 2: iocsearcher over ALL accumulated text ---
         # For HTML files we pass the raw decoded source rather than the

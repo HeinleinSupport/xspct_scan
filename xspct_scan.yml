@@ -84,6 +84,7 @@ xspct_analyzers:
     ocr_max_bytes:   2097152    # skip OCR for images > 2 MB (camera photos)
     ocr_max_pixels:  4000000    # skip OCR for images > 4 megapixels
     ocr_skip_camera: true       # skip OCR when EXIF Make/Model detected
+    raw_text_fallback: false    # skip raw byte-level text for images (prevents EXIF/XMP IOC noise)
   archive:    {enabled: true}
   iocs:       {enabled: true}
   javascript: {enabled: true, quickjs: false}  # set quickjs: true to enable sandboxed JS emulation
