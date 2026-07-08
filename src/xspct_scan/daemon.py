@@ -776,6 +776,7 @@ if HAS_PYDANTIC:
 
     class _TextSegment(_pydantic.BaseModel):
         source: str
+        module: Optional[str] = None
         text:   str
 
     class _MetaInfo(_pydantic.BaseModel):
@@ -789,12 +790,14 @@ if HAS_PYDANTIC:
         version: str
 
     class _V2File(_pydantic.BaseModel):
-        name:  str
-        sha256: str
-        size:  int
-        mime:  Optional[str] = None
-        magic: Optional[str] = None
-        type:  str
+        name:       str
+        sha256:     str
+        sha1:       str
+        size:       int
+        mime:       Optional[str] = None
+        magic:      Optional[str] = None
+        type:       str
+        resolution: Optional[str] = None   # 'WxH' for image/video files
 
     class _V2AnalyzerInfo(_pydantic.BaseModel):
         completed: list[str] = []
@@ -2419,6 +2422,8 @@ class InspectorDaemon:
         if HAS_OCR or HAS_PYZBAR:
             try:
                 img = _PILImage.open(io.BytesIO(image_data))
+                # Store pixel dimensions for the file section.
+                result['image_size'] = f'{img.width}x{img.height}'
             except Exception as exc:
                 logger.debug('PIL cannot open image (%s): %s', label, exc)
                 return result
@@ -2434,7 +2439,7 @@ class InspectorDaemon:
                         value = repr(sym.data)
                     if value:
                         result['qr_codes'].append(value)
-                        self._add_text_segment(result, 'image-qr', value)
+                        self._add_text_segment(result, 'image-qr', value, module='pyzbar')
                         result['analyses'].append({
                             'type': 'QRCode',
                             'keyword': sym.type,
@@ -2582,7 +2587,8 @@ class InspectorDaemon:
                 logger.debug('%s OCR timings (%s): %s', s, label, _timing_str or 'none')
                 # Expose OCR text as a text segment for report-level text fields.
                 for _e in _ocr_texts:
-                    self._add_text_segment(result, 'image-ocr', _e.get('text', ''))
+                    self._add_text_segment(result, 'image-ocr', _e.get('text', ''),
+                                           module=_e.get('engine'))
                 # Extract IOCs from all engine results combined.
                 _all_ocr_text = '\n'.join(e['text'] for e in _ocr_texts)
                 if _all_ocr_text:
@@ -2928,7 +2934,7 @@ class InspectorDaemon:
             'analyses':     [],
             'iocs':         self.extract_iocs(data),
         }
-        self._add_text_segment(report, 'text', text[:text_max])
+        self._add_text_segment(report, 'text', text[:text_max], module='builtin')
         logger.debug('analyze_text: %s — %d chars', filename, len(text))
         return report
 
@@ -3000,7 +3006,8 @@ class InspectorDaemon:
             report['iocs'][k] = sorted(set(report['iocs'][k] + body_iocs[k]))
         _text_max = int(config.get('xspct_text_max_length', 50000))
         self._add_text_segment(
-            report, 'pdf', self.extract_text_preview(data, 'application/pdf', _text_max)
+            report, 'pdf', self.extract_text_preview(data, 'application/pdf', _text_max),
+            module='pymupdf',
         )
         # OCR text from embedded images is added as segments during
         # _analyze_pdf_pymupdf via _merge_image_result.
@@ -3653,7 +3660,8 @@ class InspectorDaemon:
                     logger.debug('HTML inline image %d decode failed: %s', i + 1, exc)
         _text_max = int(config.get('xspct_text_max_length', 50000))
         self._add_text_segment(
-            report, 'html', self.extract_text_preview(data, 'text/html', _text_max)
+            report, 'html', self.extract_text_preview(data, 'text/html', _text_max),
+            module='builtin',
         )
         return report
 
@@ -3931,14 +3939,18 @@ class InspectorDaemon:
             elif key == 'text_segments':
                 for seg in (value or []):
                     if isinstance(seg, dict):
-                        self._add_text_segment(target, seg.get('source', ''), seg.get('text', ''))
+                        self._add_text_segment(target, seg.get('source', ''),
+                                               seg.get('text', ''),
+                                               module=seg.get('module'))
             elif key == 'text_full':
                 # Finalized sub-reports (e.g. archive members) expose text as a
                 # list of {source, text}; fold it back into the accumulator so
                 # the parent's text_preview/text_full include the member text.
                 for seg in (value or []):
                     if isinstance(seg, dict):
-                        self._add_text_segment(target, seg.get('source', ''), seg.get('text', ''))
+                        self._add_text_segment(target, seg.get('source', ''),
+                                               seg.get('text', ''),
+                                               module=seg.get('module'))
             elif key == 'text_preview':
                 continue  # derived from text_segments; never merged directly
             elif key in ('has_macro', 'has_javascript', 'has_openaction',
@@ -4098,7 +4110,8 @@ class InspectorDaemon:
                         report['iocs'][k] = sorted(
                             set(report['iocs'][k] + iocs[k])
                         )
-                    self._add_text_segment(report, 'odf', body_text)
+                    self._add_text_segment(report, 'odf', body_text,
+                                           module='odfdo')
 
             except Exception as exc:
                 logger.error('%s - odfdo parsing error for %s: %s', s, filename, exc)
@@ -4138,7 +4151,8 @@ class InspectorDaemon:
                                 set(report['iocs'][k] + iocs[k])
                             )
                         self._add_text_segment(
-                            report, 'odf', plain.decode('utf-8', 'ignore')
+                            report, 'odf', plain.decode('utf-8', 'ignore'),
+                            module='zip-xml',
                         )
                     except Exception as exc:
                         logger.debug('%s - ODF content.xml text error: %s', s, exc)
@@ -4218,7 +4232,8 @@ class InspectorDaemon:
                             continue
                     if macro_text_parts:
                         macro_combined = '\n'.join(macro_text_parts)
-                        self._add_text_segment(report, 'odf-macro', macro_combined)
+                        self._add_text_segment(report, 'odf-macro', macro_combined,
+                                               module='oletools')
                         macro_iocs = self.extract_iocs(
                             macro_combined.encode('utf-8', 'ignore')
                         )
@@ -4459,6 +4474,7 @@ class InspectorDaemon:
             self._add_text_segment(
                 office_report, 'office',
                 self.extract_text_preview(effective, file_mime, _office_text_max),
+                module='oletools',
             )
             # Full VBA/XLM macro source as a text segment (IOC-scanned + reported).
             try:
@@ -4466,7 +4482,8 @@ class InspectorDaemon:
                     code for (_fn, _sp, _vf, code) in vba_parser.extract_all_macros()
                     if code
                 )
-                self._add_text_segment(office_report, 'office-macro', _macro_src)
+                self._add_text_segment(office_report, 'office-macro', _macro_src,
+                                       module='oletools')
             except Exception:
                 pass
 
@@ -4506,6 +4523,7 @@ class InspectorDaemon:
                     effective, file_mime,
                     int(config.get('xspct_text_max_length', 50000)),
                 ),
+                module='oletools',
             )
         finally:
             if vba_parser is not None:
@@ -4621,6 +4639,7 @@ class InspectorDaemon:
             self._add_text_segment(
                 report, report.get('detected_type') or 'raw',
                 self.extract_text_preview(data, file_mime, _text_max),
+                module='builtin',
             )
         # YARA — always scan raw bytes when rules are loaded, regardless of file type
         _yara_ok = (
@@ -4700,12 +4719,13 @@ class InspectorDaemon:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _add_text_segment(report: dict, source: str, text: 'str | None') -> None:
+    def _add_text_segment(report: dict, source: str, text: 'str | None',
+                          module: 'str | None' = None) -> None:
         """Append an extracted-text segment to *report* (deduplicated).
 
         Segments accumulate under the internal ``text_segments`` key. The
         pipeline later derives ``text_preview`` and ``text_full`` (both
-        lists of ``{source, text}``) from them via
+        lists of ``{source, module?, text}``) from them via
         :meth:`_finalize_text_fields`, and feeds the aggregated text to the
         IOC catchers.  Empty/whitespace-only text is ignored.
         """
@@ -4718,7 +4738,10 @@ class InspectorDaemon:
         for seg in segs:
             if seg.get('source') == source and seg.get('text') == text:
                 return
-        segs.append({'source': source, 'text': text})
+        seg: dict = {'source': source, 'text': text}
+        if module:
+            seg['module'] = module
+        segs.append(seg)
 
     @staticmethod
     def _aggregate_text(report: dict) -> str:
@@ -4738,12 +4761,17 @@ class InspectorDaemon:
         segs = report.pop('text_segments', None) or []
         preview_limit = int(config.get('xspct_text_preview_length', 2000))
         text_max = int(config.get('xspct_text_max_length', 50000))
+        def _seg_out(seg: dict, limit: int) -> dict:
+            out = {'source': seg['source'], 'text': seg['text'][:limit]}
+            if seg.get('module'):
+                out['module'] = seg['module']
+            return out
         report['text_preview'] = [
-            {'source': seg['source'], 'text': seg['text'][:preview_limit]}
+            _seg_out(seg, preview_limit)
             for seg in segs if seg.get('text')
         ]
         report['text_full'] = [
-            {'source': seg['source'], 'text': seg['text'][:text_max]}
+            _seg_out(seg, text_max)
             for seg in segs if seg.get('text')
         ]
 
@@ -4762,13 +4790,15 @@ class InspectorDaemon:
                 set(report['iocs'].get(k, []) + _img_iocs.get(k, []))
             )
         for seg in img_result.get('text_segments', []):
-            self._add_text_segment(report, source, seg.get('text', ''))
+            self._add_text_segment(report, source, seg.get('text', ''),
+                                   module=seg.get('module'))
 
     # ------------------------------------------------------------------
     # v2 report transformer
     # ------------------------------------------------------------------
 
-    def _to_v2_report(self, v1: dict, filename: str, filesize: int) -> dict:
+    def _to_v2_report(self, v1: dict, filename: str, filesize: int,
+                      sha1: 'str | None' = None) -> dict:
         """Transform a finalized v1-internal report dict into the v2 schema.
 
         This is the single serialization boundary: all internal accumulation
@@ -4779,6 +4809,7 @@ class InspectorDaemon:
             v1:       Completed v1 report dict (after _finalize_text_fields).
             filename: Original filename (URL-decoded in the output).
             filesize: Raw byte length of the scanned file.
+            sha1:     Pre-computed SHA-1 hex digest (optional).
 
         Returns:
             A v2 report dict ready for serialization and caching.
@@ -4790,14 +4821,20 @@ class InspectorDaemon:
         }
 
         # file
-        v2['file'] = {
+        _file: dict = {
             'name':   urllib.parse.unquote(filename or ''),
             'sha256': v1.get('file_hash', ''),
+            'sha1':   sha1 or '',
             'size':   filesize,
             'mime':   v1.get('file_type') or None,
             'magic':  v1.get('file_description') or None,
             'type':   v1.get('detected_type') or 'unknown',
         }
+        # Resolution from image analysis (image_size key set by analyze_image).
+        _img_size = v1.get('image_size')
+        if _img_size:
+            _file['resolution'] = _img_size
+        v2['file'] = _file
 
         # scan
         analyzers: dict = {
@@ -5149,6 +5186,7 @@ class InspectorDaemon:
                 report,
                 self.get_detected_type(file_mime, file_desc, filename, data) or 'raw',
                 _fallback,
+                module='builtin',
             )
 
         # --- Group 2: iocsearcher over ALL accumulated text ---
@@ -5319,7 +5357,8 @@ class InspectorDaemon:
         )
 
         # Transform v1 internal report → v2 output schema before caching.
-        v2_report = self._to_v2_report(report, filename, len(data))
+        _sha1 = hashlib.sha1(data).hexdigest()  # noqa: S324  (non-security use)
+        v2_report = self._to_v2_report(report, filename, len(data), sha1=_sha1)
         v2_report['status'] = 'finished'
         await self.cache_report(s, file_hash, v2_report)
         return v2_report
