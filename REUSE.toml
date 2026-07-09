@@ -41,13 +41,17 @@ SPDX-License-Identifier = "EUPL-1.2"
 
 # ── Vendored public-domain PDF tools ───────────────────────────────────────
 [[annotations]]
-path = [
-    "src/xspct_scan/vendor/pdf_parser.py",
-    "src/xspct_scan/vendor/pdfid.py",
-]
+path = "src/xspct_scan/vendor/pdfid.py"
 precedence = "override"
 SPDX-FileCopyrightText = "NONE"
 SPDX-License-Identifier = "LicenseRef-Public-Domain"
+
+# pdf_parser.py embeds the LZW decoder from pdfminer (MIT).
+[[annotations]]
+path = "src/xspct_scan/vendor/pdf_parser.py"
+precedence = "override"
+SPDX-FileCopyrightText = "2004-2009 Yusuke Shinyama <yusuke at cs dot nyu dot edu>"
+SPDX-License-Identifier = "LicenseRef-Public-Domain AND MIT"
 
 # ── Generated build and cache artifacts ─────────────────────────────────────
 [[annotations]]

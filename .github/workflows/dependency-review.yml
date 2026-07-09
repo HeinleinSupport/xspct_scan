@@ -23,18 +23,25 @@ jobs:
           # Block PRs that introduce dependencies with known CVEs at these levels.
           fail-on-severity: moderate
           # Deny licenses that are incompatible with EUPL-1.2 or restrict
-          # commercial use. Adjust as required.
+          # commercial use. Only valid SPDX identifiers are accepted here;
+          # Commons-Clause and proprietary/unknown licenses have no SPDX id
+          # and cannot be matched by this list. Adjust as required.
           deny-licenses: >-
-            AGPL-1.0,
-            AGPL-3.0,
-            GPL-2.0,
-            GPL-3.0,
-            LGPL-2.0,
-            LGPL-2.1,
-            LGPL-3.0,
+            AGPL-1.0-only,
+            AGPL-1.0-or-later,
+            AGPL-3.0-only,
+            AGPL-3.0-or-later,
+            GPL-2.0-only,
+            GPL-2.0-or-later,
+            GPL-3.0-only,
+            GPL-3.0-or-later,
+            LGPL-2.0-only,
+            LGPL-2.0-or-later,
+            LGPL-2.1-only,
+            LGPL-2.1-or-later,
+            LGPL-3.0-only,
+            LGPL-3.0-or-later,
             BUSL-1.1,
-            SSPL-1.0,
-            Commons-Clause,
-            Proprietary
+            SSPL-1.0
           # Post a summary comment on the PR for visibility.
           comment-summary-in-pr: always

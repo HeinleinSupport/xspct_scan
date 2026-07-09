@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.2 — 2026-07-09
+
+### Added
+- **GitHub Actions CI** (`.github/workflows/`):
+  - `ci.yml` — three-job pipeline: lint (ruff + REUSE), test matrix
+    (Python 3.10/3.11/3.12, coverage upload to Codecov), dependency audit
+    (`pip-audit`).
+  - `codeql.yml` — weekly + on-push CodeQL analysis with `security-extended`
+    query suite covering OWASP Top 10 patterns.
+  - `dependency-review.yml` — PR-level dependency review; blocks CVEs ≥
+    moderate and licenses incompatible with EUPL-1.2.
+
+### Changed
+- `REUSE.toml` and `LICENSES/` updated to reflect new workflow files and
+  third-party license inventory.
+- `__version__` / `_ENGINE_VERSION` derive from `importlib.metadata` at
+  runtime; `pyproject.toml` is the single source of truth for the version
+  string (bumped to `0.5.2`).
+
 ## 0.5.1 — 2026-07-09
 
 ### Added
