@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: EUPL-1.2
+# SPDX-FileCopyrightText: 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
+
+name: Dependency Review
+
+on:
+  pull_request:
+
+jobs:
+  review:
+    name: Review Dependencies
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          # Block PRs that introduce dependencies with known CVEs at these levels.
+          fail-on-severity: moderate
+          # Deny licenses that are incompatible with EUPL-1.2 or restrict
+          # commercial use. Adjust as required.
+          deny-licenses: >-
+            AGPL-1.0,
+            AGPL-3.0,
+            GPL-2.0,
+            GPL-3.0,
+            LGPL-2.0,
+            LGPL-2.1,
+            LGPL-3.0,
+            BUSL-1.1,
+            SSPL-1.0,
+            Commons-Clause,
+            Proprietary
+          # Post a summary comment on the PR for visibility.
+          comment-summary-in-pr: always

@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: EUPL-1.2
+# SPDX-FileCopyrightText: 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
+
+name: CI
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install lint tools
+        run: pip install ruff reuse
+
+      - name: ruff — lint
+        run: ruff check src/ tests/
+
+      - name: ruff — format check
+        run: ruff format --check src/ tests/
+
+      - name: REUSE compliance
+        run: reuse lint
+
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # libmagic1  — required by python-magic (core dependency)
+      # libzbar0   — required by pyzbar (enrichment: QR/barcode decoding)
+      # tesseract-ocr — required by pytesseract (enrichment: OCR)
+      # p7zip-full — required by SFlock2 for 7z archive extraction
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libmagic1 libzbar0 tesseract-ocr p7zip-full
+
+      # easyocr pulls in PyTorch (~2 GB) and is excluded from CI.
+      # Tests that require it are skipped automatically via HAS_EASYOCR guards.
+      - name: Install project (without easyocr)
+        run: |
+          pip install -e ".[dev,openapi,advanced,serialization,compression]"
+          pip install Pillow pytesseract pyzbar clamd jsbeautifier
+
+      - name: Run tests
+        run: pytest --cov=xspct_scan --cov-report=xml
+
+      - name: Upload coverage report
+        if: matrix.python-version == '3.12'
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
+
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libmagic1
+
+      - name: Install project with extras
+        run: pip install -e ".[dev,openapi,advanced,serialization,compression]" pip-audit
+
+      - name: pip-audit — scan installed packages
+        run: pip-audit

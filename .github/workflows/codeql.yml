@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: EUPL-1.2
+# SPDX-FileCopyrightText: 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
+
+name: CodeQL Analysis
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+  schedule:
+    # Every Monday at 07:30 UTC
+    - cron: "30 7 * * 1"
+
+jobs:
+  analyze:
+    name: Analyze (Python)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          # security-extended covers OWASP Top 10 patterns (injection, SSRF, path
+          # traversal, insecure deserialization) in addition to the default suite.
+          queries: security-extended
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libmagic1 libzbar0 tesseract-ocr p7zip-full
+
+      # Installing the package lets CodeQL trace imports and resolve the full
+      # call graph across all analyzers and optional backends.
+      - name: Install project
+        run: |
+          pip install -e ".[openapi,advanced,serialization,compression]"
+          pip install Pillow pytesseract pyzbar clamd jsbeautifier
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"
