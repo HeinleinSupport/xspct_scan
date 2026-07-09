@@ -3,7 +3,12 @@
 
 """xspct_scan – Async HTTP daemon for scanning Office/PDF/HTML documents for malware indicators."""
 
-__version__ = "0.5.0"
-__author__  = "Carsten Rosenberg"
-__email__   = "c.rosenberg@heinlein-support.de"
+try:
+    from importlib.metadata import version as _pkg_version
+
+    __version__: str = _pkg_version("xspct-scan")
+except Exception:  # package not installed (editable install not yet synced)
+    __version__ = "unknown"
+__author__ = "Carsten Rosenberg"
+__email__ = "c.rosenberg@heinlein-support.de"
 __license__ = "EUPL-1.2"

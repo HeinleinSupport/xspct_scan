@@ -9,7 +9,7 @@ import sys
 
 from aiohttp import web
 
-from xspct_scan.daemon import config, load_config, configure_logging, make_app
+from xspct_scan.daemon import config, configure_logging, load_config, make_app
 
 try:
     import uvloop
@@ -22,34 +22,34 @@ def main() -> None:
     load_config(path)
     configure_logging()
 
-    _logger = logging.getLogger('xspct-scan')
+    _logger = logging.getLogger("xspct-scan")
 
     if uvloop is not None:
         uvloop.install()
-        _logger.info('uvloop installed')
+        _logger.info("uvloop installed")
 
     async def _run() -> None:
         app = await make_app()
-        runner = web.AppRunner(app, backlog=int(config['xspct_listen_backlog']))
+        runner = web.AppRunner(app, backlog=int(config["xspct_listen_backlog"]))
         await runner.setup()
 
-        ssl_context: 'ssl.SSLContext | None' = None
-        if config['xspct_tls']['tls_enabled']:
+        ssl_context: "ssl.SSLContext | None" = None
+        if config["xspct_tls"]["tls_enabled"]:
             ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
             ssl_context.load_cert_chain(
-                config['xspct_tls']['tls_cert'],
-                config['xspct_tls']['tls_key'],
+                config["xspct_tls"]["tls_cert"],
+                config["xspct_tls"]["tls_key"],
             )
-            _logger.info('TLS enabled')
+            _logger.info("TLS enabled")
 
-        addrs = config['xspct_listen_address']
+        addrs = config["xspct_listen_address"]
         if isinstance(addrs, str):
             addrs = [addrs]
-        port = int(config['xspct_listen_port'])
+        port = int(config["xspct_listen_port"])
         for addr in addrs:
             site = web.TCPSite(runner, addr, port, ssl_context=ssl_context)
             await site.start()
-            _logger.info('Listening on %s:%d', addr, port)
+            _logger.info("Listening on %s:%d", addr, port)
 
         try:
             while True:
@@ -65,5 +65,5 @@ def main() -> None:
         pass
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

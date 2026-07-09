@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.5.1 — 2026-07-09
+
+### Added
+- **`GET /v1/capabilities` endpoint** — exposes active analyzers, accepted MIME
+  types, file extensions, limits, and supported response formats as JSON.
+  Clients (e.g. Rspamd) can query this endpoint to build their MIME include
+  filter dynamically instead of maintaining a static list.
+  - Per-analyzer `active` flag (enabled in config **and** runtime prerequisites
+    met), `scope` (`type-routed` / `global` / `post-processing`), `mime_types`,
+    `mime_patterns`, and `extensions`.
+  - Top-level `mime_types` aggregate: `exact`, `prefixes`, `patterns`,
+    `extensions`, and `global_scanners` (active YARA / ClamAV).
+  - `ETag` (SHA-256 of the response body) with `If-None-Match` / `304 Not
+    Modified` support and `Cache-Control: max-age=60`.
+  - API-key authentication consistent with all other `/v1/` endpoints.
+  - OpenAPI 3.0 path entry at `/v1/capabilities`.
+- **`xspct-scan-client --capabilities`** — new CLI flag to query and display the
+  capabilities endpoint. `--json` outputs raw JSON; rich-formatted table view
+  when Rich is installed. Mutually exclusive with FILE arguments; `files`
+  positional changed from `nargs="+"` to `nargs="*"`.
+- **`TYPE_ROUTING` module-level constant** — unified MIME/extension routing table
+  consumed by both `get_detected_type()` and `build_capabilities()`; eliminates
+  the inline tuple literals that previously lived only inside the router method.
+- **`MAX_UPLOAD_BYTES`** (`50 MiB`) and **`DEFAULT_SCAN_TIMEOUT`** (`10 s`) —
+  module-level constants reused by `make_app()`, `handle_scan()`, and
+  `build_capabilities()`.
+- **`_engine_matrix()`** method on `InspectorDaemon` — extracted from `setup()`;
+  shared between startup logging and `build_capabilities()`.
+- **`CHANGELOG.md` symlink** at repository root pointing to `docs/changelog.md`
+  for GitHub/tooling discoverability.
+
+### Changed
+- `get_detected_type()` refactored to consume `TYPE_ROUTING`; routing behavior
+  is bit-for-bit identical (all 29 `TestGetDetectedType` cases pass unchanged).
+- `make_app()` uses `MAX_UPLOAD_BYTES` instead of an inline `50 * 1024 * 1024`.
+- `handle_scan()` uses `DEFAULT_SCAN_TIMEOUT` for the `timeout` query parameter
+  default.
+- Version string consolidated: `pyproject.toml` is now the **single source of
+  truth**. `__init__.__version__` is derived via `importlib.metadata`; daemon's
+  `_ENGINE_VERSION` is imported from `__version__`. The OpenAPI spec and legacy
+  `meta.version` field now reference `_ENGINE_VERSION` instead of hardcoded
+  strings.
+- `docs/api-http.md` (duplicate of `docs/guide/api-http.md`) removed; README
+  links updated to `docs/guide/api-http.md`.
+- README deduplicated — second full copy (stale, ~430 lines) removed.
+- Test `test_meta_always_present` assertion uses `xspct._ENGINE_VERSION` instead
+  of a hardcoded string.
+- Client subprocess tests use `sys.executable` instead of `.venv/bin/python`.
+
 ## 0.5.0 — 2026-07-07
 
 ### Added

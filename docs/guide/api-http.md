@@ -373,6 +373,102 @@ Requires `pydantic`.
 
 ---
 
+### `GET /v1/capabilities`
+
+Returns a JSON document describing which analyzers are currently active, what
+MIME types and file extensions they accept, and the effective limits.  This
+endpoint is primarily intended for Rspamd and other clients that need to
+build a dynamic MIME include filter without maintaining a static list.
+
+**Response schema**
+
+```json
+{
+  "engine": { "name": "xspct-scan", "version": "0.5.0", "schema_version": "2.0" },
+  "limits": {
+    "max_file_size": 52428800,
+    "default_timeout": 10,
+    "archive_max_depth": 2,
+    "archive_max_size": 52428800
+  },
+  "response_formats": ["json"],
+  "analyzers": {
+    "pdf":  { "active": true,  "scope": "type-routed", "detected_type": "pdf",
+              "mime_types": ["application/pdf"], "mime_patterns": [], "extensions": [".pdf"] },
+    "html": { "active": true,  "scope": "type-routed", "detected_type": "html", "...": "..." },
+    "yara": { "active": false, "scope": "global" },
+    "iocs": { "active": true,  "scope": "post-processing" }
+  },
+  "mime_types": {
+    "exact":           ["application/pdf", "application/zip", "message/rfc822"],
+    "prefixes":        ["image/", "text/"],
+    "patterns":        ["application/msword*", "application/vnd.ms-*"],
+    "extensions":      [".docx", ".pdf", ".zip"],
+    "global_scanners": ["yara"]
+  }
+}
+```
+
+**Semantics**
+
+- `analyzers.*.active` — the analyzer is both enabled in config **and** its runtime
+  prerequisites (optional Python libraries) are satisfied.
+- `analyzers.*.scope`:
+  - `type-routed` — dispatched based on the detected file type; carries
+    `mime_types`, `mime_patterns`, and `extensions`.
+  - `global` — runs on every file regardless of type (YARA, ClamAV).
+  - `post-processing` — runs on content extracted by primary analyzers (iocsearcher, JavaScript).
+- `mime_types.*` (top level) is the **union over all active type-routed analyzers** —
+  this is the list Rspamd should use as its dynamic include filter.
+- `mime_types.global_scanners` lists active `global`-scope analyzers.  A non-empty
+  list means files outside the MIME list still receive meaningful scanning.
+- The response is computed per request from the live config so it reflects
+  changes applied via `POST /v1/admin/reload`.
+
+**Caching (ETag / 304)**
+
+The response body is deterministically sorted (`sort_keys=True`) and its SHA-256
+digest is returned as an `ETag` header.  Clients can reuse the cached response
+until it changes:
+
+```bash
+# First request — save the ETag
+ETAG=$(curl -si http://localhost:8080/v1/capabilities \
+  | grep -i '^ETag:' | awk '{print $2}' | tr -d '\r')
+
+# Subsequent requests — 304 when nothing changed
+curl -si -H "If-None-Match: $ETAG" http://localhost:8080/v1/capabilities
+# HTTP/1.1 304 Not Modified
+```
+
+A `Cache-Control: max-age=60` header is also set so HTTP caches and proxies
+can hold the response for up to 60 seconds.
+
+**CLI client**
+
+```bash
+xspct-scan-client --capabilities
+xspct-scan-client --capabilities --json          # raw JSON
+xspct-scan-client --capabilities --url http://scan.internal:8080
+xspct-scan-client --capabilities --output caps.json
+```
+
+**Rspamd integration note**
+
+Fetch the capabilities at startup (and revalidate periodically via `If-None-Match`):
+
+1. Extract `mime_types.exact` and `mime_types.prefixes` to build the
+   `mime_types` include filter for the `antivirus` module.
+2. If `mime_types.global_scanners` is non-empty, files outside the MIME list
+   are also scanned — you may choose to forward all attachments.
+3. Keep a static fallback list for when the endpoint is unreachable.
+
+Note that server-side type detection also uses libmagic descriptions and
+filename extensions, so the MIME list is authoritative for client-side
+filtering but not the only routing signal inside the daemon.
+
+---
+
 ## Content negotiation
 
 All endpoints that return a scan report support three wire formats.

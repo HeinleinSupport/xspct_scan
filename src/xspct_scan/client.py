@@ -35,9 +35,9 @@ from typing import Any
 import aiohttp
 
 try:
+    from rich import box
     from rich.console import Console
     from rich.panel import Panel
-    from rich import box
 
     _console = Console()
     _err_console = Console(stderr=True)
@@ -51,6 +51,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
+
 
 def _normalize_result_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Normalize daemon responses to the flat scan-report shape.
@@ -66,6 +67,7 @@ def _normalize_result_payload(payload: dict[str, Any]) -> dict[str, Any]:
             normalized["status"] = payload["status"]
         return normalized
     return payload
+
 
 def _collect_iocs(result: dict[str, Any]) -> list[str]:
     """Collect all IOC values from a v2 report's iocs section."""
@@ -95,7 +97,9 @@ def _format_plain(result: dict[str, Any], filename: str) -> str:
         f"Type:     {_file.get('type', result.get('detected_type', '-'))}"
         f"  ({_file.get('magic', result.get('file_description', '-'))})"
     )
-    lines.append(f"Status:   {result.get('status', '-')}  ({_scan.get('duration_s', result.get('time_taken', '-'))} s)")
+    lines.append(
+        f"Status:   {result.get('status', '-')}  ({_scan.get('duration_s', result.get('time_taken', '-'))} s)"
+    )
 
     flags: list[str] = []
     if _flags_v2.get("macros", result.get("has_macro")):
@@ -105,7 +109,9 @@ def _format_plain(result: dict[str, Any], filename: str) -> str:
     if _flags_v2.get("javascript", result.get("has_javascript")):
         flags.append("javascript")
     if _flags_v2.get("decrypted", result.get("decrypted")):
-        _pw = _flags_v2.get("decryption_password") or result.get("decryption_password", "?")
+        _pw = _flags_v2.get("decryption_password") or result.get(
+            "decryption_password", "?"
+        )
         flags.append(f"decrypted(pw={_pw})")
     if flags:
         lines.append(f"Flags:    {', '.join(flags)}")
@@ -128,13 +134,21 @@ def _format_plain(result: dict[str, Any], filename: str) -> str:
         if len(all_iocs) > 20:
             lines.append(f"  … {len(all_iocs) - 20} more")
 
-    yara = (result.get("engines") or {}).get("yara", {}).get("matches") or result.get("yara_matches") or []
+    yara = (
+        (result.get("engines") or {}).get("yara", {}).get("matches")
+        or result.get("yara_matches")
+        or []
+    )
     if yara:
         names = ", ".join(m.get("rule", "?") for m in yara[:6])
         suffix = f" … +{len(yara) - 6}" if len(yara) > 6 else ""
         lines.append(f"YARA ({len(yara)}): {names}{suffix}")
 
-    archive = (result.get("engines") or {}).get("archive", {}).get("files") or result.get("archive_files") or []
+    archive = (
+        (result.get("engines") or {}).get("archive", {}).get("files")
+        or result.get("archive_files")
+        or []
+    )
     if archive:
         names = ", ".join(f.get("name", "?") for f in archive[:6])
         suffix = f" … +{len(archive) - 6}" if len(archive) > 6 else ""
@@ -175,7 +189,9 @@ def _format_rich(result: dict[str, Any], filename: str) -> None:
     if _flags_v2.get("javascript", result.get("has_javascript")):
         flags.append("[yellow]javascript[/yellow]")
     if _flags_v2.get("decrypted", result.get("decrypted")):
-        _pw = _flags_v2.get("decryption_password") or result.get("decryption_password", "?")
+        _pw = _flags_v2.get("decryption_password") or result.get(
+            "decryption_password", "?"
+        )
         flags.append(f"[green]decrypted(pw={_pw})[/green]")
     if flags:
         tbl.add_row("Flags", "  ".join(flags))
@@ -199,13 +215,21 @@ def _format_rich(result: dict[str, Any], filename: str) -> None:
         if len(all_iocs) > 15:
             tbl.add_row("", f"  … {len(all_iocs) - 15} more")
 
-    yara = (result.get("engines") or {}).get("yara", {}).get("matches") or result.get("yara_matches") or []
+    yara = (
+        (result.get("engines") or {}).get("yara", {}).get("matches")
+        or result.get("yara_matches")
+        or []
+    )
     if yara:
         names = ", ".join(m.get("rule", "?") for m in yara[:6])
         suffix = f" … +{len(yara) - 6}" if len(yara) > 6 else ""
         tbl.add_row("YARA", f"[red]{len(yara)}[/red]: {names}{suffix}")
 
-    archive = (result.get("engines") or {}).get("archive", {}).get("files") or result.get("archive_files") or []
+    archive = (
+        (result.get("engines") or {}).get("archive", {}).get("files")
+        or result.get("archive_files")
+        or []
+    )
     if archive:
         names = ", ".join(f.get("name", "?") for f in archive[:6])
         suffix = f" … +{len(archive) - 6}" if len(archive) > 6 else ""
@@ -217,6 +241,7 @@ def _format_rich(result: dict[str, Any], filename: str) -> None:
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
+
 
 async def _poll_result(
     session: aiohttp.ClientSession,
@@ -321,6 +346,7 @@ async def scan_file(
 # Output helpers
 # ---------------------------------------------------------------------------
 
+
 def _emit_result(
     result: dict[str, Any],
     filename: str,
@@ -348,7 +374,122 @@ def _print_error(msg: str) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+
+async def _fetch_capabilities(args: argparse.Namespace) -> int:
+    """Fetch ``GET /v1/capabilities`` and display or write the result."""
+    ssl_ctx: bool | ssl.SSLContext = False if args.insecure else True
+    headers: dict[str, str] = {}
+    if args.api_key:
+        headers["X-Api-Key"] = args.api_key
+
+    base_url = args.url.rstrip("/")
+    try:
+        async with aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(ssl=ssl_ctx)
+        ) as session:
+            async with session.get(
+                f"{base_url}/v1/capabilities",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 401:
+                    _print_error("Unauthorized — provide --api-key")
+                    return 1
+                if resp.status != 200:
+                    _print_error(f"HTTP {resp.status} from {base_url}/v1/capabilities")
+                    return 1
+                payload: dict[str, Any] = await resp.json(content_type=None)
+    except aiohttp.ClientConnectorError as exc:
+        _print_error(f"Cannot connect to {base_url}: {exc}")
+        return 1
+    except aiohttp.ClientError as exc:
+        _print_error(f"Request error: {exc}")
+        return 1
+
+    raw_json = json.dumps(payload, indent=2, ensure_ascii=False)
+
+    if args.output:
+        out_path = Path(args.output)
+        out_path.write_text(raw_json, encoding="utf-8")
+        if HAS_RICH and not args.no_color:
+            _console.print(f"[green]Wrote capabilities to {out_path}[/green]")
+        else:
+            print(f"Wrote capabilities to {out_path}")
+        return 0
+
+    if args.json or not HAS_RICH or args.no_color:
+        print(raw_json)
+        return 0
+
+    # Rich-formatted view
+    from rich.table import Table  # noqa: PLC0415
+
+    eng = payload.get("engine", {})
+    _console.print(
+        f"[bold cyan]xspct-scan[/bold cyan] "
+        f"[green]{eng.get('version', '?')}[/green]  "
+        f"(schema {eng.get('schema_version', '?')})"
+    )
+
+    lim = payload.get("limits", {})
+    _console.print(
+        f"  max_file_size={lim.get('max_file_size', '?')}  "
+        f"timeout={lim.get('default_timeout', '?')}s  "
+        f"archive_depth={lim.get('archive_max_depth', '?')}"
+    )
+    fmts = payload.get("response_formats", [])
+    _console.print(f"  response_formats: {', '.join(fmts)}")
+
+    tbl = Table(title="Analyzers", box=box.SIMPLE, show_header=True)
+    tbl.add_column("Analyzer", style="bold")
+    tbl.add_column("Active")
+    tbl.add_column("Scope")
+    tbl.add_column("MIME summary")
+    for name, info in sorted(payload.get("analyzers", {}).items()):
+        active = info.get("active", False)
+        active_str = "[green]yes[/green]" if active else "[red]no[/red]"
+        scope = info.get("scope", "-")
+        if scope == "type-routed":
+            mimes = info.get("mime_types", [])
+            pats = info.get("mime_patterns", [])
+            prefixes = []
+            if mimes:
+                prefixes.append(", ".join(mimes[:3]) + ("…" if len(mimes) > 3 else ""))
+            if pats:
+                prefixes.append(", ".join(pats[:2]) + ("…" if len(pats) > 2 else ""))
+            mime_summary = " | ".join(prefixes) if prefixes else "-"
+        else:
+            mime_summary = "all files"
+        tbl.add_row(name, active_str, scope, mime_summary)
+    _console.print(tbl)
+
+    mt = payload.get("mime_types", {})
+    if mt.get("exact"):
+        _console.print(
+            f"  exact MIMEs ({len(mt['exact'])}): "
+            + ", ".join(mt["exact"][:6])
+            + ("…" if len(mt["exact"]) > 6 else "")
+        )
+    if mt.get("prefixes"):
+        _console.print(f"  prefixes: {', '.join(mt['prefixes'])}")
+    if mt.get("patterns"):
+        _console.print(
+            f"  patterns: {', '.join(mt['patterns'][:6])}"
+            + ("…" if len(mt.get("patterns", [])) > 6 else "")
+        )
+    if mt.get("global_scanners"):
+        _console.print(f"  global scanners: {', '.join(mt['global_scanners'])}")
+    return 0
+
+
 async def _run(args: argparse.Namespace) -> int:
+    if args.capabilities:
+        return await _fetch_capabilities(args)
+
+    if not args.files:
+        _print_error("No files given. Provide FILE arguments or use --capabilities.")
+        return 2
+
     files = [Path(f) for f in args.files]
     missing = [f for f in files if not f.exists()]
     if missing:
@@ -359,7 +500,9 @@ async def _run(args: argparse.Namespace) -> int:
     ssl_ctx: bool | ssl.SSLContext = False if args.insecure else True
 
     results: list[dict[str, Any]] = []
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_ctx)) as session:
+    async with aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(ssl=ssl_ctx)
+    ) as session:
         tasks = [
             scan_file(
                 session=session,
@@ -404,15 +547,13 @@ def main() -> None:
         prog="xspct-scan-client",
         description="Submit files to an xspct-scan daemon for analysis.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples:\n"
-            "  xspct-scan-client invoice.pdf\n"
-            "  xspct-scan-client --url http://scan.internal:8080 --json report.zip\n"
-            "  xspct-scan-client --poll --timeout 60 large_archive.zip\n"
-            "  xspct-scan-client --api-key s3cr3t --output result.json sample.doc\n"
-        ),
     )
-    parser.add_argument("files", nargs="+", metavar="FILE", help="Files to scan")
+    parser.add_argument("files", nargs="*", metavar="FILE", help="Files to scan")
+    parser.add_argument(
+        "--capabilities",
+        action="store_true",
+        help="Fetch GET /v1/capabilities and display the active analyzer/MIME overview",
+    )
     parser.add_argument(
         "--url",
         default="http://localhost:8080",
@@ -495,7 +636,20 @@ def main() -> None:
         help="Skip TLS certificate verification",
     )
 
+    parser.epilog = (
+        "Examples:\n"
+        "  xspct-scan-client invoice.pdf\n"
+        "  xspct-scan-client --url http://scan.internal:8080 --json report.zip\n"
+        "  xspct-scan-client --poll --timeout 60 large_archive.zip\n"
+        "  xspct-scan-client --api-key s3cr3t --output result.json sample.doc\n"
+        "  xspct-scan-client --capabilities --url http://scan.internal:8080\n"
+    )
+
     args = parser.parse_args()
+    if args.capabilities and args.files:
+        parser.error("--capabilities cannot be combined with FILE arguments")
+    if not args.capabilities and not args.files:
+        parser.error("provide FILE arguments to scan, or use --capabilities")
     sys.exit(asyncio.run(_run(args)))
 
 
