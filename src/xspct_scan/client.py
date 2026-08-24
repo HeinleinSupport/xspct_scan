@@ -13,7 +13,6 @@ Options::
     --api-key KEY       X-Api-Key header value for authenticated daemons
     --timeout SECS      Analysis timeout in seconds passed to the daemon (default: 30)
     --passwords LIST    Comma-separated passwords to try for encrypted files
-    --rtf               Enable RTF object extraction (passes ?rtf=true)
     --invalidate-cache  Delete the daemon's cached report and force a full rescan
     --poll              Poll /v1/query after a 202 response until the result is ready
     --poll-interval N   Seconds between poll attempts (default: 2)
@@ -286,7 +285,6 @@ async def scan_file(
     base_url: str,
     timeout: int,
     passwords: str | None,
-    rtf: bool,
     api_key: str | None,
     poll: bool,
     poll_interval: float,
@@ -309,8 +307,6 @@ async def scan_file(
         headers["X-Api-Key"] = api_key
 
     params: dict[str, str] = {"timeout": str(timeout)}
-    if rtf:
-        params["rtf"] = "true"
     if invalidate_cache:
         params["invalidate_cache"] = "true"
 
@@ -563,7 +559,6 @@ async def _run(args: argparse.Namespace) -> int:
                 base_url=args.url.rstrip("/"),
                 timeout=args.timeout,
                 passwords=args.passwords,
-                rtf=args.rtf,
                 api_key=args.api_key,
                 poll=args.poll,
                 poll_interval=args.poll_interval,
@@ -636,11 +631,6 @@ def main() -> None:
         metavar="LIST",
         default=None,
         help="Comma-separated passwords to try for encrypted files",
-    )
-    parser.add_argument(
-        "--rtf",
-        action="store_true",
-        help="Enable RTF object extraction",
     )
     parser.add_argument(
         "--force-analyzers",

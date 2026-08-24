@@ -38,7 +38,7 @@ Coverage:
     - GET /metrics (Prometheus text, counter increments after scan)
     - POST /scan: missing doc → 400
     - POST /scan: clean PDF, malicious PDF, password-protected PDF, malicious HTML, OOXML, real OLE, real RTF
-    - POST /scan: file_mime override, custom passwords field, rtf=true flag
+    - POST /scan: file_mime override, custom passwords field
     - POST /scan: same file twice returns same hash
     - POST /scan: very short timeout may return 202 (background processing)
     - POST /scan: application/octet-stream raw upload (200, hash equality, 415 for other types)
@@ -959,7 +959,7 @@ class TestSyncAnalyze:
     def test_real_rtf_analyzed(self, daemon):
         with open(RTF_FILE, "rb") as f:
             data = f.read()
-        r = daemon.sync_analyze("<t>", "sample.rtf", data, "text/rtf", rtf_eval=True)
+        r = daemon.sync_analyze("<t>", "sample.rtf", data, "text/rtf")
         assert "file_hash" in r
         assert r["detected_type"] != ""
 
@@ -1134,10 +1134,6 @@ class TestScanEndpoint:
         body = await r.json()
         assert "file_hash" in body or "status" in body
 
-    async def test_scan_rtf_flag_accepted(self, client):
-        r = await client.post("/v1/scan?rtf=true", data=_form(PDF_CLEAN, "test.pdf"))
-        assert r.status == 200
-
     @pytest.mark.skipif(not os.path.exists(OLE_FILE), reason="OLE sample not present")
     async def test_scan_real_ole_analysis(self, client):
         with open(OLE_FILE, "rb") as f:
@@ -1184,7 +1180,7 @@ class TestScanEndpoint:
     async def test_scan_real_rtf(self, client):
         with open(RTF_FILE, "rb") as f:
             data = f.read()
-        r = await client.post("/v1/scan?rtf=true", data=_form(data, "sample.rtf"))
+        r = await client.post("/v1/scan", data=_form(data, "sample.rtf"))
         assert r.status == 200
         body = await r.json()
         assert "schema_version" in body
@@ -2133,7 +2129,6 @@ class TestClientPolling:
             base_url="http://localhost:8080",
             timeout=1,
             passwords=None,
-            rtf=False,
             api_key=None,
             poll=True,
             poll_interval=0,
@@ -2163,7 +2158,6 @@ class TestClientMultipartShape:
             base_url="http://localhost:8080",
             timeout=1,
             passwords="pw1,pw2",
-            rtf=False,
             api_key=None,
             poll=False,
             poll_interval=0,
@@ -2199,7 +2193,6 @@ class TestClientMultipartShape:
             base_url="http://localhost:8080",
             timeout=1,
             passwords="pw1,pw2",
-            rtf=False,
             api_key=None,
             poll=False,
             poll_interval=0,

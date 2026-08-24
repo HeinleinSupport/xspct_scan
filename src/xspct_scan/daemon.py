@@ -1341,12 +1341,6 @@ if HAS_PYDANTIC:
                             },
                             {
                                 "in": "query",
-                                "name": "rtf",
-                                "schema": {"type": "boolean", "default": False},
-                                "description": "Enable RTF object extraction",
-                            },
-                            {
-                                "in": "query",
                                 "name": "filename",
                                 "schema": {"type": "string"},
                                 "description": "Filename hint (octet-stream only)",
@@ -6678,7 +6672,6 @@ class InspectorDaemon:
         filename: str,
         data: bytes,
         file_mime: "str | None",
-        rtf_eval: bool = False,
         custom_passwords: "list | None" = None,
     ) -> "dict | None":
         """Analyse an Office document (OLE2, OOXML, RTF) for malware indicators.
@@ -6688,15 +6681,14 @@ class InspectorDaemon:
         :mod:`msoffcrypto` and the oletools decryption helpers using the
         password list from :attr:`passwords`.  For OLE2 files, document
         properties are extracted from the SummaryInformation stream via
-        :mod:`olefile` and stored as ``meta_document``.
+        :mod:`olefile` and stored as ``meta_document``.  RTF object
+        extraction via :mod:`oletools.rtfobj` always runs for RTF input.
 
         Args:
             s: Session tag for log messages.
             filename: Original filename passed to oletools.
             data: Raw file bytes.
             file_mime: MIME type of the file.
-            rtf_eval: When ``True``, also run RTF object extraction via
-                :mod:`oletools.rtfobj`.
             custom_passwords: Additional passwords to try before the
                 built-in list.
 
@@ -6732,13 +6724,8 @@ class InspectorDaemon:
             "decryption_password": None,
             "iocs": {"urls": [], "ips": [], "domains": []},
         }
-        if (
-            HAS_OLETOOLS
-            and rtf_eval
-            and (
-                file_mime in ("text/rtf", "application/rtf")
-                or data.startswith(b"{\\rt")
-            )
+        if HAS_OLETOOLS and (
+            file_mime in ("text/rtf", "application/rtf") or data.startswith(b"{\\rt")
         ):
             try:
                 rtfp = _RtfObjParser(data)
@@ -6999,7 +6986,6 @@ class InspectorDaemon:
         data: bytes,
         file_mime: "str | None",
         file_desc: "str | None" = None,
-        rtf_eval: bool = False,
         custom_passwords: "list | None" = None,
         types_to_run: "list | None" = None,
         force_analyzers: "frozenset | None" = None,
@@ -7017,7 +7003,6 @@ class InspectorDaemon:
             data: Raw file bytes.
             file_mime: MIME type (from magic or caller-supplied).
             file_desc: Human-readable magic description (optional).
-            rtf_eval: Enable RTF object extraction.
             custom_passwords: Extra passwords to prepend to the built-in list.
             types_to_run: Override auto-detection by providing an explicit
                 list of analysis type strings (``'pdf'``, ``'html'``,
@@ -7046,7 +7031,7 @@ class InspectorDaemon:
                 res = self.analyze_html(data)
             elif t == "office" and "office" in enabled:
                 res = self.analyze_office(
-                    s, filename, data, file_mime, rtf_eval, custom_passwords
+                    s, filename, data, file_mime, custom_passwords
                 )
             elif t == "image" and "image" in enabled:
                 res = self.analyze_image(
@@ -7556,7 +7541,6 @@ class InspectorDaemon:
         data: bytes,
         file_mime: "str | None",
         file_desc: "str | None" = None,
-        rtf_eval: bool = False,
         custom_passwords: "list | None" = None,
         types_to_run: "list | None" = None,
         force_analyzers: "frozenset | None" = None,
@@ -7577,7 +7561,6 @@ class InspectorDaemon:
             data: Raw file bytes.
             file_mime: MIME type (from magic or caller-supplied).
             file_desc: Human-readable magic description (optional).
-            rtf_eval: Enable RTF object extraction.
             custom_passwords: Extra decryption passwords.
             types_to_run: Override auto-detection by providing explicit
                 analysis type strings (``'pdf'``, ``'html'``, ``'office'``).
@@ -7684,7 +7667,6 @@ class InspectorDaemon:
                             filename,
                             data,
                             file_mime,
-                            rtf_eval,
                             custom_passwords,
                         )
                     )
@@ -7891,7 +7873,6 @@ class InspectorDaemon:
         data: bytes,
         file_mime: "str | None",
         file_desc: "str | None" = None,
-        rtf_eval: bool = False,
         custom_passwords: "list | None" = None,
         types_to_run: "list | None" = None,
         force_analyzers: "frozenset | None" = None,
@@ -7910,7 +7891,6 @@ class InspectorDaemon:
             data: Raw file bytes.
             file_mime: MIME type string.
             file_desc: Human-readable magic description.
-            rtf_eval: Enable RTF object extraction.
             custom_passwords: Extra decryption passwords.
             types_to_run: Explicit list of analysis types to run.
             cache_generation: Cache generation captured before analysis began.
@@ -7926,7 +7906,6 @@ class InspectorDaemon:
             data,
             file_mime,
             file_desc,
-            rtf_eval,
             custom_passwords,
             types_to_run,
             force_analyzers,
@@ -8372,13 +8351,12 @@ class InspectorDaemon:
 
         **Octet-stream** (``application/octet-stream``):
             The raw file bytes are the request body.  Options are supplied via
-            query parameters: ``timeout``, ``rtf``, ``filename``, ``file_mime``,
+            query parameters: ``timeout``, ``filename``, ``file_mime``,
             ``file_type``, ``passwords`` (comma-separated).
 
         Query parameters (all modes):
             - ``timeout`` (float, default 10): seconds to wait before returning
               HTTP 202.
-            - ``rtf`` (bool, default false): enable RTF object extraction.
             - ``force_analyzers`` (comma-separated): force-run specific
               analyzers, bypassing their normal skip heuristics.
                         - ``invalidate_cache`` (bool, default false): delete the Redis
@@ -8404,7 +8382,6 @@ class InspectorDaemon:
         filename = None
         try:
             timeout = float(request.query.get("timeout", DEFAULT_SCAN_TIMEOUT))
-            rtf_eval = request.query.get("rtf", "false").lower() == "true"
             _fa_param = request.query.get("force_analyzers", "")
             force_analyzers: "frozenset | None" = (
                 frozenset(a.strip() for a in _fa_param.split(",") if a.strip())
@@ -8721,7 +8698,6 @@ class InspectorDaemon:
                         filedata,
                         file_mime,
                         file_desc,
-                        rtf_eval,
                         custom_passwords,
                         list(types_to_run),
                         force_analyzers,

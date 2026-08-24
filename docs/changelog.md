@@ -106,6 +106,13 @@
   - When the analyzer is enabled but `LnkParse3` is unavailable, raw text
     fallback still feeds IOC extraction without raising a hard error.
 
+### Changed
+- **RTF object extraction always runs** — `analyze_office()` now always
+  runs `oletools.rtfobj` extraction for RTF input; the opt-in `rtf` query
+  parameter (`POST /v1/scan?rtf=true`) has been removed, along with the
+  `xspct-scan-client --rtf` flag. Previously RTF-embedded object detection
+  was skipped unless explicitly requested.
+
 ## 0.5.2 — 2026-07-09
 
 ### Added

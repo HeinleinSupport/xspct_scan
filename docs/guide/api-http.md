@@ -91,7 +91,6 @@ Pass optional metadata as query parameters (`filename`, `file_mime`, `file_type`
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `timeout` | `10` | Max seconds to wait for analysis before returning `202`. |
-| `rtf` | `false` | Set to `true` to enable RTF object extraction via `rtfobj`. |
 | `force_analyzers` | | Comma-separated analyzer paths to bypass exclusion gates for this request (e.g. `image.ocr`). |
 | `invalidate_cache` | `false` | Set to `true` to delete the Redis and in-memory cached report and force a full rescan. Older in-flight scans cannot repopulate the deleted cache entry; only the fresh report is cached. Use this when re-submitting a known file with a new/updated `passwords` list that must be tried from scratch. |
 
