@@ -39,9 +39,9 @@ This endpoint is **unversioned**.
 
 Submit a document for malware analysis.
 
-**Request** — `multipart/form-data` **or** `application/octet-stream`
+**Request** — `multipart/form-data` (two shapes) **or** `application/octet-stream`
 
-*multipart/form-data fields*
+*multipart/form-data, legacy shape*
 
 | Field | Required | Description |
 |-------|----------|-------------|
@@ -49,6 +49,37 @@ Submit a document for malware analysis.
 | `file_mime` | | Override the detected MIME type. |
 | `file_type` | | Override the detected file description string. |
 | `passwords` | | Comma- or newline-separated passwords to try when decrypting encrypted Office **or PDF** files. Custom passwords are tried before the daemon-wide list. |
+
+*multipart/form-data, structured metadata shape*
+
+| Part | Required | Description |
+|------|----------|-------------|
+| `file` | ✓ | The file to scan. Same zstd auto-decompression and `.zst` suffix stripping as `doc`. |
+| `metadata` | ✓ | A JSON or msgpack object (see below). An explicit part `Content-Type` (`application/json` or `application/x-msgpack`) selects the format; otherwise msgpack is tried first, then JSON. |
+
+`metadata` fields (all optional except where noted):
+
+| Field | Description |
+|-------|-------------|
+| `filename` | Overrides the `file` part's own filename. |
+| `declared_content_type` | The Content-Type declared by the originating mail part (informational, logged). |
+| `detected_type` | The type detected by the caller, e.g. Rspamd's `lua_magic` (informational, logged). |
+| `rspamd_uid` | Rspamd task UID. Folded into the session log tag and echoed back in the response's `request` block for cross-system correlation. |
+| `queue_id` | Mail queue ID. Folded into the session log tag and echoed back in `request`. |
+| `message_id` | Message-ID header value. Echoed back in `request`. |
+| `passwords` | List of decryption passwords. Overrides the `passwords` query parameter. |
+| `force_analyzers` | List of analyzer paths to force-run. Overrides the `force_analyzers` query parameter. |
+| `timeout_s` | Caller's timeout hint in seconds. May only **tighten** the effective timeout (`min` of this and the `timeout` query parameter/default), never loosen it. |
+
+Fields present in `metadata` take precedence over the equivalent query
+parameter. The legacy `doc` shape and the structured `metadata`+`file` shape
+are mutually exclusive; mixing parts from both shapes returns HTTP 400.
+
+```bash
+curl -s http://localhost:8080/v1/scan \
+  -F 'metadata={"rspamd_uid":"7f3a9c1e-b2d4","passwords":["Secret123"]};type=application/json' \
+  -F 'file=@invoice.xlsm'
+```
 
 *application/octet-stream*: send raw file bytes as the request body.
 Pass optional metadata as query parameters (`filename`, `file_mime`, `file_type`,
@@ -238,6 +269,22 @@ Each entry:
 | `full` | list | `[{source, text}]` up to `xspct_text_max_length`; requires `xspct_include_text_full: true` |
 
 Segment `source` values: `pdf`, `pdf-image`, `office`, `office-macro`, `odf`, `odf-macro`, `odf-image`, `html`, `html-image`, `ooxml-image`, `text`, `image-ocr`, `image-qr`.
+
+#### `request` (present when the structured metadata part supplied ≥1 correlation ID)
+
+Echoes back the correlation IDs supplied in the `metadata` part, so a caller
+polling `/v1/query` or inspecting the response body alone can tie a result
+back to the request it sent. Never persisted into the Redis/hash-keyed
+cache — it reflects the request that produced *this* response, not a
+property of the file content, so a later cache-hit response for the same
+file (submitted with different or no correlation IDs) never carries a
+previous requester's values.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `rspamd_uid` | string | Present when supplied in `metadata.rspamd_uid` |
+| `queue_id` | string | Present when supplied in `metadata.queue_id` |
+| `message_id` | string | Present when supplied in `metadata.message_id` |
 
 #### `document` (present when ≥1 field is non-empty)
 

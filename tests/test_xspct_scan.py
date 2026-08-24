@@ -62,6 +62,7 @@ Run:
 import asyncio
 import hashlib
 import io
+import json
 import logging
 import os
 import zipfile
@@ -1584,6 +1585,327 @@ class TestZstdCompression:
         assert result["status"] == "finished"
 
 
+# ===========================================================================
+# Multipart upload with structured "metadata" + "file" parts
+# ===========================================================================
+
+
+def _metadata_form(
+    filedata: bytes,
+    filename: str,
+    metadata: object,
+    *,
+    metadata_content_type: "str | None" = "application/json",
+) -> aiohttp.FormData:
+    """Build a multipart form with "metadata" + "file" parts."""
+    form = aiohttp.FormData()
+    if metadata_content_type in ("application/x-msgpack", "application/msgpack"):
+        raw_metadata = _msgpack_test.packb(metadata, use_bin_type=True)
+    else:
+        raw_metadata = json.dumps(metadata).encode()
+    if metadata_content_type:
+        form.add_field(
+            "metadata",
+            io.BytesIO(raw_metadata),
+            content_type=metadata_content_type,
+        )
+    else:
+        form.add_field("metadata", io.BytesIO(raw_metadata))
+    form.add_field("file", filedata, filename=filename)
+    return form
+
+
+class TestScanMultipartMetadata:
+    async def test_metadata_json_scan_returns_200(self, client):
+        r = await client.post(
+            "/v1/scan", data=_metadata_form(PDF_CLEAN, "clean.pdf", {})
+        )
+        assert r.status == 200
+        body = await r.json()
+        assert body["status"] == "finished"
+        assert body["file"]["type"] == "pdf"
+
+    @pytest.mark.skipif(not _HAS_MSGPACK_TEST, reason="msgpack not installed")
+    async def test_metadata_msgpack_scan_returns_200(self, client):
+        r = await client.post(
+            "/v1/scan",
+            data=_metadata_form(
+                PDF_CLEAN,
+                "clean.pdf",
+                {},
+                metadata_content_type="application/x-msgpack",
+            ),
+        )
+        assert r.status == 200
+        body = await r.json()
+        assert body["status"] == "finished"
+        assert body["file"]["type"] == "pdf"
+
+    async def test_metadata_no_content_type_falls_back_to_json(self, client):
+        r = await client.post(
+            "/v1/scan",
+            data=_metadata_form(PDF_CLEAN, "clean.pdf", {}, metadata_content_type=None),
+        )
+        assert r.status == 200
+        body = await r.json()
+        assert body["file"]["type"] == "pdf"
+
+    async def test_metadata_missing_file_part_returns_400(self, client):
+        form = aiohttp.FormData()
+        form.add_field(
+            "metadata",
+            io.BytesIO(json.dumps({}).encode()),
+            content_type="application/json",
+        )
+        r = await client.post("/v1/scan", data=form)
+        assert r.status == 400
+        body = await r.json()
+        assert "file" in body["error"]
+
+    async def test_metadata_invalid_json_returns_400(self, client):
+        form = aiohttp.FormData()
+        form.add_field(
+            "metadata", io.BytesIO(b"{not valid json"), content_type="application/json"
+        )
+        form.add_field("file", PDF_CLEAN, filename="clean.pdf")
+        r = await client.post("/v1/scan", data=form)
+        assert r.status == 400
+
+    @pytest.mark.parametrize("metadata", [[], "text", None])
+    async def test_metadata_must_be_an_object(self, client, metadata):
+        r = await client.post(
+            "/v1/scan", data=_metadata_form(PDF_CLEAN, "clean.pdf", metadata)
+        )
+        assert r.status == 400
+        body = await r.json()
+        assert "object" in body["error"]
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("rspamd_uid", 123),
+            ("passwords", "secret"),
+            ("force_analyzers", ["image.ocr", 123]),
+            ("timeout_s", "soon"),
+            ("timeout_s", 0),
+        ],
+    )
+    async def test_metadata_rejects_invalid_field_types(self, client, field, value):
+        r = await client.post(
+            "/v1/scan",
+            data=_metadata_form(PDF_CLEAN, "clean.pdf", {field: value}),
+        )
+        assert r.status == 400
+        body = await r.json()
+        assert field in body["error"]
+
+    async def test_file_without_metadata_returns_400(self, client):
+        form = aiohttp.FormData()
+        form.add_field("file", PDF_CLEAN, filename="clean.pdf")
+        r = await client.post("/v1/scan", data=form)
+        assert r.status == 400
+        body = await r.json()
+        assert "metadata" in body["error"]
+
+    async def test_mixed_multipart_shapes_return_400(self, client):
+        form = _metadata_form(PDF_CLEAN, "clean.pdf", {})
+        form.add_field("doc", PDF_CLEAN, filename="legacy.pdf")
+        r = await client.post("/v1/scan", data=form)
+        assert r.status == 400
+        body = await r.json()
+        assert "cannot be mixed" in body["error"]
+
+    async def test_empty_force_analyzers_overrides_query(self, client, monkeypatch):
+        captured = {}
+
+        async def fake_analyze_task(*args):
+            captured["force_analyzers"] = args[-1]
+            return {}
+
+        daemon = client.server.app["daemon"]
+        monkeypatch.setattr(daemon, "analyze_task", fake_analyze_task)
+        r = await client.post(
+            "/v1/scan?force_analyzers=image.ocr",
+            data=_metadata_form(PDF_CLEAN, "clean.pdf", {"force_analyzers": []}),
+        )
+        assert r.status == 200
+        assert captured["force_analyzers"] == frozenset()
+
+    async def test_metadata_filename_overrides_part_filename(self, client):
+        r = await client.post(
+            "/v1/scan",
+            data=_metadata_form(PDF_CLEAN, "upload.bin", {"filename": "invoice.pdf"}),
+        )
+        assert r.status == 200
+        body = await r.json()
+        assert body["file"]["name"] == "invoice.pdf"
+
+    @pytest.mark.skipif(not _HAS_FITZ, reason="PyMuPDF not installed")
+    async def test_metadata_passwords_used_for_decryption(self, client):
+        r = await client.post(
+            "/v1/scan",
+            data=_metadata_form(
+                PDF_ENCRYPTED, "enc.pdf", {"passwords": ["wrong", _PDF_ENC_PASSWORD]}
+            ),
+        )
+        assert r.status == 200
+        body = await r.json()
+        assert body.get("flags", {}).get("decrypted", False) is True
+
+    @pytest.mark.skipif(not _HAS_FITZ, reason="PyMuPDF not installed")
+    async def test_metadata_passwords_override_query_param(self, client):
+        r = await client.post(
+            "/v1/scan?passwords=wrong-only",
+            data=_metadata_form(
+                PDF_ENCRYPTED, "enc.pdf", {"passwords": [_PDF_ENC_PASSWORD]}
+            ),
+        )
+        assert r.status == 200
+        body = await r.json()
+        assert body.get("flags", {}).get("decrypted", False) is True
+
+    async def test_metadata_timeout_s_cannot_exceed_query_timeout(self, client):
+        r = await client.post(
+            "/v1/scan?timeout=5",
+            data=_metadata_form(PDF_CLEAN, "clean.pdf", {"timeout_s": 500}),
+        )
+        assert r.status == 200
+
+    async def test_metadata_rspamd_uid_accepted(self, client, caplog):
+        with caplog.at_level(logging.INFO):
+            r = await client.post(
+                "/v1/scan",
+                data=_metadata_form(
+                    PDF_CLEAN,
+                    "clean.pdf",
+                    {"rspamd_uid": "7f3a9c1e-abcd", "queue_id": "4X2n3q-000abc"},
+                ),
+            )
+        assert r.status == 200
+        assert any("7f3a9c1e" in rec.message for rec in caplog.records)
+
+    @pytest.mark.skipif(not _HAS_ZSTD_TEST, reason="zstandard not installed")
+    async def test_metadata_zstd_file_part_decompresses(self, client):
+        compressed = _zstd_compress(PDF_CLEAN)
+        r = await client.post(
+            "/v1/scan", data=_metadata_form(compressed, "clean.pdf.zst", {})
+        )
+        assert r.status == 200
+        body = await r.json()
+        assert body["file"]["type"] == "pdf"
+        assert body["file"]["name"] == "clean.pdf"
+
+    async def test_metadata_same_hash_as_legacy_doc_part(self, client):
+        r1 = await client.post("/v1/scan", data=_form(PDF_CLEAN, "clean.pdf"))
+        r2 = await client.post(
+            "/v1/scan", data=_metadata_form(PDF_CLEAN, "clean.pdf", {})
+        )
+        b1, b2 = await r1.json(), await r2.json()
+        assert b1["file"]["sha256"] == b2["file"]["sha256"]
+
+    @pytest.mark.skipif(not _HAS_FITZ, reason="PyMuPDF not installed")
+    async def test_metadata_passwords_are_stripped(self, client):
+        """A password with incidental whitespace must still decrypt (regression:
+        metadata passwords used to keep the raw, un-stripped string)."""
+        r = await client.post(
+            "/v1/scan",
+            data=_metadata_form(
+                PDF_ENCRYPTED,
+                "enc.pdf",
+                {"passwords": [f"  {_PDF_ENC_PASSWORD}\n"]},
+            ),
+        )
+        assert r.status == 200
+        body = await r.json()
+        assert body.get("flags", {}).get("decrypted", False) is True
+
+    async def test_metadata_string_fields_strip_control_chars(self, client):
+        """Control characters in logged/echoed metadata fields must not survive
+        (regression: log injection via unsanitized rspamd_uid/message_id)."""
+        r = await client.post(
+            "/v1/scan",
+            data=_metadata_form(
+                PDF_CLEAN,
+                "clean.pdf",
+                {
+                    "rspamd_uid": "abc\ndef",
+                    "message_id": "<x>\r\nFAKE LOG LINE",
+                },
+            ),
+        )
+        assert r.status == 200
+        body = await r.json()
+        assert "\n" not in body["request"]["rspamd_uid"]
+        assert "\n" not in body["request"]["message_id"]
+        assert "\r" not in body["request"]["message_id"]
+
+    async def test_correlation_ids_echoed_in_response(self, client):
+        r = await client.post(
+            "/v1/scan",
+            data=_metadata_form(
+                PDF_CLEAN,
+                "clean.pdf",
+                {
+                    "rspamd_uid": "7f3a9c1e-abcd",
+                    "queue_id": "4X2n3q-000abc",
+                    "message_id": "<abc123@example.com>",
+                },
+            ),
+        )
+        assert r.status == 200
+        body = await r.json()
+        assert body["request"] == {
+            "rspamd_uid": "7f3a9c1e-abcd",
+            "queue_id": "4X2n3q-000abc",
+            "message_id": "<abc123@example.com>",
+        }
+
+    async def test_no_correlation_ids_means_no_request_block(self, client):
+        r = await client.post(
+            "/v1/scan", data=_metadata_form(PDF_CLEAN, "clean.pdf", {})
+        )
+        assert r.status == 200
+        body = await r.json()
+        assert "request" not in body
+
+    async def test_correlation_ids_not_leaked_into_other_requests_cache_hit(
+        self, client
+    ):
+        """The request block must not leak into an unrelated cache-hit response
+        for the same file content submitted without correlation IDs."""
+        r1 = await client.post(
+            "/v1/scan",
+            data=_metadata_form(
+                PDF_CLEAN, "shared.pdf", {"rspamd_uid": "requester-one"}
+            ),
+        )
+        assert r1.status == 200
+        r2 = await client.post(
+            "/v1/scan", data=_metadata_form(PDF_CLEAN, "shared.pdf", {})
+        )
+        assert r2.status == 200
+        body2 = await r2.json()
+        assert "request" not in body2 or "rspamd_uid" not in body2.get("request", {})
+
+    async def test_read_bytes_log_line_carries_correlation_tag(self, client, caplog):
+        """The file-part 'read N bytes' log line must carry the uid= tag too
+        (regression: the tag used to be attached only after the whole
+        multipart body was read, so the earliest log line missed it)."""
+        with caplog.at_level(logging.INFO):
+            r = await client.post(
+                "/v1/scan",
+                data=_metadata_form(
+                    PDF_CLEAN, "clean.pdf", {"rspamd_uid": "7f3a9c1e-tagtest"}
+                ),
+            )
+        assert r.status == 200
+        read_bytes_lines = [
+            rec.message for rec in caplog.records if "read " in rec.message
+        ]
+        assert read_bytes_lines
+        assert any("uid=7f3a9c1e-t" in line for line in read_bytes_lines)
+
+
 class _ClientResponseStub:
     def __init__(self, status, body):
         self.status = status
@@ -1603,8 +1925,10 @@ class _ClientSessionStub:
     def __init__(self, status, body):
         self._status = status
         self._body = body
+        self.last_call: tuple[tuple, dict] | None = None
 
     def post(self, *args, **kwargs):
+        self.last_call = (args, kwargs)
         return _ClientResponseStub(self._status, self._body)
 
 
@@ -1662,6 +1986,75 @@ class TestClientPolling:
         assert result["status"] == "finished"
         assert result["file_hash"] == "deadbeef"
         assert result["detected_type"] == "pdf"
+
+
+def _field_names(form: aiohttp.FormData) -> list[str]:
+    return [part_headers["name"] for part_headers, _headers, _value in form._fields]
+
+
+class TestClientMultipartShape:
+    @pytest.mark.asyncio
+    async def test_default_uses_metadata_and_file_parts(self, tmp_path):
+        sample = tmp_path / "sample.pdf"
+        sample.write_bytes(b"%PDF-1.4\n")
+        session = _ClientSessionStub(200, {"status": "finished"})
+
+        await xspct_client.scan_file(
+            session=session,
+            path=sample,
+            base_url="http://localhost:8080",
+            timeout=1,
+            passwords="pw1,pw2",
+            rtf=False,
+            api_key=None,
+            poll=False,
+            poll_interval=0,
+            no_color=True,
+            force_analyzers="image.ocr",
+            rspamd_uid="7f3a9c1e-abcd",
+            queue_id="4X2n3q-000abc",
+        )
+
+        assert session.last_call is not None
+        _args, kwargs = session.last_call
+        names = _field_names(kwargs["data"])
+        assert names == ["metadata", "file"]
+        assert "force_analyzers" not in kwargs["params"]
+
+        metadata_value = kwargs["data"]._fields[0][2]
+        metadata = json.loads(metadata_value)
+        assert metadata["filename"] == "sample.pdf"
+        assert metadata["passwords"] == ["pw1", "pw2"]
+        assert metadata["force_analyzers"] == ["image.ocr"]
+        assert metadata["rspamd_uid"] == "7f3a9c1e-abcd"
+        assert metadata["queue_id"] == "4X2n3q-000abc"
+
+    @pytest.mark.asyncio
+    async def test_legacy_multipart_uses_doc_part_and_query_params(self, tmp_path):
+        sample = tmp_path / "sample.pdf"
+        sample.write_bytes(b"%PDF-1.4\n")
+        session = _ClientSessionStub(200, {"status": "finished"})
+
+        await xspct_client.scan_file(
+            session=session,
+            path=sample,
+            base_url="http://localhost:8080",
+            timeout=1,
+            passwords="pw1,pw2",
+            rtf=False,
+            api_key=None,
+            poll=False,
+            poll_interval=0,
+            no_color=True,
+            force_analyzers="image.ocr",
+            legacy_multipart=True,
+        )
+
+        assert session.last_call is not None
+        _args, kwargs = session.last_call
+        names = _field_names(kwargs["data"])
+        assert names == ["doc", "passwords"]
+        assert kwargs["params"]["force_analyzers"] == "image.ocr"
 
 
 class TestAuthentication:

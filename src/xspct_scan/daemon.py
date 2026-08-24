@@ -23,6 +23,7 @@ import hmac
 import io
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -1229,21 +1230,52 @@ if HAS_PYDANTIC:
                             "content": {
                                 "multipart/form-data": {
                                     "schema": {
-                                        "type": "object",
-                                        "properties": {
-                                            "doc": {
-                                                "type": "string",
-                                                "format": "binary",
-                                                "description": "File to analyse (required)",
+                                        "oneOf": [
+                                            {
+                                                "type": "object",
+                                                "description": "Legacy shape",
+                                                "properties": {
+                                                    "doc": {
+                                                        "type": "string",
+                                                        "format": "binary",
+                                                        "description": "File to analyse (legacy shape)",
+                                                    },
+                                                    "passwords": {
+                                                        "type": "string",
+                                                        "description": "Comma/newline-separated decryption passwords",
+                                                    },
+                                                    "file_mime": {"type": "string"},
+                                                    "file_type": {"type": "string"},
+                                                },
+                                                "required": ["doc"],
                                             },
-                                            "passwords": {
-                                                "type": "string",
-                                                "description": "Comma/newline-separated decryption passwords",
+                                            {
+                                                "type": "object",
+                                                "description": "Structured shape",
+                                                "properties": {
+                                                    "file": {
+                                                        "type": "string",
+                                                        "format": "binary",
+                                                        "description": "File to analyse (structured shape, paired with metadata)",
+                                                    },
+                                                    "metadata": {
+                                                        "type": "string",
+                                                        "format": "binary",
+                                                        "description": (
+                                                            "JSON or msgpack object: filename, "
+                                                            "declared_content_type, detected_type, "
+                                                            "rspamd_uid, queue_id, message_id, "
+                                                            "passwords[], force_analyzers[], timeout_s. "
+                                                            "Overrides query parameters when present. "
+                                                            "rspamd_uid/queue_id/message_id are "
+                                                            "echoed back in the response's request "
+                                                            "block."
+                                                        ),
+                                                    },
+                                                },
+                                                "required": ["file", "metadata"],
                                             },
-                                            "file_mime": {"type": "string"},
-                                            "file_type": {"type": "string"},
-                                        },
-                                        "required": ["doc"],
+                                        ],
                                     },
                                 },
                                 "application/octet-stream": {
@@ -7084,6 +7116,90 @@ class InspectorDaemon:
         )
         return decompressed
 
+    def _parse_metadata_part(self, data: bytes, content_type: str) -> dict:
+        """Decode a multipart ``metadata`` part body as JSON or msgpack.
+
+        An explicit ``application/json`` or ``application/x-msgpack`` part
+        Content-Type takes precedence. Otherwise (missing or generic
+        Content-Type) msgpack is tried first and JSON is used as a fallback.
+        """
+        ct = (content_type or "").split(";")[0].strip().lower()
+        if ct in ("application/x-msgpack", "application/msgpack"):
+            if not HAS_MSGPACK:
+                raise _ClientRequestError(
+                    "metadata part is msgpack but msgpack support is not installed",
+                    status=415,
+                )
+            try:
+                metadata = _msgpack.unpackb(data, raw=False)
+            except Exception as exc:
+                raise _ClientRequestError("Invalid msgpack in metadata part") from exc
+        elif ct == "application/json":
+            try:
+                metadata = json.loads(data)
+            except Exception as exc:
+                raise _ClientRequestError("Invalid JSON in metadata part") from exc
+        else:
+            metadata = None
+            if HAS_MSGPACK:
+                try:
+                    metadata = _msgpack.unpackb(data, raw=False)
+                except Exception:
+                    pass
+            if metadata is None:
+                try:
+                    metadata = json.loads(data)
+                except Exception as exc:
+                    raise _ClientRequestError(
+                        "metadata part is neither valid JSON nor msgpack"
+                    ) from exc
+
+        if not isinstance(metadata, dict):
+            raise _ClientRequestError("metadata part must contain an object")
+
+        string_fields = (
+            "filename",
+            "declared_content_type",
+            "detected_type",
+            "rspamd_uid",
+            "queue_id",
+            "message_id",
+        )
+        for field in string_fields:
+            value = metadata.get(field)
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                raise _ClientRequestError(f'metadata field "{field}" must be a string')
+            # Strip control characters and cap length before this value can
+            # reach log lines or the session tag (log injection / DoS).
+            metadata[field] = re.sub(r"[\x00-\x1f\x7f]", "", value)[:256]
+
+        for field in ("passwords", "force_analyzers"):
+            if field not in metadata:
+                continue
+            value = metadata[field]
+            if not isinstance(value, list) or not all(
+                isinstance(item, str) for item in value
+            ):
+                raise _ClientRequestError(
+                    f'metadata field "{field}" must be a list of strings'
+                )
+
+        if metadata.get("timeout_s") is not None:
+            timeout_hint = metadata["timeout_s"]
+            if (
+                isinstance(timeout_hint, bool)
+                or not isinstance(timeout_hint, (int, float))
+                or not math.isfinite(timeout_hint)
+                or timeout_hint <= 0
+            ):
+                raise _ClientRequestError(
+                    'metadata field "timeout_s" must be a positive finite number'
+                )
+
+        return metadata
+
     def _should_compress_response(self, request: web.Request) -> bool:
         """Return True if the client accepts zstd-encoded responses."""
         if not HAS_ZSTD:
@@ -7238,23 +7354,41 @@ class InspectorDaemon:
     async def handle_scan(self, request: web.Request) -> web.Response:
         """Handle ``POST /v1/scan`` — accept a file and return an analysis report.
 
-        Supports two upload modes selected by ``Content-Type``:
+        Supports three upload shapes, all under ``multipart/form-data`` except
+        the raw octet-stream one:
 
-        **Multipart** (``multipart/form-data``):
+        **Multipart, legacy** (``doc`` part):
             - ``doc`` (required): the file to analyse.
             - ``passwords``: comma- or newline-separated extra decryption passwords.
             - ``file_mime``: override MIME type hint.
             - ``file_type``: override description hint.
+
+        **Multipart, structured metadata** (``metadata`` + ``file`` parts):
+            - ``file`` (required): the file to analyse. ``Content-Encoding``-style
+              zstd compression is auto-detected the same way as the ``doc`` part.
+            - ``metadata`` (required): JSON or msgpack object with keys
+              ``filename``, ``declared_content_type``, ``detected_type``,
+              ``rspamd_uid``, ``queue_id``, ``message_id``, ``passwords``
+              (list), ``force_analyzers`` (list), ``timeout_s``. Fields here
+              take precedence over query parameters. Structured and legacy
+              multipart parts cannot be mixed.
+              ``timeout_s`` may only tighten the effective timeout, never
+              loosen it. ``rspamd_uid``/``queue_id``/``message_id`` are
+              folded into the session log tag and echoed back in the
+              response's ``request`` block for cross-system correlation;
+              never persisted into the cached report.
 
         **Octet-stream** (``application/octet-stream``):
             The raw file bytes are the request body.  Options are supplied via
             query parameters: ``timeout``, ``rtf``, ``filename``, ``file_mime``,
             ``file_type``, ``passwords`` (comma-separated).
 
-        Query parameters (both modes):
+        Query parameters (all modes):
             - ``timeout`` (float, default 10): seconds to wait before returning
               HTTP 202.
             - ``rtf`` (bool, default false): enable RTF object extraction.
+            - ``force_analyzers`` (comma-separated): force-run specific
+              analyzers, bypassing their normal skip heuristics.
 
         Args:
             request: Incoming aiohttp request.
@@ -7286,12 +7420,21 @@ class InspectorDaemon:
             custom_passwords: list = []
             file_mime_provided: "str | None" = None
             file_type_provided: "str | None" = None
+            metadata: "dict | None" = None
+            rspamd_uid: "str | None" = None
+            queue_id: "str | None" = None
+            message_id: "str | None" = None
+            declared_content_type: "str | None" = None
+            detected_type_hint: "str | None" = None
 
             if "multipart/form-data" in content_type:
                 # ---- Multipart upload ----------------------------------------
+                legacy_parts: set[str] = set()
+                structured_parts: set[str] = set()
                 reader = await request.multipart()
                 async for part in reader:
                     if part.name == "doc":
+                        legacy_parts.add("doc")
                         filename = part.filename
                         filedata = bytes(await part.read())
                         filedata = self._decompress_zstd_part(
@@ -7307,6 +7450,7 @@ class InspectorDaemon:
                             filename,
                         )
                     elif part.name == "passwords":
+                        legacy_parts.add("passwords")
                         raw = await part.text()
                         custom_passwords = [
                             p.strip()
@@ -7320,13 +7464,106 @@ class InspectorDaemon:
                             len(custom_passwords),
                         )
                     elif part.name == "file_mime":
+                        legacy_parts.add("file_mime")
                         file_mime_provided = (await part.text()).strip()
                     elif part.name == "file_type":
+                        legacy_parts.add("file_type")
                         file_type_provided = (await part.text()).strip()
+                    elif part.name == "metadata":
+                        structured_parts.add("metadata")
+                        raw_metadata = await part.read()
+                        metadata = self._parse_metadata_part(
+                            raw_metadata, part.headers.get("Content-Type", "")
+                        )
+                        # Fold rspamd_uid/queue_id into the session tag as soon
+                        # as they're known so later log lines in this request
+                        # (including the "read N bytes" line below, if the
+                        # file part follows metadata) carry the correlation
+                        # tag too.
+                        rspamd_uid = metadata.get("rspamd_uid") or None
+                        queue_id = metadata.get("queue_id") or None
+                        if rspamd_uid or queue_id:
+                            tag_bits = []
+                            if rspamd_uid:
+                                tag_bits.append(f"uid={rspamd_uid[:12]}")
+                            if queue_id:
+                                tag_bits.append(f"qid={queue_id[:12]}")
+                            s = f"{s[:-1]} {' '.join(tag_bits)}>"
+                    elif part.name == "file":
+                        structured_parts.add("file")
+                        filename = part.filename
+                        chunks: list = []
+                        while True:
+                            chunk = await part.read_chunk(size=262144)
+                            if not chunk:
+                                break
+                            chunks.append(part.decode(chunk))
+                        filedata = b"".join(chunks)
+                        filedata = self._decompress_zstd_part(
+                            filedata, filename or "file"
+                        )
+                        if filename and filename.lower().endswith(".zst"):
+                            filename = filename[:-4]
+                        logger.info(
+                            "%s (%s) - read %d bytes from %s",
+                            s,
+                            timer(),
+                            len(filedata),
+                            filename,
+                        )
+                if legacy_parts and structured_parts:
+                    raise _ClientRequestError(
+                        "legacy and structured multipart fields cannot be mixed"
+                    )
+                if structured_parts:
+                    missing_parts = {"metadata", "file"} - structured_parts
+                    if missing_parts:
+                        missing = sorted(missing_parts)[0]
+                        raise _ClientRequestError(
+                            f'No multipart part named "{missing}"'
+                        )
+                elif "doc" not in legacy_parts:
+                    raise _ClientRequestError('No file part named "doc"')
                 if not filedata:
-                    logger.warning('%s - no "doc" part in multipart request', s)
-                    return self._build_response(
-                        {"error": 'No file part named "doc"'}, request, status=400
+                    raise _ClientRequestError("Uploaded file is empty")
+                if structured_parts:
+                    # Metadata part fields take precedence over query params
+                    # (see docs/guide/api-http.md). rspamd_uid/queue_id were
+                    # already extracted (and folded into the session tag `s`)
+                    # as soon as the metadata part was parsed, above.
+                    if metadata.get("filename"):
+                        filename = metadata["filename"]
+                    message_id = metadata.get("message_id") or None
+                    declared_content_type = (
+                        metadata.get("declared_content_type") or None
+                    )
+                    detected_type_hint = metadata.get("detected_type") or None
+                    if "passwords" in metadata:
+                        custom_passwords = [
+                            password.strip()
+                            for password in metadata["passwords"]
+                            if password.strip()
+                        ]
+                    if "force_analyzers" in metadata:
+                        force_analyzers = frozenset(
+                            analyzer.strip()
+                            for analyzer in metadata["force_analyzers"]
+                            if analyzer.strip()
+                        )
+                    if metadata.get("timeout_s") is not None:
+                        # A caller-supplied timeout hint may only tighten the
+                        # server's timeout, never loosen it.
+                        timeout = min(timeout, float(metadata["timeout_s"]))
+                    logger.info(
+                        "%s (%s) - metadata part: rspamd_uid=%s queue_id=%s "
+                        "message_id=%s declared_content_type=%s detected_type=%s",
+                        s,
+                        timer(),
+                        rspamd_uid,
+                        queue_id,
+                        message_id,
+                        declared_content_type,
+                        detected_type_hint,
                     )
             elif "application/octet-stream" in content_type:
                 # ---- Raw octet-stream upload ---------------------------------
@@ -7362,13 +7599,28 @@ class InspectorDaemon:
                     request,
                     status=415,
                 )
+            # Per-request correlation IDs (never persisted into the cached
+            # report — they belong to this request, not to the file content).
+            correlation: dict = {}
+            if rspamd_uid:
+                correlation["rspamd_uid"] = rspamd_uid
+            if queue_id:
+                correlation["queue_id"] = queue_id
+            if message_id:
+                correlation["message_id"] = message_id
+
+            def _attach_correlation(payload: dict) -> dict:
+                if correlation:
+                    payload["request"] = correlation
+                return payload
+
             file_hash = hashlib.sha256(filedata).hexdigest()
             cached = await self.get_cached_report(s, file_hash)
             if cached:
                 if cached.get("decrypted") or not custom_passwords:
                     logger.info("%s (%s) - cache hit for %s", s, timer(), file_hash)
                     cached["cache_hit"] = True
-                    return self._build_response(cached, request)
+                    return self._build_response(_attach_correlation(cached), request)
                 logger.info("%s - cache hit but re-analyzing (custom passwords)", s)
             if HAS_MAGIC:
                 file_magic_mime = _magic.Magic(mime=True)
@@ -7459,7 +7711,7 @@ class InspectorDaemon:
                     report["status"] = "finished"
                     report["time_taken"] = round(time.monotonic() - start_time, 4)
                     stats["requests_finished"] += 1
-                    return self._build_response(report, request)
+                    return self._build_response(_attach_correlation(report), request)
 
                 except asyncio.TimeoutError:
                     # Deadline exceeded — attempt non-blocking transition to background.
@@ -7494,8 +7746,12 @@ class InspectorDaemon:
                         if partial:
                             snap = partial.snapshot()
                             snap.update(resp)
-                            return self._build_response(snap, request, status=202)
-                        return self._build_response(resp, request, status=202)
+                            return self._build_response(
+                                _attach_correlation(snap), request, status=202
+                            )
+                        return self._build_response(
+                            _attach_correlation(resp), request, status=202
+                        )
 
                     # Background slot acquired — release foreground slot now.
                     self._fg_sem.release()
@@ -7516,8 +7772,12 @@ class InspectorDaemon:
                     if partial:
                         snap = partial.snapshot()
                         snap.update(snap_resp)
-                        return self._build_response(snap, request, status=202)
-                    return self._build_response(snap_resp, request, status=202)
+                        return self._build_response(
+                            _attach_correlation(snap), request, status=202
+                        )
+                    return self._build_response(
+                        _attach_correlation(snap_resp), request, status=202
+                    )
 
             finally:
                 if fg_acquired:

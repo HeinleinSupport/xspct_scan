@@ -238,6 +238,16 @@ Submit a document for analysis.
 curl -s -F "doc=@malware.xlsm" http://localhost:8080/v1/scan
 ```
 
+**multipart/form-data** (structured `metadata` + `file` parts) — for callers
+like Rspamd that want to pass correlation IDs and per-request overrides as a
+single structured object instead of query parameters:
+
+```bash
+curl -s http://localhost:8080/v1/scan \
+  -F 'metadata={"rspamd_uid":"7f3a9c1e-b2d4","passwords":["Secret123"]};type=application/json' \
+  -F "file=@malware.xlsm"
+```
+
 **application/octet-stream** (raw bytes, metadata as query params):
 
 ```bash

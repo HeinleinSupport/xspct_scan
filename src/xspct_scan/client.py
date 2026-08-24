@@ -20,6 +20,15 @@ Options::
     --output FILE       Write JSON result(s) to FILE (single result or JSON array)
     --no-color          Disable rich/colour output
     --insecure          Skip TLS certificate verification
+    --legacy-multipart  Use the legacy "doc" multipart field instead of the
+                         structured "metadata" + "file" shape (default)
+    --rspamd-uid ID     rspamd_uid to place in the metadata part (correlation)
+    --queue-id ID       queue_id to place in the metadata part
+    --message-id ID     message_id to place in the metadata part
+
+By default the client uploads via the structured "metadata" + "file"
+multipart shape (see docs/guide/api-http.md); --legacy-multipart switches
+back to the plain "doc" field for talking to older daemons.
 """
 
 from __future__ import annotations
@@ -282,8 +291,17 @@ async def scan_file(
     poll_interval: float,
     no_color: bool,
     force_analyzers: str | None = None,
+    legacy_multipart: bool = False,
+    rspamd_uid: str | None = None,
+    queue_id: str | None = None,
+    message_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """POST *path* to /v1/scan. Returns the result dict or None on error."""
+    """POST *path* to /v1/scan. Returns the result dict or None on error.
+
+    By default this uses the structured ``metadata`` + ``file`` multipart
+    shape; pass ``legacy_multipart=True`` to fall back to the plain ``doc``
+    field for talking to older daemons.
+    """
     headers: dict[str, str] = {}
     if api_key:
         headers["X-Api-Key"] = api_key
@@ -291,17 +309,46 @@ async def scan_file(
     params: dict[str, str] = {"timeout": str(timeout)}
     if rtf:
         params["rtf"] = "true"
-    if force_analyzers:
-        params["force_analyzers"] = force_analyzers
 
     try:
         with path.open("rb") as fh:
             form = aiohttp.FormData()
-            form.add_field(
-                "doc", fh, filename=path.name, content_type="application/octet-stream"
-            )
-            if passwords:
-                form.add_field("passwords", passwords)
+            if legacy_multipart:
+                form.add_field(
+                    "doc",
+                    fh,
+                    filename=path.name,
+                    content_type="application/octet-stream",
+                )
+                if passwords:
+                    form.add_field("passwords", passwords)
+                if force_analyzers:
+                    params["force_analyzers"] = force_analyzers
+            else:
+                metadata: dict[str, Any] = {"filename": path.name}
+                if passwords:
+                    metadata["passwords"] = [
+                        p.strip() for p in passwords.split(",") if p.strip()
+                    ]
+                if force_analyzers:
+                    metadata["force_analyzers"] = [
+                        a.strip() for a in force_analyzers.split(",") if a.strip()
+                    ]
+                if rspamd_uid:
+                    metadata["rspamd_uid"] = rspamd_uid
+                if queue_id:
+                    metadata["queue_id"] = queue_id
+                if message_id:
+                    metadata["message_id"] = message_id
+                form.add_field(
+                    "metadata", json.dumps(metadata), content_type="application/json"
+                )
+                form.add_field(
+                    "file",
+                    fh,
+                    filename=path.name,
+                    content_type="application/octet-stream",
+                )
             async with session.post(
                 f"{base_url}/v1/scan",
                 data=form,
@@ -516,6 +563,10 @@ async def _run(args: argparse.Namespace) -> int:
                 poll_interval=args.poll_interval,
                 no_color=args.no_color,
                 force_analyzers=args.force_analyzers,
+                legacy_multipart=args.legacy_multipart,
+                rspamd_uid=args.rspamd_uid,
+                queue_id=args.queue_id,
+                message_id=args.message_id,
             )
             for p in files
         ]
@@ -601,6 +652,32 @@ def main() -> None:
         const="image.ocr",
         dest="force_analyzers",
         help="Force OCR even when the camera-photo/size exclusion gate would skip it",
+    )
+    parser.add_argument(
+        "--legacy-multipart",
+        action="store_true",
+        help=(
+            "Use the legacy 'doc' multipart field instead of the structured "
+            "'metadata' + 'file' shape (default). For talking to older daemons."
+        ),
+    )
+    parser.add_argument(
+        "--rspamd-uid",
+        metavar="ID",
+        default=None,
+        help="rspamd_uid to place in the metadata part (correlation)",
+    )
+    parser.add_argument(
+        "--queue-id",
+        metavar="ID",
+        default=None,
+        help="queue_id to place in the metadata part",
+    )
+    parser.add_argument(
+        "--message-id",
+        metavar="ID",
+        default=None,
+        help="message_id to place in the metadata part",
     )
     parser.add_argument(
         "--poll",
