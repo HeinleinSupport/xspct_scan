@@ -727,6 +727,12 @@ def main() -> None:
         parser.error("--capabilities cannot be combined with FILE arguments")
     if not args.capabilities and not args.files:
         parser.error("provide FILE arguments to scan, or use --capabilities")
+    if args.legacy_multipart and (args.rspamd_uid or args.queue_id or args.message_id):
+        parser.error(
+            "--rspamd-uid/--queue-id/--message-id require the structured "
+            "metadata shape and cannot be combined with --legacy-multipart "
+            "(the legacy 'doc' shape has no metadata part to carry them)"
+        )
     sys.exit(asyncio.run(_run(args)))
 
 
