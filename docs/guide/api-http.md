@@ -94,7 +94,8 @@ Pass optional metadata as query parameters (`filename`, `file_mime`, `file_type`
 | `force_analyzers` | | Comma-separated analyzer paths to bypass exclusion gates for this request (e.g. `image.ocr`). |
 
 `detected_type` (inside `file.type`) will be one of: `pdf`, `html`, `office`,
-`odf`, `image`, `archive`, `text`, or `unknown`.
+`odf`, `image`, `archive`, `script`, `text`, or `unknown`. `.hta` files are
+detected as `html` (they're HTML containers), not `script`.
 
 **Response `200 OK`** — analysis finished within timeout.
 
@@ -198,7 +199,7 @@ Sections are **omitted when empty** (no null/empty noise).
 | `size` | int | File size in bytes |
 | `mime` | string/null | libmagic MIME type |
 | `magic` | string/null | libmagic description |
-| `type` | string | `pdf`\|`html`\|`office`\|`odf`\|`image`\|`archive`\|`text`\|`unknown` |
+| `type` | string | `pdf`\|`html`\|`office`\|`odf`\|`image`\|`archive`\|`script`\|`text`\|`unknown` |
 | `resolution` | string | `WxH` pixel dimensions for image files (e.g. `2096x4608`); absent for non-image files |
 
 #### `scan`
@@ -268,7 +269,7 @@ Each entry:
 | `preview` | list | `[{source, text}]` truncated to `xspct_text_preview_length` per segment |
 | `full` | list | `[{source, text}]` up to `xspct_text_max_length`; requires `xspct_include_text_full: true` |
 
-Segment `source` values: `pdf`, `pdf-image`, `office`, `office-macro`, `odf`, `odf-macro`, `odf-image`, `html`, `html-image`, `ooxml-image`, `text`, `image-ocr`, `image-qr`.
+Segment `source` values: `pdf`, `pdf-image`, `office`, `office-macro`, `odf`, `odf-macro`, `odf-image`, `html`, `html-image`, `ooxml-image`, `text`, `script`, `script-decoded`, `image-ocr`, `image-qr`.
 
 #### `request` (present when the structured metadata part supplied ≥1 correlation ID)
 

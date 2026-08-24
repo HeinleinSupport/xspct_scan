@@ -92,7 +92,8 @@ xspct_analyzers:
   archive:    {enabled: true}
   iocs:       {enabled: true}
   javascript: {enabled: true, quickjs: false}  # set quickjs: true to enable sandboxed JS emulation
-  text:       {enabled: true}   # plain-text / script files (feeds YARA + iocsearcher)
+  text:       {enabled: true}   # plain text (feeds YARA + iocsearcher)
+  script:     {enabled: true}   # standalone .vbs/.vbe/.js/.jse/.wsf/.wsh/.ps1/.bat/.cmd — .hta is handled by html
 
 # When true (default), 'text_preview' (a list of {source, text} truncated
 # excerpts, one per extractor) is included in every response.

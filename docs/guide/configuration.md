@@ -117,6 +117,7 @@ xspct_analyzers:
     ocr_skip_camera: true      # skip OCR when EXIF Make/Model present
   archive:    { enabled: true }
   text:       { enabled: true }
+  script:     { enabled: true }   # standalone .vbs/.vbe/.js/.jse/.wsf/.wsh/.ps1/.bat/.cmd
   iocs:       { enabled: true }
   javascript: { enabled: true, quickjs: false }
   yara:       { enabled: false, rules_path: '' }

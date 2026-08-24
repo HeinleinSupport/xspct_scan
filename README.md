@@ -19,6 +19,7 @@ exposes a simple HTTP API for on-demand scanning.
 - [Image OCR and QR/barcode scanning](#image-ocr-and-qrbarcode-scanning)
 - [ODF analysis](#odf-analysis)
 - [SVG analysis](#svg-analysis)
+- [Standalone script analysis](#standalone-script-analysis)
 - [ClamAV integration](#clamav-integration)
 - [Systemd unit](#systemd-unit)
 - [Documentation](#documentation)
@@ -44,6 +45,11 @@ exposes a simple HTTP API for on-demand scanning.
   OCR fallback for scanned/image-only PDFs
 - **HTML / SVG** — script extraction, CSS-hiding detection, external resource
   tracking; SVG files are treated as HTML
+- **Standalone scripts** — VBScript, encoded VBScript/JScript (Microsoft
+  Script Encoder), JScript, Windows Script Files, PowerShell, and batch
+  files (`.vbs`, `.vbe`, `.js`, `.jse`, `.wsf`, `.wsh`, `.ps1`, `.bat`,
+  `.cmd`); `.hta` (HTML Application) is treated as HTML. See
+  [Standalone script analysis](#standalone-script-analysis)
 - **RTF** — embedded object extraction via `rtfobj` (opt-in per request)
 - **Dynamic JS emulation** — sandboxed execution with
   [quickjs](https://github.com/PetterS/quickjs) and deobfuscation with
@@ -100,7 +106,7 @@ images or macros are silently missed.
 
 Available sources: `pdf`, `pdf-image`, `office`, `office-macro`, `odf`,
 `odf-macro`, `odf-image`, `html`, `html-image`, `ooxml-image`, `text`,
-`image-ocr`, `image-qr`.
+`script`, `script-decoded`, `image-ocr`, `image-qr`.
 
 ### Infrastructure
 
@@ -484,6 +490,34 @@ All extracted text feeds iocsearcher.
 SVG files are XML-based and can carry `<script>` tags, inline event handlers,
 and external references. xspct_scan routes SVG through the **HTML analyzer**:
 all HTML checks apply, no extra configuration required.
+
+---
+
+## Standalone script analysis
+
+Standalone script attachments — a common first-stage delivery vector — are
+routed to a dedicated analyzer instead of falling through to YARA/ClamAV as
+an unknown blob:
+
+| Extension | Handling |
+|-----------|----------|
+| `.vbs` | Keyword/heuristic scan via oletools' `VBA_Scanner` (same engine used for Office macros) — reused as-is since it works on any VBA/VBScript source, not just OLE containers. Falls back to a small built-in keyword scan when oletools isn't installed. |
+| `.vbe` | Microsoft Script Encoder decoding, then scanned as `.vbs`. Requires `[advanced]` (SFlock2) for the decoder — the encoding scheme has no cryptographic secret, but the substitution table is reused from SFlock2's bundled decoder rather than re-derived, to avoid transcription errors. Without it, the file is flagged as undecoded and keyword heuristics don't run. |
+| `.js` | Routed directly through the existing JavaScript analyzer (`eval`/`unescape`/`ActiveXObject`/tree-sitter AST scan/optional QuickJS emulation) — previously only reachable for JS *embedded* in HTML. |
+| `.jse` | Microsoft Script Encoder decoding, then scanned as `.js`. |
+| `.wsf` / `.wsh` | XML container — `<script language="...">` blocks are extracted and each routed to the VBScript or JScript path by its `language` attribute. |
+| `.ps1` | Regex heuristics for download cradles, `-EncodedCommand` (decoded and recursively analysed), AMSI bypass patterns, Defender tampering, persistence (Run keys, scheduled tasks), and obfuscation density. |
+| `.bat` / `.cmd` | Same heuristic set as PowerShell, plus living-off-the-land patterns (`certutil`, `bitsadmin`, `mshta`, `regsvr32`), shadow-copy deletion, and self-deletion. |
+| `.hta` | Treated as **HTML**, not script — an HTA is an HTML container that executes with full local scripting privileges. `analyze_html()` additionally flags the `<HTA:APPLICATION>` tag and stealth attributes (`WINDOWSTATE=minimize`, `SHOWINTASKBAR=no`). |
+
+Every script (and each WSF/WSH `<script>` block) also gets a cross-cutting
+regex pass for indicators that aren't language-specific: download cradles,
+persistence, AMSI bypass, and obfuscation density. All extracted/decoded
+text feeds the same IOC and iocsearcher pipeline as every other analyzer.
+
+```bash
+xspct-scan-client suspicious.ps1
+```
 
 ---
 

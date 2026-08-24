@@ -32,6 +32,45 @@
   `--rspamd-uid`, `--queue-id`, `--message-id` flags populate the
   corresponding metadata fields. `--legacy-multipart` restores the old
   `doc`-field behavior for talking to older daemons.
+- **Standalone script analysis** — a new `script` detected type and
+  `analyze_script()` analyzer for previously-unhandled script attachments:
+  `.vbs`, `.vbe`, `.js`, `.jse`, `.wsf`, `.wsh`, `.ps1`, `.bat`, `.cmd`.
+  - VBScript (`.vbs`, decoded `.vbe`, VBScript `<script>` blocks in
+    WSF/WSH) is scanned via oletools' `VBA_Scanner` — reused directly since
+    it works on any VBA/VBScript source, not just OLE containers — with a
+    built-in keyword fallback when oletools isn't installed.
+  - JScript (`.js`, decoded `.jse`, JScript `<script>` blocks in WSF/WSH)
+    is routed through the existing JavaScript analyzer, previously only
+    reachable for script embedded in HTML.
+  - `.vbe`/`.jse` (Microsoft Script Encoder) are decoded before analysis
+    using SFlock2's bundled decoder when installed (`[advanced]` extra);
+    flagged as undecoded otherwise.
+  - `.wsf`/`.wsh` containers are unwrapped into their `<script
+    language="...">` blocks, each routed by language.
+  - `.ps1`/`.bat`/`.cmd` get regex heuristics for download cradles,
+    `-EncodedCommand` (Base64/UTF-16LE-decoded and recursively analysed),
+    AMSI bypass, Defender tampering, persistence (Run keys, scheduled
+    tasks), living-off-the-land binaries (certutil/bitsadmin/mshta/
+    regsvr32), shadow-copy deletion, self-deletion, and obfuscation
+    density — this cross-cutting scan also runs against every other script
+    language, not just PS1/BAT.
+  - `.hta` is **not** part of the script analyzer — it's an HTML container
+    and is detected as `html`, matching the existing SVG treatment.
+    `analyze_html()` gained HTA-specific findings for the
+    `<HTA:APPLICATION>` tag and stealth attributes (`WINDOWSTATE=minimize`,
+    `SHOWINTASKBAR=no`), and an HTA's embedded `<script>` blocks also get
+    the same cross-cutting heuristics and, for VBScript (including
+    Script-Encoder-encoded VBScript, decoded before scanning), the
+    `VBA_Scanner` pass that standalone `.vbs`/`.wsf` files get.
+  - New `text_preview`/`text_full` sources: `script`, `script-decoded`.
+  - New config key `xspct_analyzers.script.enabled` (default `true`).
+  - `.js`/`.bat`/`.ps1`/`.vbs` are no longer routed to the generic `text`
+    analyzer (they were previously indistinguishable from plain text); the
+    filename-independent magic-only detection pass in `handle_scan()` no
+    longer runs `text` redundantly alongside `script` for the same upload
+    — but only while the script analyzer is enabled; when it's disabled,
+    archive members and top-level uploads alike still fall back to `text`
+    instead of going unanalyzed.
 
 ## 0.5.2 — 2026-07-09
 

@@ -16,6 +16,7 @@ Public API
 """
 
 import asyncio
+import base64
 import concurrent.futures
 import contextvars
 import hashlib
@@ -194,7 +195,6 @@ TYPE_ROUTING: "dict[str, dict]" = {
             ".rb",
             ".pl",
             ".php",
-            ".js",
             ".ts",
             ".jsx",
             ".tsx",
@@ -203,12 +203,29 @@ TYPE_ROUTING: "dict[str, dict]" = {
             ".yaml",
             ".yml",
             ".toml",
-            ".bat",
-            ".ps1",
-            ".vbs",
             ".sql",
         ),
         "magic_keywords": ("ascii", "utf-8", "unicode"),
+    },
+    "script": {
+        # No reliable exact/prefix MIME types for these — routing is by
+        # filename extension. .hta is deliberately excluded: it's an HTML
+        # container and is routed to "html" (see get_detected_type()).
+        "mime_exact": (),
+        "mime_prefixes": (),
+        "mime_fragments": (),
+        "extensions": (
+            ".vbs",
+            ".vbe",
+            ".js",
+            ".jse",
+            ".wsf",
+            ".wsh",
+            ".ps1",
+            ".bat",
+            ".cmd",
+        ),
+        "magic_keywords": (),
     },
 }
 
@@ -292,12 +309,14 @@ except ImportError:
 
 try:
     from oletools.olevba import VBA_Parser as _VBA_Parser
+    from oletools.olevba import VBA_Scanner as _VBA_Scanner
     from oletools.rtfobj import RtfObjParser as _RtfObjParser
     from oletools.rtfobj import RtfParser as _RtfParser
 
     HAS_OLETOOLS = True
 except ImportError:
     _VBA_Parser = None  # type: ignore[assignment,misc]
+    _VBA_Scanner = None  # type: ignore[assignment,misc]
     _RtfObjParser = None  # type: ignore[assignment]
     _RtfParser = object  # fallback base so TextExtractorRtf can still be defined
     HAS_OLETOOLS = False
@@ -610,6 +629,7 @@ config: dict = {
         "iocs": {"enabled": True},
         "javascript": {"enabled": True, "quickjs": False},
         "text": {"enabled": True},
+        "script": {"enabled": True},
     },
     # When True, 'text_preview' (a list of {source, text} truncated excerpts,
     # one per extractor) is included in the report. Enabled by default.
@@ -3984,13 +4004,19 @@ class InspectorDaemon:
                 if sub:
                     self.merge_reports(report, sub)
                     analyzers_run.append("archive")
-            elif detected in ("pdf", "html", "office", "text"):
+            elif detected in ("pdf", "html", "office", "text", "script"):
+                member_types = [detected]
+                if detected == "script" and "script" not in enabled:
+                    member_types = ["text"]
                 sub = _run_member(
-                    detected, self.sync_analyze, s, name, member_data, None
+                    detected,
+                    lambda: self.sync_analyze(
+                        s, name, member_data, None, types_to_run=member_types
+                    ),
                 )
                 if sub:
                     self.merge_reports(report, sub)
-                    analyzers_run.append(detected)
+                    analyzers_run.extend(member_types)
                     if HAS_IOCSEARCHER and "iocs" in enabled:
                         analyzers_run.append("iocs")
                     if _yara_ok:
@@ -4238,6 +4264,480 @@ class InspectorDaemon:
         }
         self._add_text_segment(report, "text", text[:text_max], module="builtin")
         logger.debug("analyze_text: %s — %d chars", filename, len(text))
+        return report
+
+    # ------------------------------------------------------------------
+    # Standalone script analysis (HTA/VBS/VBE/JS/JSE/WSF/WSH/PS1/BAT/CMD)
+    # ------------------------------------------------------------------
+
+    _SCRIPT_EXT_LANG: "dict[str, str]" = {
+        ".vbs": "vbs",
+        ".vbe": "vbe",
+        ".js": "js",
+        ".jse": "jse",
+        ".wsf": "wsf",
+        ".wsh": "wsh",
+        ".ps1": "ps1",
+        ".bat": "bat",
+        ".cmd": "bat",
+    }
+
+    # Cross-cutting indicators that apply regardless of script language:
+    # download cradles, persistence, AMSI bypass, process creation.
+    _SCRIPT_SUSPICIOUS = [
+        (
+            r"-[Ee]nc(?:odedCommand)?\b",
+            "EncodedCommand",
+            "-EncodedCommand",
+            "Base64-encoded PowerShell command",
+        ),
+        (
+            r"\b(?:IEX|Invoke-Expression)\b",
+            "Suspicious",
+            "Invoke-Expression",
+            "Dynamic code execution via Invoke-Expression",
+        ),
+        (
+            r"\b(?:Net\.WebClient|Invoke-WebRequest|Invoke-RestMethod|"
+            r"DownloadString|DownloadFile|Start-BitsTransfer)\b",
+            "DownloadCradle",
+            "download-cradle",
+            "Network download primitive",
+        ),
+        (
+            r"-[Ww](?:indowStyle)?\s+[Hh]idden\b",
+            "Stealth",
+            "WindowStyle-Hidden",
+            "Window hidden from the user",
+        ),
+        (
+            r"\[Reflection\.Assembly\]|System\.Reflection\.Assembly",
+            "Suspicious",
+            "Reflection.Assembly",
+            "Reflective .NET assembly loading",
+        ),
+        (
+            r"[Aa]msi(?:ScanBuffer|InitFailed|Utils)\b",
+            "AmsiBypass",
+            "AMSI-bypass",
+            "Anti-Malware Scan Interface bypass attempt",
+        ),
+        (
+            r"\b(?:Set|Add)-MpPreference\b",
+            "Suspicious",
+            "MpPreference",
+            "Windows Defender configuration tampering",
+        ),
+        (
+            r"New-ItemProperty[^\n]*\\Run\b|Register-ScheduledTask\b|"
+            r"schtasks(?:\.exe)?\s+/create",
+            "Persistence",
+            "persistence",
+            "Registry Run key or scheduled task persistence",
+        ),
+        (
+            r"\bStart-Process\b|New-Object\s+System\.Diagnostics\.Process",
+            "ProcessCreation",
+            "process-creation",
+            "Child process creation",
+        ),
+        (
+            r"certutil(?:\.exe)?\s+[^\n]*-urlcache|certutil(?:\.exe)?\s+[^\n]*-decode",
+            "DownloadCradle",
+            "certutil",
+            "Living-off-the-land download/decode via certutil",
+        ),
+        (
+            r"bitsadmin(?:\.exe)?\s+/transfer",
+            "DownloadCradle",
+            "bitsadmin",
+            "BITS-based download cradle",
+        ),
+        (
+            r"vssadmin(?:\.exe)?\s+delete\s+shadows|wbadmin(?:\.exe)?\s+delete\s+catalog",
+            "Destructive",
+            "shadow-copy-deletion",
+            "Volume shadow copy / backup catalog deletion (ransomware indicator)",
+        ),
+        (
+            r"\bmshta(?:\.exe)?\b|regsvr32(?:\.exe)?\s+/[su]\s+/i:https?://",
+            "LivingOffTheLand",
+            "mshta-regsvr32",
+            "Living-off-the-land binary execution",
+        ),
+        (
+            r"\breg(?:\.exe)?\s+add\s+[^\n]*\\Run\b",
+            "Persistence",
+            "reg-add-run",
+            "Registry Run key persistence via reg.exe",
+        ),
+        (
+            r"del\s+/[fF]\s+/[qQ]\s+%~f0|del\s+%0\b",
+            "AntiForensic",
+            "self-delete",
+            "Script deletes itself after execution",
+        ),
+    ]
+
+    # Fallback keyword scan for standalone VBScript when oletools isn't
+    # installed. Mirrors the categories oletools.VBA_Scanner would find.
+    _VBS_FALLBACK_KEYWORDS = [
+        (r"\bShell\s*\(", "Suspicious", "Shell()", "Shell command execution"),
+        (
+            r"\bCreateObject\s*\(",
+            "Suspicious",
+            "CreateObject()",
+            "COM object instantiation",
+        ),
+        (
+            r"WScript\.Shell",
+            "Suspicious",
+            "WScript.Shell",
+            "Windows Script Host Shell object",
+        ),
+        (
+            r"\bExecuteGlobal\b",
+            "Suspicious",
+            "ExecuteGlobal",
+            "Dynamic global code execution",
+        ),
+        (
+            r"(?:Chr\s*\(\s*\d+\s*\)\s*&\s*){5,}",
+            "Obfuscation",
+            "Chr()-chain",
+            "Character-code obfuscation chain",
+        ),
+    ]
+
+    def _scan_script_patterns(self, text: str) -> list[dict]:
+        """Cross-cutting regex scan applied to any script language.
+
+        Covers download cradles, persistence, AMSI bypass, process
+        creation, and a simple obfuscation-density heuristic.
+        """
+        hits: list[dict] = []
+        for pattern, a_type, keyword, desc in self._SCRIPT_SUSPICIOUS:
+            if re.search(pattern, text, re.I):
+                entry = {"type": a_type, "keyword": keyword, "description": desc}
+                if entry not in hits:
+                    hits.append(entry)
+        backticks = text.count("`")
+        concat_ops = len(re.findall(r"[\"']\s*\+\s*[\"']", text))
+        if backticks > 20 or concat_ops > 20:
+            hits.append(
+                {
+                    "type": "Obfuscation",
+                    "keyword": "high-obfuscation-density",
+                    "description": (
+                        f"High obfuscation density (backtick escapes={backticks}, "
+                        f"string concatenations={concat_ops})"
+                    ),
+                }
+            )
+        return hits
+
+    def _scan_vbs_text(self, text: str) -> list[dict]:
+        """Scan VBScript source via oletools' ``VBA_Scanner`` when available.
+
+        ``VBA_Scanner`` works on any VBA/VBScript source string, independent
+        of an OLE container, so it can be reused directly for standalone
+        ``.vbs`` files and decoded ``.vbe``/WSF VBScript blocks. Falls back
+        to a small keyword scan when oletools isn't installed.
+        """
+        hits: list[dict] = []
+        if HAS_OLETOOLS and _VBA_Scanner is not None:
+            try:
+                scanner = _VBA_Scanner(text)
+                vba_string_count = 0
+                for kw_type, keyword, description in scanner.scan(deobfuscate=True):
+                    if kw_type == "IOC":
+                        # For IOC hits, `keyword` is the matched value and
+                        # `description` is the pattern type ("URL", "IPv4
+                        # address", "E-mail address", "Executable file
+                        # name"), optionally suffixed with the obfuscation
+                        # layer it was found through. Plain URL/IPv4 hits on
+                        # the raw text duplicate extract_iocs()'s scan of the
+                        # same bytes, so those are dropped — but e-mail
+                        # addresses and executable filenames aren't IOC types
+                        # extract_iocs() extracts at all, and any hit found
+                        # only after VBA_Scanner deobfuscates a hex/Base64/
+                        # Dridex/VBA-expression-encoded string isn't visible
+                        # to extract_iocs()'s plain-text scan either — both
+                        # would be silently lost if dropped here too.
+                        if description in ("URL", "IPv4 address"):
+                            continue
+                        entry = {
+                            "type": "IOC",
+                            "keyword": keyword,
+                            "description": description,
+                        }
+                        if entry not in hits:
+                            hits.append(entry)
+                        continue
+                    if kw_type == "VBA string":
+                        vba_string_count += 1
+                        continue
+                    entry = {
+                        "type": kw_type,
+                        "keyword": keyword,
+                        "description": description,
+                    }
+                    if entry not in hits:
+                        hits.append(entry)
+                if vba_string_count:
+                    hits.append(
+                        {
+                            "type": "VBA string",
+                            "keyword": f"{vba_string_count} obfuscated string(s)",
+                            "description": (
+                                f"{vba_string_count} VBA obfuscated string "
+                                "expression(s) detected"
+                            ),
+                        }
+                    )
+                return hits
+            except Exception as exc:
+                logger.debug("VBA_Scanner failed on standalone script: %s", exc)
+        for pattern, a_type, keyword, desc in self._VBS_FALLBACK_KEYWORDS:
+            if re.search(pattern, text, re.I):
+                entry = {"type": a_type, "keyword": keyword, "description": desc}
+                if entry not in hits:
+                    hits.append(entry)
+        return hits
+
+    def _extract_wsf_script_blocks(self, text: str) -> list[tuple[str, str]]:
+        """Extract ``(language, code)`` pairs from a WSF/WSH ``<script>`` container."""
+        blocks: list[tuple[str, str]] = []
+        for m in re.finditer(
+            r'<script[^>]*\blanguage\s*=\s*["\']?([^"\'>\s]+)["\']?[^>]*>(.*?)</script>',
+            text,
+            re.I | re.S,
+        ):
+            lang = m.group(1).strip().lower()
+            code = m.group(2)
+            # WSF script bodies are commonly CDATA-wrapped to escape XML
+            # metacharacters; strip the wrapper so downstream scanners see
+            # clean script source instead of spurious leading/trailing tokens.
+            code = re.sub(r"^\s*<!\[CDATA\[", "", code, flags=re.I)
+            code = re.sub(r"\]\]>\s*$", "", code)
+            if code.strip():
+                blocks.append((lang, code))
+        return blocks
+
+    def _decode_vbe_jse(self, text: str) -> "str | None":
+        """Decode Microsoft Script Encoder (VBE/JSE) obfuscation.
+
+        The encoding is a fixed, publicly documented byte-substitution
+        scheme with no cryptographic secret — reversible without any
+        external library. Uses sflock2's bundled decoder when installed
+        (it's already an optional project dependency, used for archive
+        extraction) since re-deriving the substitution table independently
+        would risk transcription errors; returns ``None`` when sflock2
+        isn't installed or the text doesn't contain the ``#@~^`` marker.
+        """
+        if "#@~^" not in text:
+            return None
+        if not HAS_SFLOCK:
+            return None
+        try:
+            from sflock.auxiliary.decode_vbe_jse import (
+                decode_file as _sflock_decode_vbe,
+            )
+
+            decoded = _sflock_decode_vbe("", text)
+        except Exception as exc:
+            logger.debug("VBE/JSE decode failed: %s", exc)
+            return None
+        return decoded or None
+
+    def _extract_ps_encoded_command(self, text: str) -> "str | None":
+        """Decode a PowerShell ``-EncodedCommand`` Base64/UTF-16LE payload."""
+        m = re.search(r"-enc(?:odedCommand)?[\s:]+([A-Za-z0-9+/=]{16,})", text, re.I)
+        if not m:
+            return None
+        b64 = m.group(1)
+        try:
+            raw = base64.b64decode(b64 + "=" * (-len(b64) % 4))
+            return raw.decode("utf-16-le", errors="replace")
+        except Exception:
+            return None
+
+    def analyze_script(
+        self, data: bytes, filename: str, file_mime: "str | None" = None
+    ) -> "dict | None":
+        """Analyse a standalone script file.
+
+        Covers VBScript (``.vbs``), encoded VBScript/JScript (``.vbe``/
+        ``.jse``, Microsoft Script Encoder), JScript (``.js``), Windows
+        Script Files (``.wsf``/``.wsh``), PowerShell (``.ps1``), and batch
+        (``.bat``/``.cmd``). Dispatches by filename extension: VBScript
+        content is scanned via oletools' ``VBA_Scanner`` (reused as-is,
+        since it works on any VBA/VBScript source, not just OLE
+        containers); JScript content goes through :meth:`analyze_javascript`;
+        WSF/WSH containers are unwrapped into their ``<script
+        language="...">`` blocks and each routed accordingly. A
+        cross-cutting regex scan (download cradles, persistence, AMSI
+        bypass, obfuscation density) runs against every script regardless
+        of language. HTA files are handled separately by
+        :meth:`analyze_html` (they're HTML containers).
+
+        Args:
+            data: Raw file bytes.
+            filename: Original filename (used to select the language).
+            file_mime: MIME type hint (unused — routing is extension-driven).
+
+        Returns:
+            A report dict with ``analyses``, ``iocs``, and text segments,
+            or ``None`` when *data* is empty.
+        """
+        if not data:
+            return None
+        ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        lang = self._SCRIPT_EXT_LANG.get(ext, "text")
+
+        try:
+            text = data.decode("utf-8-sig", errors="replace")
+        except Exception:
+            text = data.decode("latin-1", errors="replace")
+
+        text_max = int(config.get("xspct_text_max_length", 50000))
+        report: dict = {"analyses": [], "iocs": self.extract_iocs(data)}
+        self._add_text_segment(report, "script", text[:text_max], module="builtin")
+
+        def _add_hits(hits: list) -> None:
+            for hit in hits:
+                if hit not in report["analyses"]:
+                    report["analyses"].append(hit)
+
+        def _add_iocs(candidate_text: str) -> None:
+            extracted = self.extract_iocs(
+                candidate_text.encode("utf-8", errors="replace")
+            )
+            for ioc_type, values in extracted.items():
+                bucket = report["iocs"].setdefault(ioc_type, [])
+                for value in values:
+                    if value not in bucket:
+                        bucket.append(value)
+
+        analysis_text = text
+
+        if lang in ("vbe", "jse"):
+            decoded = self._decode_vbe_jse(text)
+            if decoded:
+                self._add_text_segment(
+                    report,
+                    "script-decoded",
+                    decoded[:text_max],
+                    module="vbe-jse-decoder",
+                )
+                analysis_text = decoded
+                _add_iocs(decoded)
+            else:
+                report["analyses"].append(
+                    {
+                        "type": "Encoded",
+                        "keyword": f"{lang}-undecoded",
+                        "description": (
+                            f"{lang.upper()} (Script Encoder) file could not be "
+                            "decoded — keyword heuristics cannot run on the raw "
+                            "obfuscated form"
+                        ),
+                    }
+                )
+
+        if lang in ("vbs", "vbe"):
+            _add_hits(self._scan_vbs_text(analysis_text))
+        elif lang in ("js", "jse"):
+            _add_hits(self.analyze_javascript(analysis_text, filename))
+        elif lang in ("wsf", "wsh"):
+            blocks = self._extract_wsf_script_blocks(analysis_text)
+            if not blocks:
+                report["analyses"].append(
+                    {
+                        "type": "Encoded",
+                        "keyword": "wsf-no-script-blocks",
+                        "description": (
+                            "WSF/WSH file has no recognizable <script> blocks"
+                        ),
+                    }
+                )
+            for block_lang, code in blocks:
+                _lang = block_lang.strip().lower()
+                encoded_block = _lang in (
+                    "vbscript.encode",
+                    "jscript.encode",
+                    "vbe",
+                    "jse",
+                )
+                if encoded_block:
+                    decoded_block = self._decode_vbe_jse(code)
+                    if not decoded_block:
+                        report["analyses"].append(
+                            {
+                                "type": "Encoded",
+                                "keyword": f"wsf-{_lang}-undecoded",
+                                "description": (
+                                    f"Encoded WSF {block_lang} block could not be "
+                                    "decoded"
+                                ),
+                            }
+                        )
+                        continue
+                    code = decoded_block
+                    self._add_text_segment(
+                        report,
+                        "script-decoded",
+                        code[:text_max],
+                        module="vbe-jse-decoder",
+                    )
+                    _add_iocs(code)
+                    _add_hits(self._scan_script_patterns(code))
+
+                if _lang in ("vbscript", "vbscript.encode", "vbs", "vbe"):
+                    _add_hits(self._scan_vbs_text(code))
+                elif _lang in (
+                    "jscript",
+                    "jscript.encode",
+                    "javascript",
+                    "js",
+                    "jse",
+                ):
+                    _add_hits(
+                        self.analyze_javascript(
+                            code, f"WSF <script language={block_lang}>"
+                        )
+                    )
+
+        # Cross-cutting heuristics apply regardless of language (e.g. a VBS
+        # or WSF file can just as well shell out to powershell.exe).
+        _add_hits(self._scan_script_patterns(analysis_text))
+
+        if lang == "ps1":
+            decoded_cmd = self._extract_ps_encoded_command(analysis_text)
+            if decoded_cmd:
+                self._add_text_segment(
+                    report,
+                    "script-decoded",
+                    decoded_cmd[:text_max],
+                    module="ps-encodedcommand",
+                )
+                _add_hits(
+                    [
+                        {
+                            "type": "EncodedCommand",
+                            "keyword": "-EncodedCommand-decoded",
+                            "description": (
+                                "Base64/UTF-16LE -EncodedCommand payload decoded"
+                            ),
+                        }
+                    ]
+                )
+                _add_hits(self._scan_script_patterns(decoded_cmd))
+                _add_iocs(decoded_cmd)
+
+        logger.debug(
+            "analyze_script: %s (%s) — %d hits", filename, lang, len(report["analyses"])
+        )
         return report
 
     # ------------------------------------------------------------------
@@ -4932,6 +5432,47 @@ class InspectorDaemon:
             text = data.decode("utf-8", "ignore")
         except Exception:
             text = data.decode("ascii", "ignore")
+        # HTA (HTML Application): executes with full local scripting
+        # privileges outside the browser sandbox, so the presence of the
+        # container tag alone is worth flagging, plus known stealth
+        # attributes used to hide the HTA window from the user.
+        is_hta = bool(re.search(r"<hta:application\b", text, re.I))
+        if is_hta:
+            report["analyses"].append(
+                {
+                    "type": "HTAApplication",
+                    "keyword": "hta:application",
+                    "description": (
+                        "HTML Application (HTA) container — executes with "
+                        "full local scripting privileges outside the "
+                        "browser sandbox"
+                    ),
+                }
+            )
+            ws = re.search(r'windowstate\s*=\s*["\']?(\w+)', text, re.I)
+            if ws and ws.group(1).lower() in ("minimize", "minimized"):
+                report["analyses"].append(
+                    {
+                        "type": "HTAStealth",
+                        "keyword": "WindowState",
+                        "description": (
+                            f"HTA WindowState={ws.group(1)} (window hidden/"
+                            "minimized — stealth indicator)"
+                        ),
+                    }
+                )
+            sit = re.search(r'showintaskbar\s*=\s*["\']?(\w+)', text, re.I)
+            if sit and sit.group(1).lower() in ("no", "false", "0"):
+                report["analyses"].append(
+                    {
+                        "type": "HTAStealth",
+                        "keyword": "SHOWINTASKBAR",
+                        "description": (
+                            "HTA SHOWINTASKBAR=no (hidden from taskbar — "
+                            "stealth indicator)"
+                        ),
+                    }
+                )
         if re.search(r"<script", text, re.I):
             report["has_scripts"] = True
             for func, desc in {
@@ -5037,6 +5578,54 @@ class InspectorDaemon:
                 for hit in self.analyze_javascript(script_body, "HTML <script>"):
                     if hit not in report["analyses"]:
                         report["analyses"].append(hit)
+        # HTA files execute with full local scripting privileges (unlike
+        # ordinary HTML, which is sandboxed), so an HTA's embedded script
+        # also gets the standalone-script cross-cutting heuristics (download
+        # cradles, persistence, AMSI bypass, LOL-bin execution) and, for
+        # VBScript blocks, oletools' VBA_Scanner — neither of which the
+        # generic <script> handling above covers. Scoped to actual HTA
+        # documents to avoid false positives on ordinary web pages.
+        if is_hta:
+            for hit in self._scan_script_patterns(text):
+                if hit not in report["analyses"]:
+                    report["analyses"].append(hit)
+            for block_lang, code in self._extract_wsf_script_blocks(text):
+                language = block_lang.strip().lower()
+                if language in ("vbscript.encode", "vbe"):
+                    decoded = self._decode_vbe_jse(code)
+                    if not decoded:
+                        report["analyses"].append(
+                            {
+                                "type": "Encoded",
+                                "keyword": f"hta-{language}-undecoded",
+                                "description": (
+                                    f"Encoded HTA {block_lang} block could not be "
+                                    "decoded"
+                                ),
+                            }
+                        )
+                        continue
+                    code = decoded
+                    self._add_text_segment(
+                        report,
+                        "script-decoded",
+                        code[: int(config.get("xspct_text_max_length", 50000))],
+                        module="vbe-jse-decoder",
+                    )
+                    decoded_iocs = self.extract_iocs(
+                        code.encode("utf-8", errors="replace")
+                    )
+                    for ioc_type, values in decoded_iocs.items():
+                        for value in values:
+                            if value not in report["iocs"][ioc_type]:
+                                report["iocs"][ioc_type].append(value)
+                    for hit in self._scan_script_patterns(code):
+                        if hit not in report["analyses"]:
+                            report["analyses"].append(hit)
+                if language in ("vbscript", "vbscript.encode", "vbs", "vbe"):
+                    for hit in self._scan_vbs_text(code):
+                        if hit not in report["analyses"]:
+                            report["analyses"].append(hit)
         # Analyse inline base64-encoded images (data URIs)
         if HAS_OCR or HAS_PYZBAR:
             for i, (mime_hint, b64data) in enumerate(
@@ -5155,7 +5744,7 @@ class InspectorDaemon:
 
         Returns:
             One of ``'pdf'``, ``'html'``, ``'office'``, ``'image'``,
-            ``'archive'``, ``'text'``, or ``'unknown'``.
+            ``'archive'``, ``'script'``, ``'text'``, or ``'unknown'``.
         """
         mime = (mime or "").lower()
         desc = (desc or "").lower()
@@ -5218,6 +5807,18 @@ class InspectorDaemon:
         # references — treat it like HTML rather than a binary image.
         if mime == "image/svg+xml" or filename.endswith(".svg"):
             return "html"
+
+        # HTA (HTML Application) is an HTML container that executes with full
+        # local scripting privileges outside the browser sandbox — route it
+        # through the HTML analyzer just like SVG, not the script analyzer.
+        if filename.endswith(".hta"):
+            return "html"
+
+        # Standalone script files (VBScript/VBE/JS/JSE/WSF/WSH/PowerShell/
+        # batch) — analyzed by the dedicated script analyzer.
+        _scr = _t["script"]
+        if any(filename.endswith(e) for e in _scr["extensions"]):
+            return "script"
 
         # Raster images
         _img = _t["image"]
@@ -6109,6 +6710,8 @@ class InspectorDaemon:
                 res = self.analyze_archive(s, filename, data, 0)
             elif t == "text" and "text" in enabled:
                 res = self.analyze_text(data, filename, file_mime)
+            elif t == "script" and "script" in enabled:
+                res = self.analyze_script(data, filename, file_mime)
             # 'unknown' — no dedicated method; YARA/iocsearcher run separately
             if res:
                 successful_types.append(t)
@@ -6648,6 +7251,8 @@ class InspectorDaemon:
                 pending.append("archive")
             elif t == "text" and "text" in enabled:
                 pending.append("text")
+            elif t == "script" and "script" in enabled:
+                pending.append("script")
             # 'unknown': no dedicated analyzer; text_preview extracted in pre-Group-2 block
         # YARA runs regardless of file type (always on raw bytes).
         # Either or both engines may be active simultaneously.
@@ -6750,6 +7355,12 @@ class InspectorDaemon:
                 tasks.append(
                     asyncio.create_task(
                         _run("text", self.analyze_text, data, filename, file_mime)
+                    )
+                )
+            elif t == "script" and "script" in enabled:
+                tasks.append(
+                    asyncio.create_task(
+                        _run("script", self.analyze_script, data, filename, file_mime)
                     )
                 )
             # 'unknown': no dedicated Group-1 analyzer; iocsearcher + YARA
@@ -7651,6 +8262,20 @@ class InspectorDaemon:
                 types_to_run.add(
                     self.get_detected_type(magic_mime, magic_desc, filename, filedata)
                 )
+            # Script source is plain ASCII/UTF-8 text with no distinctive magic
+            # signature, so the filename-independent magic-only detection above
+            # falls back to "text" for virtually every script file. Once the
+            # extension-aware pass has identified "script", drop the redundant
+            # "text" pass rather than running both analyzers over identical data
+            # — but only when the script analyzer is actually enabled, so a
+            # deployment that disables it still gets the plain-text fallback
+            # instead of the file going completely unanalyzed.
+            if (
+                "script" in types_to_run
+                and "text" in types_to_run
+                and "script" in self._resolve_enabled_analyzers()
+            ):
+                types_to_run.discard("text")
             file_mime = file_mime_provided or magic_mime
             file_desc = file_type_provided or magic_desc
             logger.info(
@@ -8007,6 +8632,14 @@ class InspectorDaemon:
                 # aggregate; per-analyzer mime_patterns lists only fragment-based globs.
                 "mime_patterns": [],
                 "mime_types": sorted(TYPE_ROUTING["text"]["mime_exact"]),
+                "scope": "type-routed",
+            },
+            "script": {
+                "active": _az_active("script", True),
+                "detected_type": "script",
+                "extensions": sorted(TYPE_ROUTING["script"]["extensions"]),
+                "mime_patterns": [],
+                "mime_types": sorted(TYPE_ROUTING["script"]["mime_exact"]),
                 "scope": "type-routed",
             },
             "yara": {
