@@ -26,6 +26,7 @@ path = [
     ".reuseignore",
     "bom.json",
     "CLAUDE.md",
+    "CONTRIBUTING.md",
     "README.md",
     "docs/**",
     "yara/url.yar",
