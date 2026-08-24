@@ -25,6 +25,7 @@ import io
 import json
 import logging
 import math
+import ntpath
 import os
 import re
 import secrets
@@ -227,7 +228,22 @@ TYPE_ROUTING: "dict[str, dict]" = {
         ),
         "magic_keywords": (),
     },
+    "lnk": {
+        "mime_exact": ("application/x-ms-shortcut",),
+        "mime_prefixes": (),
+        "mime_fragments": (),
+        "extensions": (".lnk",),
+        "magic_keywords": ("ms windows shortcut", "windows shortcut"),
+    },
 }
+
+# LNK ShellLinkHeader signature: 4-byte HeaderSize (0x0000004C) followed by
+# the fixed LinkCLSID GUID {00021401-0000-0000-C000-000000000046}. Used as a
+# magic-byte fallback in get_detected_type() since some libmagic builds don't
+# recognize .lnk files.
+_LNK_MAGIC = (
+    b"\x4c\x00\x00\x00\x01\x14\x02\x00\x00\x00\x00\x00\xc0\x00\x00\x00\x00\x00\x00\x46"
+)
 
 # Rspamd-compatible attachment digest key.
 # Rspamd computes keyed BLAKE2b-512 over decoded MIME-part content, keyed
@@ -482,6 +498,14 @@ except ImportError:
     HAS_SFLOCK = False
 
 try:
+    from LnkParse3.lnk_file import LnkFile as _LnkFile
+
+    HAS_LNKPARSE = True
+except ImportError:
+    _LnkFile = None  # type: ignore[assignment,misc]
+    HAS_LNKPARSE = False
+
+try:
     import msgpack as _msgpack
 
     HAS_MSGPACK = True
@@ -630,6 +654,7 @@ config: dict = {
         "javascript": {"enabled": True, "quickjs": False},
         "text": {"enabled": True},
         "script": {"enabled": True},
+        "lnk": {"enabled": True},
     },
     # When True, 'text_preview' (a list of {source, text} truncated excerpts,
     # one per extractor) is included in the report. Enabled by default.
@@ -2559,6 +2584,13 @@ class InspectorDaemon:
                     'pip install "xspct-scan[enrichment]"',
                 ),
                 (
+                    "lnk",
+                    "LnkParse3",
+                    HAS_LNKPARSE,
+                    _az.get("lnk", {}).get("enabled", True),
+                    'pip install "xspct-scan[advanced]"',
+                ),
+                (
                     "pdf",
                     "pymupdf",
                     HAS_PYMUPDF,
@@ -4040,6 +4072,37 @@ class InspectorDaemon:
                     if cv_res:
                         self.merge_reports(report, cv_res)
                     analyzers_run.append("clamav")
+            elif detected == "lnk" and "lnk" in enabled:
+                if HAS_LNKPARSE:
+                    sub = _run_member("lnk", self.analyze_lnk, member_data, name)
+                else:
+                    sub = _run_member(
+                        "lnk",
+                        lambda: self.sync_analyze(
+                            s, name, member_data, None, types_to_run=["lnk"]
+                        ),
+                    )
+                if sub:
+                    self.merge_reports(report, sub)
+                    analyzers_run.append("lnk")
+                    if not HAS_LNKPARSE and HAS_IOCSEARCHER and "iocs" in enabled:
+                        analyzers_run.append("iocs")
+                    if not HAS_LNKPARSE and _yara_ok:
+                        analyzers_run.append("yara")
+                    if not HAS_LNKPARSE and _clamav_members:
+                        analyzers_run.append("clamav")
+                if HAS_LNKPARSE and _yara_ok:
+                    yr = _run_member("yara", self.analyze_yara, member_data)
+                    if yr:
+                        self.merge_reports(report, yr)
+                    analyzers_run.append("yara")
+                if HAS_LNKPARSE and _clamav_members:
+                    cv_res = _run_member(
+                        "clamav", self.analyze_clamav, member_data, name
+                    )
+                    if cv_res:
+                        self.merge_reports(report, cv_res)
+                    analyzers_run.append("clamav")
             else:
                 if _yara_ok:
                     yr = _run_member("yara", self.analyze_yara, member_data)
@@ -4737,6 +4800,248 @@ class InspectorDaemon:
 
         logger.debug(
             "analyze_script: %s (%s) — %d hits", filename, lang, len(report["analyses"])
+        )
+        return report
+
+    # ------------------------------------------------------------------
+    # Windows shortcut (.lnk) analysis
+    # ------------------------------------------------------------------
+
+    #: LOLBins/interpreters commonly abused as a .lnk target — a shortcut whose
+    #: real target launches one of these (often with an innocuous-looking icon
+    #: and a document-like display name) is the classic .lnk attack pattern.
+    _LNK_LOLBIN_RE = re.compile(
+        r"\b(cmd|powershell|pwsh|wscript|cscript|mshta|rundll32|regsvr32|"
+        r"certutil|bitsadmin|msiexec|installutil|regasm|regsvcs)(?:\.exe)?\b",
+        re.I,
+    )
+
+    #: Extensions considered "executable" for the icon/target mismatch check.
+    _LNK_EXECUTABLE_EXTS = frozenset(
+        (
+            ".exe",
+            ".scr",
+            ".com",
+            ".bat",
+            ".cmd",
+            ".ps1",
+            ".vbs",
+            ".vbe",
+            ".js",
+            ".jse",
+            ".hta",
+            ".msi",
+            ".dll",
+        )
+    )
+    _LNK_DOCUMENT_ICON_EXTS = frozenset(
+        (
+            ".doc",
+            ".docx",
+            ".gif",
+            ".jpeg",
+            ".jpg",
+            ".ods",
+            ".odt",
+            ".pdf",
+            ".png",
+            ".ppt",
+            ".pptx",
+            ".rtf",
+            ".txt",
+            ".xls",
+            ".xlsx",
+        )
+    )
+
+    def analyze_lnk(
+        self, data: bytes, filename: str, file_mime: "str | None" = None
+    ) -> "dict | None":
+        """Analyse a Windows shortcut (``.lnk``) file for malware indicators.
+
+        LNK files are a common initial-infection vector, typically delivered
+        inside a ZIP/ISO (handled by the existing archive pipeline, which
+        routes ``.lnk`` members here the same way it routes scripts). This
+        method reconstructs the effective command line (target + arguments)
+        and flags:
+
+        - a target/arguments referencing a script interpreter or LOLBin
+          (``cmd.exe``, ``powershell.exe``, ``mshta.exe``, etc.);
+        - the download-cradle / persistence / AMSI-bypass / obfuscation
+          heuristics shared with :meth:`analyze_script` (via
+          :meth:`_scan_script_patterns`), applied to the arguments;
+        - command-line arguments beyond Explorer's 260-character UI-visible
+          limit, and long whitespace runs used to push content past it;
+        - targets on a remote UNC/network share; and
+        - an icon that doesn't match the target (e.g. a document icon on an
+          ``.exe``/``.ps1``/``.js`` target).
+
+        Args:
+            data: Raw file bytes.
+            filename: Original filename (used only for log messages).
+            file_mime: MIME type hint (unused — LNK is parsed structurally).
+
+        Returns:
+            A report dict with ``analyses`` and ``iocs`` (and a ``lnk``
+            text segment from the reconstructed command line), or ``None``
+            when *data* is empty or the parser library isn't installed.
+        """
+        if not data:
+            return None
+        if not HAS_LNKPARSE:
+            return None
+
+        report: dict = {"analyses": [], "iocs": {"urls": [], "ips": [], "domains": []}}
+
+        def _add(a_type: str, keyword: str, desc: str) -> None:
+            entry = {"type": a_type, "keyword": keyword, "description": desc}
+            if entry not in report["analyses"]:
+                report["analyses"].append(entry)
+
+        try:
+            lnk = _LnkFile(indata=data)
+        except Exception as exc:
+            logger.info("analyze_lnk: %s could not be parsed: %s", filename, exc)
+            _add(
+                "ParseError",
+                "lnk-parse-failed",
+                f"LNK file could not be parsed: {exc}",
+            )
+            return report
+
+        def _read_value(obj, *method_names: str) -> str:
+            for method_name in method_names:
+                method = getattr(obj, method_name, None)
+                if method is None:
+                    continue
+                try:
+                    value = method()
+                except Exception as exc:
+                    logger.debug(
+                        "analyze_lnk: %s field %s could not be read: %s",
+                        filename,
+                        method_name,
+                        exc,
+                    )
+                    continue
+                if value:
+                    return str(value)
+            return ""
+
+        def _join_target(base_path: str, suffix: str) -> str:
+            if not base_path:
+                return suffix
+            if not suffix:
+                return base_path
+            normalized_base = base_path.rstrip("\\/")
+            normalized_suffix = suffix.lstrip("\\/")
+            if normalized_base.lower().endswith(normalized_suffix.lower()):
+                return normalized_base
+            return ntpath.join(normalized_base, normalized_suffix)
+
+        sd = lnk.string_data
+        relative_path = _read_value(sd, "relative_path")
+        arguments = _read_value(sd, "command_line_arguments")
+        working_directory = _read_value(sd, "working_directory")
+        icon_location = _read_value(sd, "icon_location")
+
+        link_info_target = ""
+        net_name = ""
+        info = getattr(lnk, "info", None)
+        if info is not None:
+            info_location = _read_value(info, "location") or type(info).__name__
+            if info_location == "Local":
+                local_base_path = _read_value(
+                    info, "local_base_path_unicode", "local_base_path"
+                )
+                common_suffix = _read_value(
+                    info, "common_path_suffix_unicode", "common_path_suffix"
+                )
+                link_info_target = _join_target(local_base_path, common_suffix)
+            elif info_location == "Network":
+                net_name = _read_value(info, "net_name_unicode", "net_name")
+                common_suffix = _read_value(
+                    info, "common_path_suffix_unicode", "common_path_suffix"
+                )
+                link_info_target = _join_target(net_name, common_suffix)
+
+        target = link_info_target or relative_path
+        command_line = " ".join(p for p in (target, arguments) if p).strip()
+
+        text_max = int(config.get("xspct_text_max_length", 50000))
+        if command_line:
+            self._add_text_segment(
+                report, "lnk", command_line[:text_max], module="builtin"
+            )
+        if working_directory:
+            self._add_text_segment(
+                report,
+                "lnk-working-directory",
+                working_directory[:text_max],
+                module="builtin",
+            )
+        report["iocs"] = self.extract_iocs(
+            command_line.encode("utf-8", errors="replace")
+        )
+
+        lolbin_match = self._LNK_LOLBIN_RE.search(target) or self._LNK_LOLBIN_RE.search(
+            arguments
+        )
+        if lolbin_match:
+            _add(
+                "LivingOffTheLand",
+                "lnk-lolbin-target",
+                f"Shortcut launches a script interpreter or LOLBin: "
+                f"{lolbin_match.group(0)}",
+            )
+
+        if arguments:
+            for hit in self._scan_script_patterns(arguments):
+                _add(hit["type"], hit["keyword"], hit["description"])
+            if len(arguments) > 260:
+                _add(
+                    "HiddenContent",
+                    "long-command-line",
+                    f"Command line arguments exceed the 260-character Explorer "
+                    f"UI limit ({len(arguments)} chars) — content beyond this "
+                    "point is not shown when inspecting the shortcut's "
+                    "Properties",
+                )
+            if re.search(r"[ \t]{20,}", arguments):
+                _add(
+                    "Obfuscation",
+                    "whitespace-padding",
+                    "Long run of whitespace in arguments, likely padding used "
+                    "to push the real command past the visible UI limit",
+                )
+
+        if net_name or target.startswith("\\\\"):
+            _add(
+                "RemoteTarget",
+                "unc-path",
+                f"Shortcut target is a network share (UNC path): {net_name or target}",
+            )
+
+        if icon_location and target:
+            icon_path = icon_location.rsplit(",", 1)[0].strip()
+            icon_ext = ntpath.splitext(icon_path)[1].lower() if icon_path else ""
+            target_ext = ntpath.splitext(target)[1].lower()
+            if (
+                target_ext in self._LNK_EXECUTABLE_EXTS
+                and icon_ext in self._LNK_DOCUMENT_ICON_EXTS
+            ):
+                _add(
+                    "IconMismatch",
+                    "icon-target-mismatch",
+                    f"Icon ({icon_ext}) does not match the executable target "
+                    f"({target_ext}) — likely disguised as a document",
+                )
+
+        logger.debug(
+            "analyze_lnk: %s — target=%s, %d hits",
+            filename,
+            target,
+            len(report["analyses"]),
         )
         return report
 
@@ -5744,7 +6049,8 @@ class InspectorDaemon:
 
         Returns:
             One of ``'pdf'``, ``'html'``, ``'office'``, ``'image'``,
-            ``'archive'``, ``'script'``, ``'text'``, or ``'unknown'``.
+            ``'archive'``, ``'script'``, ``'lnk'``, ``'text'``, or
+            ``'unknown'``.
         """
         mime = (mime or "").lower()
         desc = (desc or "").lower()
@@ -5819,6 +6125,18 @@ class InspectorDaemon:
         _scr = _t["script"]
         if any(filename.endswith(e) for e in _scr["extensions"]):
             return "script"
+
+        # Windows shortcuts (.lnk) — matched by MIME, magic description,
+        # filename extension, or (fallback, since some libmagic builds don't
+        # recognize the format) the fixed ShellLinkHeader GUID signature.
+        _lnk = _t["lnk"]
+        if (
+            mime in _lnk["mime_exact"]
+            or any(kw in desc for kw in _lnk["magic_keywords"])
+            or any(filename.endswith(e) for e in _lnk["extensions"])
+            or (data and data.startswith(_LNK_MAGIC))
+        ):
+            return "lnk"
 
         # Raster images
         _img = _t["image"]
@@ -6712,6 +7030,8 @@ class InspectorDaemon:
                 res = self.analyze_text(data, filename, file_mime)
             elif t == "script" and "script" in enabled:
                 res = self.analyze_script(data, filename, file_mime)
+            elif t == "lnk" and "lnk" in enabled:
+                res = self.analyze_lnk(data, filename, file_mime)
             # 'unknown' — no dedicated method; YARA/iocsearcher run separately
             if res:
                 successful_types.append(t)
@@ -6731,18 +7051,24 @@ class InspectorDaemon:
             self._extract_odf_images(s, data, report)
         # Ensure at least one text segment exists (unknown/empty extractions).
         # Skip for image files when raw_text_fallback is disabled (default) to
-        # prevent EXIF/XMP fragments from feeding the IOC extractors.
+        # prevent EXIF/XMP fragments from feeding the IOC extractors. LNK files
+        # use raw fallback only when the analyzer is enabled but LnkParse3 is
+        # unavailable; disabling the analyzer suppresses all LNK processing.
         _img_raw_fb = (
             config.get("xspct_analyzers", {})
             .get("image", {})
             .get("raw_text_fallback", False)
         )
-        if not report.get("text_segments") and not (
-            report.get("detected_type") == "image" and not _img_raw_fb
+        _lnk_requested = "lnk" in types_to_run
+        _skip_lnk_fallback = _lnk_requested and ("lnk" not in enabled or HAS_LNKPARSE)
+        if (
+            not report.get("text_segments")
+            and not (report.get("detected_type") == "image" and not _img_raw_fb)
+            and not _skip_lnk_fallback
         ):
             self._add_text_segment(
                 report,
-                report.get("detected_type") or "raw",
+                "lnk" if _lnk_requested else report.get("detected_type") or "raw",
                 self.extract_text_preview(data, file_mime, _text_max),
                 module="builtin",
             )
@@ -7253,6 +7579,8 @@ class InspectorDaemon:
                 pending.append("text")
             elif t == "script" and "script" in enabled:
                 pending.append("script")
+            elif t == "lnk" and "lnk" in enabled:
+                pending.append("lnk")
             # 'unknown': no dedicated analyzer; text_preview extracted in pre-Group-2 block
         # YARA runs regardless of file type (always on raw bytes).
         # Either or both engines may be active simultaneously.
@@ -7363,6 +7691,12 @@ class InspectorDaemon:
                         _run("script", self.analyze_script, data, filename, file_mime)
                     )
                 )
+            elif t == "lnk" and "lnk" in enabled:
+                tasks.append(
+                    asyncio.create_task(
+                        _run("lnk", self.analyze_lnk, data, filename, file_mime)
+                    )
+                )
             # 'unknown': no dedicated Group-1 analyzer; iocsearcher + YARA
             # still run via the pre-Group-2 block and the yara task.
         if yara_enabled:
@@ -7410,8 +7744,14 @@ class InspectorDaemon:
         _detected_fb = (
             self.get_detected_type(file_mime, file_desc, filename, data) or "raw"
         )
-        if not report.get("text_segments") and not (
-            _detected_fb == "image" and not _img_raw_fb
+        _lnk_enabled = "lnk" in enabled
+        _skip_lnk_fallback = _detected_fb == "lnk" and (
+            not _lnk_enabled or HAS_LNKPARSE
+        )
+        if (
+            not report.get("text_segments")
+            and not (_detected_fb == "image" and not _img_raw_fb)
+            and not _skip_lnk_fallback
         ):
             _fallback = await loop.run_in_executor(
                 self._executor, self.extract_text_preview, data, file_mime, _text_max
@@ -8640,6 +8980,14 @@ class InspectorDaemon:
                 "extensions": sorted(TYPE_ROUTING["script"]["extensions"]),
                 "mime_patterns": [],
                 "mime_types": sorted(TYPE_ROUTING["script"]["mime_exact"]),
+                "scope": "type-routed",
+            },
+            "lnk": {
+                "active": _az_active("lnk", HAS_LNKPARSE),
+                "detected_type": "lnk",
+                "extensions": sorted(TYPE_ROUTING["lnk"]["extensions"]),
+                "mime_patterns": [],
+                "mime_types": sorted(TYPE_ROUTING["lnk"]["mime_exact"]),
                 "scope": "type-routed",
             },
             "yara": {

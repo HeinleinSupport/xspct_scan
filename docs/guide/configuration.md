@@ -118,6 +118,7 @@ xspct_analyzers:
   archive:    { enabled: true }
   text:       { enabled: true }
   script:     { enabled: true }   # standalone .vbs/.vbe/.js/.jse/.wsf/.wsh/.ps1/.bat/.cmd
+  lnk:        { enabled: true }   # Windows shortcut (.lnk) — target/arguments, LOLBins, UNC targets, icon mismatch
   iocs:       { enabled: true }
   javascript: { enabled: true, quickjs: false }
   yara:       { enabled: false, rules_path: '' }
@@ -160,6 +161,20 @@ The **`text`** analyzer handles files detected as `text/plain`, ASCII, UTF-8, or
 script not matched by the other analyzers.  It decodes the content, populates
 `text_preview`, and extracts baseline IOCs.  YARA and iocsearcher then run on
 the same bytes/text in parallel.
+
+The **`lnk`** analyzer parses Windows shortcut (`.lnk`) files via the optional
+`LnkParse3` dependency (`advanced` extra).  It extracts the shortcut's target
+path, command-line arguments, and icon location, then flags: launches of a
+script interpreter or LOLBin (`cmd.exe`, `powershell.exe`, `mshta.exe`, ...),
+arguments matching the same heuristics as the `script` analyzer (encoded
+commands, download cradles, AMSI bypass, ...), UNC/network shortcut targets,
+command lines exceeding the 260-character Explorer UI limit, long runs of
+whitespace used to hide a real command past that limit, and an executable
+target using a document-like icon path. DLL icon resources and ordinary `.ico`
+files are not flagged. If the analyzer is enabled but `LnkParse3` is missing,
+raw text fallback still feeds IOC extraction. Setting
+`xspct_analyzers.lnk.enabled: false` disables both structural LNK analysis and
+the raw fallback; global YARA/ClamAV scanning remains unaffected.
 
 When YARA rules are loaded, YARA runs on **every** file regardless of type —
 PDFs, images, Office documents, plain text, and unknown blobs.  In the

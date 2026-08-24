@@ -20,6 +20,7 @@ exposes a simple HTTP API for on-demand scanning.
 - [ODF analysis](#odf-analysis)
 - [SVG analysis](#svg-analysis)
 - [Standalone script analysis](#standalone-script-analysis)
+- [Windows shortcut (.lnk) analysis](#windows-shortcut-lnk-analysis)
 - [ClamAV integration](#clamav-integration)
 - [Systemd unit](#systemd-unit)
 - [Documentation](#documentation)
@@ -50,6 +51,12 @@ exposes a simple HTTP API for on-demand scanning.
   files (`.vbs`, `.vbe`, `.js`, `.jse`, `.wsf`, `.wsh`, `.ps1`, `.bat`,
   `.cmd`); `.hta` (HTML Application) is treated as HTML. See
   [Standalone script analysis](#standalone-script-analysis)
+- **Windows shortcuts** (`.lnk`) — target/argument extraction, LOLBin and
+  script-interpreter detection, UNC/network target flagging, hidden-command
+  and whitespace-padding obfuscation, and icon/target extension-mismatch
+  detection; uses [LnkParse3](https://github.com/Matmaus/LnkParse) when
+  available. See
+  [Windows shortcut (.lnk) analysis](#windows-shortcut-lnk-analysis)
 - **RTF** — embedded object extraction via `rtfobj` (opt-in per request)
 - **Dynamic JS emulation** — sandboxed execution with
   [quickjs](https://github.com/PetterS/quickjs) and deobfuscation with
@@ -106,7 +113,8 @@ images or macros are silently missed.
 
 Available sources: `pdf`, `pdf-image`, `office`, `office-macro`, `odf`,
 `odf-macro`, `odf-image`, `html`, `html-image`, `ooxml-image`, `text`,
-`script`, `script-decoded`, `image-ocr`, `image-qr`.
+`script`, `script-decoded`, `lnk`, `lnk-working-directory`, `image-ocr`,
+`image-qr`.
 
 ### Infrastructure
 
@@ -177,7 +185,7 @@ pip install "git+https://github.com/HeinleinSupport/xspct_scan.git"
 | `redis` | `redis[asyncio]` | Persistent result cache across restarts |
 | `enrichment` | `Pillow`, `pytesseract`, `pyzbar`, `easyocr`, `clamd`, `jsbeautifier`, `quickjs`, `tree-sitter` | Image OCR/barcode/EXIF (Tesseract + EasyOCR), ClamAV integration, JS deobfuscation |
 | `openapi` | `pydantic>=2.0` | OpenAPI 3.0 spec + ReDoc UI |
-| `advanced` | `yara-python`, `yara-x`, `iocsearcher`, `odfdo`, `py7zr`, `SFlock2`, `tldextract` | YARA scanning, extended IOCs, ODF analysis, sandboxed archive extraction |
+| `advanced` | `yara-python`, `yara-x`, `iocsearcher`, `odfdo`, `py7zr`, `SFlock2`, `tldextract`, `LnkParse3` | YARA scanning, extended IOCs, ODF analysis, sandboxed archive extraction, .lnk shortcut analysis |
 | `serialization` | `msgpack`, `cbor2` | msgpack and CBOR response serialization |
 | `compression` | `zstandard` | zstd response compression and transparent upload decompression |
 
@@ -517,6 +525,34 @@ text feeds the same IOC and iocsearcher pipeline as every other analyzer.
 
 ```bash
 xspct-scan-client suspicious.ps1
+```
+
+---
+
+## Windows shortcut (.lnk) analysis
+
+Windows shortcut files are a common LOLBin-launching delivery vector
+(e.g. a `.lnk` disguised as an invoice that runs `powershell.exe` with a
+hidden download cradle). When [LnkParse3](https://github.com/Matmaus/LnkParse)
+is installed (`[advanced]` extra), `.lnk` files are parsed and checked for:
+
+| Finding | Description |
+|---------|-------------|
+| `lnk-lolbin-target` | Target or arguments reference a script interpreter or LOLBin (`cmd.exe`, `powershell.exe`, `wscript.exe`, `mshta.exe`, `rundll32.exe`, `regsvr32.exe`, `certutil.exe`, `bitsadmin.exe`, ...). |
+| *(reused script heuristics)* | Arguments are scanned with the same regex heuristics as the `script` analyzer — download cradles, `-EncodedCommand`, AMSI bypass, persistence, etc. |
+| `long-command-line` | Arguments exceed the 260-character Explorer Properties UI limit — content beyond this point is invisible when a user inspects the shortcut. |
+| `whitespace-padding` | A long run of whitespace in the arguments, typically used to push a malicious command past the visible UI limit. |
+| `unc-path` | The shortcut target is a network share (UNC path) rather than a local file. |
+| `icon-target-mismatch` | An executable target uses a document-like icon path (`.pdf`, `.docx`, `.jpg`, etc.). DLL icon resources and ordinary `.ico` files are not flagged. |
+
+The target path and arguments are also fed into the standard IOC/iocsearcher
+pipeline. If the analyzer is enabled but `LnkParse3` is unavailable, the raw
+text fallback still feeds IOC extraction without raising a hard error. Setting
+`xspct_analyzers.lnk.enabled: false` disables both structural LNK analysis and
+that raw fallback; global scanners such as YARA and ClamAV remain unaffected.
+
+```bash
+xspct-scan-client suspicious.lnk
 ```
 
 ---

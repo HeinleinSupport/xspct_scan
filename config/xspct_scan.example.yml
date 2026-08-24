@@ -94,6 +94,7 @@ xspct_analyzers:
   javascript: {enabled: true, quickjs: false}  # set quickjs: true to enable sandboxed JS emulation
   text:       {enabled: true}   # plain text (feeds YARA + iocsearcher)
   script:     {enabled: true}   # standalone .vbs/.vbe/.js/.jse/.wsf/.wsh/.ps1/.bat/.cmd — .hta is handled by html
+  lnk:        {enabled: true}   # false disables structural + raw-fallback LNK processing (global YARA/ClamAV still run)
 
 # When true (default), 'text_preview' (a list of {source, text} truncated
 # excerpts, one per extractor) is included in every response.

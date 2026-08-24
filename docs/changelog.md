@@ -71,6 +71,30 @@
     — but only while the script analyzer is enabled; when it's disabled,
     archive members and top-level uploads alike still fall back to `text`
     instead of going unanalyzed.
+- **Windows shortcut (`.lnk`) analysis** — a new `lnk` detected type and
+  `analyze_lnk()` analyzer, backed by the optional
+  [LnkParse3](https://github.com/Matmaus/LnkParse) dependency
+  (`[advanced]` extra):
+  - Extracts the shortcut's target path, command-line arguments, working
+    directory, and icon location, then flags: a script interpreter or
+    LOLBin target/argument (`cmd`, `powershell`, `pwsh`, `wscript`,
+    `cscript`, `mshta`, `rundll32`, `regsvr32`, `certutil`, `bitsadmin`,
+    `msiexec`, `installutil`, `regasm`, `regsvcs`); arguments matching the
+    same regex heuristics as the `script` analyzer (download cradles,
+    `-EncodedCommand`, AMSI bypass, persistence, etc.); a network share
+    (UNC) target; command-line arguments exceeding the 260-character
+    Explorer Properties UI limit; long whitespace runs used to pad a
+    command past that limit; and an executable target using a document-like
+    icon path (e.g. `.pdf`, `.docx`, or `.jpg`). Normal DLL icon resources
+    and `.ico` files are not flagged.
+  - Target + arguments are fed into the standard IOC/iocsearcher pipeline.
+  - New `text_preview`/`text_full` source: `lnk`.
+  - New config key `xspct_analyzers.lnk.enabled` (default `true`).
+  - Unlike `script`, disabling `xspct_analyzers.lnk.enabled` suppresses both
+    structural LNK analysis and raw text fallback for the binary content.
+    Global scanners such as YARA and ClamAV remain unaffected.
+  - When the analyzer is enabled but `LnkParse3` is unavailable, raw text
+    fallback still feeds IOC extraction without raising a hard error.
 
 ## 0.5.2 — 2026-07-09
 
