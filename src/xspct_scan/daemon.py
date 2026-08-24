@@ -7431,24 +7431,19 @@ class InspectorDaemon:
                 # ---- Multipart upload ----------------------------------------
                 legacy_parts: set[str] = set()
                 structured_parts: set[str] = set()
+                multipart_file_log: "tuple[int, str | None] | None" = None
                 reader = await request.multipart()
                 async for part in reader:
                     if part.name == "doc":
                         legacy_parts.add("doc")
                         filename = part.filename
-                        filedata = bytes(await part.read())
+                        filedata = bytes(await part.read(decode=True))
                         filedata = self._decompress_zstd_part(
                             filedata, filename or "doc"
                         )
                         if filename and filename.lower().endswith(".zst"):
                             filename = filename[:-4]
-                        logger.info(
-                            "%s (%s) - read %d bytes from %s",
-                            s,
-                            timer(),
-                            len(filedata),
-                            filename,
-                        )
+                        multipart_file_log = (len(filedata), filename)
                     elif part.name == "passwords":
                         legacy_parts.add("passwords")
                         raw = await part.text()
@@ -7471,7 +7466,7 @@ class InspectorDaemon:
                         file_type_provided = (await part.text()).strip()
                     elif part.name == "metadata":
                         structured_parts.add("metadata")
-                        raw_metadata = await part.read()
+                        raw_metadata = await part.read(decode=True)
                         metadata = self._parse_metadata_part(
                             raw_metadata, part.headers.get("Content-Type", "")
                         )
@@ -7492,25 +7487,16 @@ class InspectorDaemon:
                     elif part.name == "file":
                         structured_parts.add("file")
                         filename = part.filename
-                        chunks: list = []
-                        while True:
-                            chunk = await part.read_chunk(size=262144)
-                            if not chunk:
-                                break
-                            chunks.append(part.decode(chunk))
-                        filedata = b"".join(chunks)
+                        # Decode once after BodyPartReader has accumulated the
+                        # complete part so base64/quoted-printable units may span
+                        # internal read chunks without being corrupted.
+                        filedata = bytes(await part.read(decode=True))
                         filedata = self._decompress_zstd_part(
                             filedata, filename or "file"
                         )
                         if filename and filename.lower().endswith(".zst"):
                             filename = filename[:-4]
-                        logger.info(
-                            "%s (%s) - read %d bytes from %s",
-                            s,
-                            timer(),
-                            len(filedata),
-                            filename,
-                        )
+                        multipart_file_log = (len(filedata), filename)
                 if legacy_parts and structured_parts:
                     raise _ClientRequestError(
                         "legacy and structured multipart fields cannot be mixed"
@@ -7524,6 +7510,15 @@ class InspectorDaemon:
                         )
                 elif "doc" not in legacy_parts:
                     raise _ClientRequestError('No file part named "doc"')
+                if multipart_file_log:
+                    file_size, uploaded_filename = multipart_file_log
+                    logger.info(
+                        "%s (%s) - read %d bytes from %s",
+                        s,
+                        timer(),
+                        file_size,
+                        uploaded_filename,
+                    )
                 if not filedata:
                     raise _ClientRequestError("Uploaded file is empty")
                 if structured_parts:
@@ -7610,7 +7605,14 @@ class InspectorDaemon:
                 correlation["message_id"] = message_id
 
             def _attach_correlation(payload: dict) -> dict:
+                # Shallow-copy rather than mutate in place: several payloads
+                # here (the finished-report path in particular) are the same
+                # dict object stored in self.tasks[file_hash] for /v1/query
+                # lookups. Mutating it directly would leak this request's
+                # correlation IDs into a later, unrelated /v1/query response
+                # for the same file hash.
                 if correlation:
+                    payload = dict(payload)
                     payload["request"] = correlation
                 return payload
 

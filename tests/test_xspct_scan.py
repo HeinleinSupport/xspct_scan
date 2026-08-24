@@ -60,11 +60,13 @@ Run:
 """
 
 import asyncio
+import base64
 import hashlib
 import io
 import json
 import logging
 import os
+import quopri
 import zipfile
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1615,6 +1617,58 @@ def _metadata_form(
     return form
 
 
+def _raw_metadata_multipart(
+    filedata: bytes,
+    metadata: dict,
+    *,
+    transfer_encoding: "str | None" = None,
+    metadata_transfer_encoding: "str | None" = None,
+    file_first: bool = False,
+) -> tuple[bytes, dict[str, str]]:
+    """Build a structured multipart body with explicit part ordering/encoding."""
+    boundary = "xspct-test-boundary"
+    encoded_file = filedata
+    transfer_header = b""
+    if transfer_encoding == "base64":
+        encoded_file = base64.b64encode(filedata)
+        transfer_header = b"Content-Transfer-Encoding: base64\r\n"
+    elif transfer_encoding == "quoted-printable":
+        encoded_file = quopri.encodestring(filedata)
+        transfer_header = b"Content-Transfer-Encoding: quoted-printable\r\n"
+
+    raw_metadata = json.dumps(metadata).encode()
+    metadata_transfer_header = b""
+    if metadata_transfer_encoding == "base64":
+        raw_metadata = base64.b64encode(raw_metadata)
+        metadata_transfer_header = b"Content-Transfer-Encoding: base64\r\n"
+    metadata_part = (
+        (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="metadata"\r\n'
+            "Content-Type: application/json\r\n"
+        ).encode()
+        + metadata_transfer_header
+        + b"\r\n"
+        + raw_metadata
+        + b"\r\n"
+    )
+    file_part = (
+        (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="file"; filename="clean.pdf"\r\n'
+            "Content-Type: application/octet-stream\r\n"
+        ).encode()
+        + transfer_header
+        + b"\r\n"
+        + encoded_file
+        + b"\r\n"
+    )
+    parts = (file_part, metadata_part) if file_first else (metadata_part, file_part)
+    body = b"".join(parts) + f"--{boundary}--\r\n".encode()
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    return body, headers
+
+
 class TestScanMultipartMetadata:
     async def test_metadata_json_scan_returns_200(self, client):
         r = await client.post(
@@ -1803,6 +1857,30 @@ class TestScanMultipartMetadata:
         b1, b2 = await r1.json(), await r2.json()
         assert b1["file"]["sha256"] == b2["file"]["sha256"]
 
+    @pytest.mark.parametrize("transfer_encoding", ["base64", "quoted-printable"])
+    async def test_file_content_transfer_encoding_is_decoded(
+        self, client, transfer_encoding
+    ):
+        body, headers = _raw_metadata_multipart(
+            PDF_CLEAN, {}, transfer_encoding=transfer_encoding
+        )
+        r = await client.post("/v1/scan", data=body, headers=headers)
+        assert r.status == 200
+        result = await r.json()
+        assert result["file"]["sha256"] == hashlib.sha256(PDF_CLEAN).hexdigest()
+        assert result["file"]["type"] == "pdf"
+
+    async def test_metadata_content_transfer_encoding_is_decoded(self, client):
+        body, headers = _raw_metadata_multipart(
+            PDF_CLEAN,
+            {"rspamd_uid": "base64-metadata"},
+            metadata_transfer_encoding="base64",
+        )
+        r = await client.post("/v1/scan", data=body, headers=headers)
+        assert r.status == 200
+        result = await r.json()
+        assert result["request"]["rspamd_uid"] == "base64-metadata"
+
     @pytest.mark.skipif(not _HAS_FITZ, reason="PyMuPDF not installed")
     async def test_metadata_passwords_are_stripped(self, client):
         """A password with incidental whitespace must still decrypt (regression:
@@ -1887,6 +1965,28 @@ class TestScanMultipartMetadata:
         body2 = await r2.json()
         assert "request" not in body2 or "rspamd_uid" not in body2.get("request", {})
 
+    async def test_correlation_ids_not_leaked_via_query_in_memory_cache(self, client):
+        """Regression: the finished-report object returned by analyze_task()
+        is the same object stored in self.tasks[file_hash] for /v1/query
+        lookups. Attaching the request block must not mutate that shared
+        object, or a later, unrelated /v1/query poll for the same hash would
+        return the first requester's correlation IDs."""
+        r1 = await client.post(
+            "/v1/scan",
+            data=_metadata_form(
+                PDF_CLEAN, "queried.pdf", {"rspamd_uid": "requester-one"}
+            ),
+        )
+        assert r1.status == 200
+        body1 = await r1.json()
+        assert body1["request"]["rspamd_uid"] == "requester-one"
+        file_hash = body1["file"]["sha256"]
+
+        r2 = await client.get(f"/v1/query?hash={file_hash}")
+        assert r2.status == 200
+        body2 = await r2.json()
+        assert "request" not in body2["report"]
+
     async def test_read_bytes_log_line_carries_correlation_tag(self, client, caplog):
         """The file-part 'read N bytes' log line must carry the uid= tag too
         (regression: the tag used to be attached only after the whole
@@ -1904,6 +2004,35 @@ class TestScanMultipartMetadata:
         ]
         assert read_bytes_lines
         assert any("uid=7f3a9c1e-t" in line for line in read_bytes_lines)
+
+    async def test_empty_file_part_still_logs_read_bytes_line(self, client, caplog):
+        """The 'read N bytes' log line must still fire for an empty upload
+        (regression: it used to be emitted only after the empty-body check,
+        so the empty-upload failure case — where the line matters most for
+        diagnosing what a client actually sent — never logged it)."""
+        with caplog.at_level(logging.INFO):
+            r = await client.post(
+                "/v1/scan",
+                data=_metadata_form(b"", "empty.pdf", {}),
+            )
+        assert r.status == 400
+        read_bytes_lines = [
+            rec.message for rec in caplog.records if "read 0 bytes" in rec.message
+        ]
+        assert read_bytes_lines
+
+    async def test_file_first_log_line_carries_correlation_tag(self, client, caplog):
+        body, headers = _raw_metadata_multipart(
+            PDF_CLEAN, {"rspamd_uid": "7f3a9c1e-file-first"}, file_first=True
+        )
+        with caplog.at_level(logging.INFO):
+            r = await client.post("/v1/scan", data=body, headers=headers)
+        assert r.status == 200
+        read_bytes_lines = [
+            rec.message for rec in caplog.records if "read " in rec.message
+        ]
+        assert read_bytes_lines
+        assert any("uid=7f3a9c1e-f" in line for line in read_bytes_lines)
 
 
 class _ClientResponseStub:
@@ -4677,3 +4806,26 @@ class TestCapabilities:
             text=True,
         )
         assert result.returncode == 2
+
+    def test_client_legacy_multipart_with_rspamd_uid_rejected(self):
+        """--legacy-multipart has no metadata part to carry --rspamd-uid/
+        --queue-id/--message-id; combining them must fail fast instead of
+        silently dropping the correlation IDs."""
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "xspct_scan.client",
+                "--legacy-multipart",
+                "--rspamd-uid",
+                "7f3a9c1e",
+                "somefile.pdf",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2
+        assert "legacy" in result.stderr.lower()

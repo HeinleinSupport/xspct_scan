@@ -272,13 +272,26 @@ Segment `source` values: `pdf`, `pdf-image`, `office`, `office-macro`, `odf`, `o
 
 #### `request` (present when the structured metadata part supplied ≥1 correlation ID)
 
-Echoes back the correlation IDs supplied in the `metadata` part, so a caller
-polling `/v1/query` or inspecting the response body alone can tie a result
-back to the request it sent. Never persisted into the Redis/hash-keyed
-cache — it reflects the request that produced *this* response, not a
-property of the file content, so a later cache-hit response for the same
-file (submitted with different or no correlation IDs) never carries a
-previous requester's values.
+Echoes back the correlation IDs supplied in the `metadata` part, so the
+caller of *this specific* `POST /v1/scan` request can tie its immediate
+response (`200` or `202`) back to the `rspamd_uid`/`queue_id`/`message_id`
+it sent, without having to also thread the file hash through its own
+bookkeeping.
+
+**Scope: this response only — never persisted, never present on
+`/v1/query`.** `request` reflects the request that produced *this specific*
+HTTP response, not a property of the file content, so:
+- A later cache-hit `/v1/scan` response for the same file content
+  (submitted with different or no correlation IDs) never carries a previous
+  requester's values.
+- If a scan is promoted to the background (`202` → poll `/v1/query`), the
+  `202` response you receive immediately *does* carry your correlation IDs,
+  but the finished report you later retrieve via `/v1/query?hash=...` does
+  **not** — that endpoint is a stateless, hash-keyed lookup shared by any
+  caller who knows the hash, so it intentionally never carries any single
+  requester's correlation IDs. Correlate background results by `file_hash`
+  (present in both the `202` response and your own request bookkeeping)
+  instead.
 
 | Key | Type | Description |
 |-----|------|-------------|

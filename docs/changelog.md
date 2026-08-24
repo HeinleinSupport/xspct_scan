@@ -17,15 +17,15 @@
   and legacy multipart parts is rejected with HTTP 400. `timeout_s` may only
   tighten the effective timeout, never loosen it.
   `rspamd_uid`/`queue_id`/`message_id` are folded into the session log tag
-  as soon as the metadata part is parsed (so every log line for the request,
-  including the initial "read N bytes" line, carries the correlation tag)
-  and echoed back in a new, additive `request` response block — never
+  as soon as the metadata part is parsed; the file-read log is emitted after
+  multipart parsing so it carries the correlation tag regardless of part order,
+  and is echoed back in a new, additive `request` response block — never
   persisted into the cached report, since correlation IDs belong to the
   request, not the file content. All string metadata fields are stripped of
   control characters and length-capped before use, to prevent log injection.
   Passwords supplied via `metadata.passwords` are stripped of surrounding
-  whitespace, matching the legacy `passwords` field. The `file` part is read
-  via chunked `read_chunk()` instead of a single buffered `read()`.
+  whitespace, matching the legacy `passwords` field. Multipart metadata and
+  file parts honor base64 or quoted-printable `Content-Transfer-Encoding`.
 - **`xspct-scan-client` uses the structured `metadata` + `file` shape by
   default** — `--passwords`/`--force-analyzers` are now sent inside the
   `metadata` part rather than a legacy field/query parameter. New
