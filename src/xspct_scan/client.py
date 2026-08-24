@@ -14,6 +14,7 @@ Options::
     --timeout SECS      Analysis timeout in seconds passed to the daemon (default: 30)
     --passwords LIST    Comma-separated passwords to try for encrypted files
     --rtf               Enable RTF object extraction (passes ?rtf=true)
+    --invalidate-cache  Delete the daemon's cached report and force a full rescan
     --poll              Poll /v1/query after a 202 response until the result is ready
     --poll-interval N   Seconds between poll attempts (default: 2)
     --json              Output raw JSON instead of a human-readable summary
@@ -291,6 +292,7 @@ async def scan_file(
     poll_interval: float,
     no_color: bool,
     force_analyzers: str | None = None,
+    invalidate_cache: bool = False,
     legacy_multipart: bool = False,
     rspamd_uid: str | None = None,
     queue_id: str | None = None,
@@ -309,6 +311,8 @@ async def scan_file(
     params: dict[str, str] = {"timeout": str(timeout)}
     if rtf:
         params["rtf"] = "true"
+    if invalidate_cache:
+        params["invalidate_cache"] = "true"
 
     try:
         with path.open("rb") as fh:
@@ -334,6 +338,8 @@ async def scan_file(
                     metadata["force_analyzers"] = [
                         a.strip() for a in force_analyzers.split(",") if a.strip()
                     ]
+                if invalidate_cache:
+                    metadata["invalidate_cache"] = True
                 if rspamd_uid:
                     metadata["rspamd_uid"] = rspamd_uid
                 if queue_id:
@@ -563,6 +569,7 @@ async def _run(args: argparse.Namespace) -> int:
                 poll_interval=args.poll_interval,
                 no_color=args.no_color,
                 force_analyzers=args.force_analyzers,
+                invalidate_cache=args.invalidate_cache,
                 legacy_multipart=args.legacy_multipart,
                 rspamd_uid=args.rspamd_uid,
                 queue_id=args.queue_id,
@@ -652,6 +659,17 @@ def main() -> None:
         const="image.ocr",
         dest="force_analyzers",
         help="Force OCR even when the camera-photo/size exclusion gate would skip it",
+    )
+    parser.add_argument(
+        "--invalidate-cache",
+        action="store_true",
+        dest="invalidate_cache",
+        help=(
+            "Delete the daemon's Redis and in-memory cached report and force "
+            "a full rescan. Use when re-submitting a known "
+            "file with a new/updated --passwords list that must be tried "
+            "from scratch."
+        ),
     )
     parser.add_argument(
         "--legacy-multipart",

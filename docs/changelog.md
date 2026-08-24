@@ -8,6 +8,16 @@
 ## Unreleased
 
 ### Added
+- **`invalidate_cache` scan option** — new query parameter and structured
+  `metadata` field (bool, default `false`) for `POST /v1/scan`, alongside
+  `force_analyzers`. When set, the daemon deletes the Redis and in-memory
+  cached report and performs a full rescan. Older in-flight scans cannot
+  repopulate the deleted entry; only the fresh report is cached. Intended
+  for callers (e.g. Rspamd) that invalidate their own cache for a known
+  file hash and re-submit it with a new/updated password list — without
+  this, a cache hit on an already-decrypted file would short-circuit
+  re-analysis and never try the new passwords. Exposed in
+  `xspct-scan-client` as `--invalidate-cache`.
 - **Structured `metadata` + `file` multipart shape for `POST /v1/scan`** — a
   third accepted request shape alongside the legacy `doc` multipart and raw
   octet-stream uploads. The `metadata` part is JSON or msgpack and carries

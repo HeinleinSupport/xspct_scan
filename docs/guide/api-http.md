@@ -69,6 +69,7 @@ Submit a document for malware analysis.
 | `message_id` | Message-ID header value. Echoed back in `request`. |
 | `passwords` | List of decryption passwords. Overrides the `passwords` query parameter. |
 | `force_analyzers` | List of analyzer paths to force-run. Overrides the `force_analyzers` query parameter. |
+| `invalidate_cache` | Boolean. Overrides the `invalidate_cache` query parameter. |
 | `timeout_s` | Caller's timeout hint in seconds. May only **tighten** the effective timeout (`min` of this and the `timeout` query parameter/default), never loosen it. |
 
 Fields present in `metadata` take precedence over the equivalent query
@@ -92,6 +93,7 @@ Pass optional metadata as query parameters (`filename`, `file_mime`, `file_type`
 | `timeout` | `10` | Max seconds to wait for analysis before returning `202`. |
 | `rtf` | `false` | Set to `true` to enable RTF object extraction via `rtfobj`. |
 | `force_analyzers` | | Comma-separated analyzer paths to bypass exclusion gates for this request (e.g. `image.ocr`). |
+| `invalidate_cache` | `false` | Set to `true` to delete the Redis and in-memory cached report and force a full rescan. Older in-flight scans cannot repopulate the deleted cache entry; only the fresh report is cached. Use this when re-submitting a known file with a new/updated `passwords` list that must be tried from scratch. |
 
 `detected_type` (inside `file.type`) will be one of: `pdf`, `html`, `office`,
 `odf`, `image`, `archive`, `script`, `lnk`, `text`, or `unknown`. `.hta` files are

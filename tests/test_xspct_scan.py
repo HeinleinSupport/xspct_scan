@@ -1801,7 +1801,7 @@ class TestScanMultipartMetadata:
     async def test_empty_force_analyzers_overrides_query(self, client, monkeypatch):
         captured = {}
 
-        async def fake_analyze_task(*args):
+        async def fake_analyze_task(*args, **_kwargs):
             captured["force_analyzers"] = args[-1]
             return {}
 
@@ -5116,6 +5116,36 @@ class TestRedisCache:
         await self.daemon.cache_report("s", "c" * 64, report)
         assert "c" * 64 in self.daemon.tasks
 
+    async def test_invalidate_deletes_redis_and_in_memory_report(self):
+        file_hash = "l" * 64
+        await self.daemon.cache_report("s", file_hash, {"hash": file_hash})
+
+        await self.daemon.invalidate_cached_report("s", file_hash)
+
+        assert file_hash not in self.daemon.tasks
+        assert await self.daemon.redis_pool.get("xspct:" + file_hash) is None
+
+    async def test_invalidate_removes_in_memory_report_when_redis_disabled(self):
+        file_hash = "m" * 64
+        self.daemon._store_terminal_result(file_hash, {"hash": file_hash})
+        xspct.config["xspct_redis_cache"]["enabled"] = False
+
+        await self.daemon.invalidate_cached_report("s", file_hash)
+
+        assert file_hash not in self.daemon.tasks
+
+    async def test_invalidated_in_flight_report_cannot_repopulate_cache(self):
+        file_hash = "o" * 64
+        stale_generation = self.daemon._cache_generations.get(file_hash, 0)
+
+        await self.daemon.invalidate_cached_report("s", file_hash)
+        await self.daemon.cache_report(
+            "s", file_hash, {"hash": file_hash}, stale_generation
+        )
+
+        assert file_hash not in self.daemon.tasks
+        assert await self.daemon.redis_pool.get("xspct:" + file_hash) is None
+
     async def test_cache_miss_increments_stat(self):
         initial = xspct.stats["redis_misses"]
         await self.daemon.get_cached_report("s", "d" * 64)
@@ -5168,6 +5198,111 @@ class TestRedisCache:
         await self.daemon.cache_report("s", "k" * 64, {"hash": "k" * 64})
         assert self.daemon._redis_error_count == 1
         assert xspct.stats["redis_errors"] == 1
+
+    async def test_delete_error_increments_error_count(self):
+        broken = AsyncMock()
+        broken.delete = AsyncMock(side_effect=ConnectionError("redis down"))
+        self.daemon.redis_pool = broken
+        await self.daemon.invalidate_cached_report("s", "n" * 64)
+        assert self.daemon._redis_error_count == 1
+        assert xspct.stats["redis_errors"] == 1
+
+
+@pytest.mark.skipif(not _HAS_FAKEREDIS, reason="fakeredis not installed")
+class TestInvalidateCache:
+    """/v1/scan?invalidate_cache=true and metadata.invalidate_cache."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_redis(self, client):
+        d = client.app["daemon"]
+        saved = dict(xspct.config["xspct_redis_cache"])
+        xspct.config["xspct_redis_cache"]["enabled"] = True
+        xspct.config["xspct_redis_cache"]["expire"] = 3600
+        xspct.config["xspct_redis_cache"]["prefix"] = "xspct:"
+        xspct.config["xspct_redis_cache"]["max_errors"] = 3
+        d.redis_pool = fakeredis.FakeAsyncRedis(decode_responses=True)
+        d._redis_error_count = 0
+        yield
+        xspct.config["xspct_redis_cache"].update(saved)
+        d.redis_pool = None
+
+    async def test_second_request_is_cache_hit(self, client):
+        r1 = await client.post("/v1/scan", data=_form(PDF_CLEAN, "inv1.pdf"))
+        assert r1.status == 200
+        b1 = await r1.json()
+        assert "cache_hit" not in b1
+        assert b1["scan"]["cache_hit"] is False
+
+        r2 = await client.post("/v1/scan", data=_form(PDF_CLEAN, "inv1.pdf"))
+        assert r2.status == 200
+        b2 = await r2.json()
+        assert b2.get("cache_hit") is True
+
+    async def test_invalidate_cache_query_param_forces_rescan(self, client):
+        r1 = await client.post("/v1/scan", data=_form(PDF_CLEAN, "inv2.pdf"))
+        assert r1.status == 200
+
+        r2 = await client.post(
+            "/v1/scan?invalidate_cache=true", data=_form(PDF_CLEAN, "inv2.pdf")
+        )
+        assert r2.status == 200
+        b2 = await r2.json()
+        assert "cache_hit" not in b2
+        assert b2["scan"]["cache_hit"] is False
+
+    async def test_invalidate_cache_metadata_field_forces_rescan(self, client):
+        r1 = await client.post(
+            "/v1/scan", data=_metadata_form(PDF_CLEAN, "inv3.pdf", {})
+        )
+        assert r1.status == 200
+
+        r2 = await client.post(
+            "/v1/scan",
+            data=_metadata_form(PDF_CLEAN, "inv3.pdf", {"invalidate_cache": True}),
+        )
+        assert r2.status == 200
+        b2 = await r2.json()
+        assert "cache_hit" not in b2
+        assert b2["scan"]["cache_hit"] is False
+
+    async def test_invalidate_cache_metadata_field_must_be_boolean(self, client):
+        response = await client.post(
+            "/v1/scan",
+            data=_metadata_form(
+                PDF_CLEAN, "invalid.pdf", {"invalidate_cache": "false"}
+            ),
+        )
+
+        assert response.status == 400
+        body = await response.json()
+        assert body["error"] == 'metadata field "invalidate_cache" must be a boolean'
+
+    async def test_invalidate_cache_metadata_overrides_query_param(self, client):
+        """metadata.invalidate_cache=false must win over ?invalidate_cache=true
+        (metadata fields always take precedence over query parameters)."""
+        r1 = await client.post(
+            "/v1/scan", data=_metadata_form(PDF_CLEAN, "inv4.pdf", {})
+        )
+        assert r1.status == 200
+
+        r2 = await client.post(
+            "/v1/scan?invalidate_cache=true",
+            data=_metadata_form(PDF_CLEAN, "inv4.pdf", {"invalidate_cache": False}),
+        )
+        assert r2.status == 200
+        b2 = await r2.json()
+        assert b2.get("cache_hit") is True
+
+    async def test_without_invalidate_cache_default_is_cache_hit(self, client):
+        """Absence of invalidate_cache must not change existing cache-hit behavior."""
+        r1 = await client.post("/v1/scan", data=_form(PDF_CLEAN, "inv5.pdf"))
+        assert r1.status == 200
+        r2 = await client.post(
+            "/v1/scan?invalidate_cache=false", data=_form(PDF_CLEAN, "inv5.pdf")
+        )
+        assert r2.status == 200
+        b2 = await r2.json()
+        assert b2.get("cache_hit") is True
 
 
 # ===========================================================================

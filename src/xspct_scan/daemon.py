@@ -2214,6 +2214,7 @@ class InspectorDaemon:
         self.redis_pool = None
         self._redis_error_count = 0
         self.tasks: OrderedDict = OrderedDict()
+        self._cache_generations: dict[str, int] = {}
         # In-flight PartialReport objects keyed by file_hash.
         # Populated by analyze_pipeline(); removed when the scan finishes.
         self._partials: dict = {}
@@ -2293,7 +2294,30 @@ class InspectorDaemon:
         stats["redis_misses"] += 1
         return None
 
-    async def cache_report(self, s: str, file_hash: str, report: dict) -> None:
+    async def invalidate_cached_report(self, s: str, file_hash: str) -> None:
+        """Delete a completed report from the in-memory and Redis caches."""
+        self._cache_generations[file_hash] = (
+            self._cache_generations.get(file_hash, 0) + 1
+        )
+        self.tasks.pop(file_hash, None)
+        self._partials.pop(file_hash, None)
+        if not self._redis_enabled(s):
+            return
+        key = config["xspct_redis_cache"]["prefix"] + file_hash
+        try:
+            await self.redis_pool.delete(key)
+            self._redis_reset_errors(s)
+            logger.info("%s - invalidated cached report for %s", s, file_hash)
+        except Exception as exc:
+            self._redis_record_error(s, exc)
+
+    async def cache_report(
+        self,
+        s: str,
+        file_hash: str,
+        report: dict,
+        cache_generation: "int | None" = None,
+    ) -> None:
         """Store a finished report in the in-memory LRU cache and Redis.
 
         Always writes to the in-memory :attr:`tasks` dict and evicts the
@@ -2304,7 +2328,14 @@ class InspectorDaemon:
             s: Session tag for log messages.
             file_hash: SHA-256 hex digest used as the cache key.
             report: Finished analysis report dict to store.
+            cache_generation: Generation captured when analysis started. If
+                invalidation has advanced it, the stale report is discarded.
         """
+        if cache_generation is not None and cache_generation != (
+            self._cache_generations.get(file_hash, 0)
+        ):
+            logger.info("%s - not caching invalidated report for %s", s, file_hash)
+            return
         self._store_terminal_result(file_hash, report)
         if not self._redis_enabled(s):
             return
@@ -7864,6 +7895,8 @@ class InspectorDaemon:
         custom_passwords: "list | None" = None,
         types_to_run: "list | None" = None,
         force_analyzers: "frozenset | None" = None,
+        *,
+        cache_generation: int = 0,
     ) -> dict:
         """Run :meth:`analyze_pipeline` and cache the final report.
 
@@ -7880,6 +7913,7 @@ class InspectorDaemon:
             rtf_eval: Enable RTF object extraction.
             custom_passwords: Extra decryption passwords.
             types_to_run: Explicit list of analysis types to run.
+            cache_generation: Cache generation captured before analysis began.
 
         Returns:
             The finished report dict.
@@ -7958,7 +7992,7 @@ class InspectorDaemon:
             report, filename, len(data), sha1=_sha1, rspamd_digest=_rdigest
         )
         v2_report["status"] = "finished"
-        await self.cache_report(s, file_hash, v2_report)
+        await self.cache_report(s, file_hash, v2_report, cache_generation)
         return v2_report
 
     # ------------------------------------------------------------------
@@ -7984,7 +8018,6 @@ class InspectorDaemon:
         try:
             report = await scan_task
             report["status"] = "finished"
-            await self.cache_report(s, file_hash, report)
             stats["background_completed"] += 1
             logger.info("%s - background scan finished for %s", s, file_hash)
         except asyncio.CancelledError:
@@ -8136,6 +8169,13 @@ class InspectorDaemon:
                 raise _ClientRequestError(
                     f'metadata field "{field}" must be a list of strings'
                 )
+
+        if "invalidate_cache" in metadata and not isinstance(
+            metadata["invalidate_cache"], bool
+        ):
+            raise _ClientRequestError(
+                'metadata field "invalidate_cache" must be a boolean'
+            )
 
         if metadata.get("timeout_s") is not None:
             timeout_hint = metadata["timeout_s"]
@@ -8320,9 +8360,10 @@ class InspectorDaemon:
             - ``metadata`` (required): JSON or msgpack object with keys
               ``filename``, ``declared_content_type``, ``detected_type``,
               ``rspamd_uid``, ``queue_id``, ``message_id``, ``passwords``
-              (list), ``force_analyzers`` (list), ``timeout_s``. Fields here
-              take precedence over query parameters. Structured and legacy
-              multipart parts cannot be mixed.
+              (list), ``force_analyzers`` (list), ``invalidate_cache`` (bool),
+              ``timeout_s``. Fields here take precedence over query
+              parameters. Structured and legacy multipart parts cannot be
+              mixed.
               ``timeout_s`` may only tighten the effective timeout, never
               loosen it. ``rspamd_uid``/``queue_id``/``message_id`` are
               folded into the session log tag and echoed back in the
@@ -8340,6 +8381,11 @@ class InspectorDaemon:
             - ``rtf`` (bool, default false): enable RTF object extraction.
             - ``force_analyzers`` (comma-separated): force-run specific
               analyzers, bypassing their normal skip heuristics.
+                        - ``invalidate_cache`` (bool, default false): delete the Redis
+                            and in-memory cache entries and force a full rescan, caching
+                            only the fresh report once finished. Use this when
+                            re-submitting a known file with a new/updated ``passwords``
+                            list that must be tried from scratch.
 
         Args:
             request: Incoming aiohttp request.
@@ -8364,6 +8410,9 @@ class InspectorDaemon:
                 frozenset(a.strip() for a in _fa_param.split(",") if a.strip())
                 if _fa_param
                 else None
+            )
+            invalidate_cache = (
+                request.query.get("invalidate_cache", "false").lower() == "true"
             )
 
             content_type = request.headers.get("Content-Type", "")
@@ -8496,6 +8545,8 @@ class InspectorDaemon:
                             for analyzer in metadata["force_analyzers"]
                             if analyzer.strip()
                         )
+                    if "invalidate_cache" in metadata:
+                        invalidate_cache = metadata["invalidate_cache"]
                     if metadata.get("timeout_s") is not None:
                         # A caller-supplied timeout hint may only tighten the
                         # server's timeout, never loosen it.
@@ -8568,7 +8619,19 @@ class InspectorDaemon:
                 return payload
 
             file_hash = hashlib.sha256(filedata).hexdigest()
-            cached = await self.get_cached_report(s, file_hash)
+            if invalidate_cache:
+                logger.info(
+                    "%s (%s) - invalidate_cache=true, deleting cached report and "
+                    "forcing fresh analysis for %s",
+                    s,
+                    timer(),
+                    file_hash,
+                )
+                await self.invalidate_cached_report(s, file_hash)
+                cached = None
+            else:
+                cached = await self.get_cached_report(s, file_hash)
+            cache_generation = self._cache_generations.get(file_hash, 0)
             if cached:
                 if cached.get("decrypted") or not custom_passwords:
                     logger.info("%s (%s) - cache hit for %s", s, timer(), file_hash)
@@ -8662,6 +8725,7 @@ class InspectorDaemon:
                         custom_passwords,
                         list(types_to_run),
                         force_analyzers,
+                        cache_generation=cache_generation,
                     )
                 )
                 self.tasks[file_hash] = task
