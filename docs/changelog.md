@@ -1,5 +1,10 @@
 # Changelog
 
+> **Commit convention cutover:** starting with the release after `0.5.2`,
+> commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
+> (see `CONTRIBUTING.md`). Earlier history uses the previous informal
+> `[Tag] Description` convention and was not rewritten.
+
 ## 0.5.2 — 2026-07-09
 
 ### Added
