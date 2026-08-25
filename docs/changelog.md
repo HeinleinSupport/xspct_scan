@@ -112,6 +112,23 @@
   parameter (`POST /v1/scan?rtf=true`) has been removed, along with the
   `xspct-scan-client --rtf` flag. Previously RTF-embedded object detection
   was skipped unless explicitly requested.
+- **`invalidate_cache` is now safe across horizontally-scaled daemon
+  processes sharing one Redis instance.** The cache-generation guard that
+  protects a fresh report from being repopulated by a stale in-flight scan
+  is now backed by a Redis counter (per file hash) instead of a purely
+  in-process one, so invalidation on one daemon process is correctly
+  observed by every other process sharing the same cache. The counter is
+  bumped and the cached report deleted atomically via a Redis Lua script,
+  and a second Lua script performs an atomic compare-and-set on write to
+  reject a write whose captured generation has since been superseded.
+  Both scripts are loaded once at daemon startup (`SCRIPT LOAD`) and
+  invoked by their SHA (`EVALSHA`), transparently falling back to sending
+  the script body (`EVAL`) and re-caching the SHA if the server reports
+  the script is unrecognized (e.g. after a Redis restart). `GET /v1/query`
+  now re-checks Redis before returning a completed report for any file
+  hash this daemon process has already written to or rejected via Redis,
+  so an invalidation issued on a peer process is observed instead of
+  serving a stale report straight out of local memory.
 
 ## 0.5.2 — 2026-07-09
 

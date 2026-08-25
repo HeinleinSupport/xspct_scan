@@ -5138,6 +5138,7 @@ class TestRedisCache:
 
         assert file_hash not in self.daemon.tasks
         assert await self.daemon.redis_pool.get("xspct:" + file_hash) is None
+        assert await self.daemon.redis_pool.ttl("xspct:gen:" + file_hash) == -1
 
     async def test_cache_miss_increments_stat(self):
         initial = xspct.stats["redis_misses"]
@@ -5194,11 +5195,115 @@ class TestRedisCache:
 
     async def test_delete_error_increments_error_count(self):
         broken = AsyncMock()
-        broken.delete = AsyncMock(side_effect=ConnectionError("redis down"))
+        broken.eval = AsyncMock(side_effect=ConnectionError("redis down"))
         self.daemon.redis_pool = broken
         await self.daemon.invalidate_cached_report("s", "n" * 64)
         assert self.daemon._redis_error_count == 1
         assert xspct.stats["redis_errors"] == 1
+
+    async def test_cross_process_invalidate_blocks_stale_write(self):
+        """A peer daemon process's invalidation must be visible via Redis,
+        even though it never touched this process's local generation dict.
+        """
+        file_hash = "p" * 64
+        peer = xspct.InspectorDaemon()
+        peer.redis_pool = self.daemon.redis_pool  # shared cache, separate process
+
+        # In-flight scan on self.daemon captures the generation before the
+        # peer process invalidates the file.
+        stale_generation = await self.daemon.get_cache_generation("s", file_hash)
+        assert stale_generation == 0
+
+        await peer.invalidate_cached_report("s", file_hash)
+        # self.daemon's local dict never saw the peer's invalidation.
+        assert self.daemon._cache_generations.get(file_hash, 0) == 0
+
+        await self.daemon.cache_report(
+            "s", file_hash, {"hash": file_hash}, stale_generation
+        )
+
+        assert await self.daemon.redis_pool.get("xspct:" + file_hash) is None
+        assert file_hash not in self.daemon.tasks
+
+    async def test_cross_process_fresh_write_still_cached(self):
+        """A generation captured after the peer's invalidation must still be
+        cacheable — the guard must not reject every write once any
+        invalidation has ever happened.
+        """
+        file_hash = "q" * 64
+        peer = xspct.InspectorDaemon()
+        peer.redis_pool = self.daemon.redis_pool
+
+        await peer.invalidate_cached_report("s", file_hash)
+        fresh_generation = await self.daemon.get_cache_generation("s", file_hash)
+
+        await self.daemon.cache_report(
+            "s", file_hash, {"hash": file_hash}, fresh_generation
+        )
+
+        assert await self.daemon.redis_pool.get("xspct:" + file_hash) is not None
+
+    async def test_run_script_uses_evalsha_when_sha_cached(self):
+        """A pre-loaded SHA is used directly, without sending the script body."""
+        sha = await self.daemon.redis_pool.script_load(
+            xspct.InspectorDaemon._INVALIDATE_SCRIPT
+        )
+        self.daemon._invalidate_script_sha = sha
+        evalsha = self.daemon.redis_pool.evalsha
+        self.daemon.redis_pool.evalsha = MagicMock(wraps=evalsha)
+        self.daemon.redis_pool.eval = MagicMock(
+            side_effect=AssertionError("should not fall back to EVAL")
+        )
+
+        file_hash = "r" * 64
+        await self.daemon.invalidate_cached_report("s", file_hash)
+
+        assert self.daemon._invalidate_script_sha == sha
+        self.daemon.redis_pool.evalsha.assert_called_once()
+        self.daemon.redis_pool.eval.assert_not_called()
+        assert self.daemon._redis_error_count == 0
+
+    async def test_run_script_falls_back_and_recaches_sha_on_noscript(self):
+        """An unrecognised (or never-loaded) SHA transparently falls back to
+        EVAL and re-caches a fresh SHA for subsequent calls."""
+        self.daemon._invalidate_script_sha = "0" * 40  # bogus/expired SHA
+        eval = self.daemon.redis_pool.eval
+        script_load = self.daemon.redis_pool.script_load
+        self.daemon.redis_pool.eval = MagicMock(wraps=eval)
+        self.daemon.redis_pool.script_load = MagicMock(wraps=script_load)
+
+        file_hash = "t" * 64
+        await self.daemon.cache_report("s", file_hash, {"hash": file_hash})
+        await self.daemon.invalidate_cached_report("s", file_hash)
+
+        assert await self.daemon.redis_pool.get("xspct:" + file_hash) is None
+        assert self.daemon._invalidate_script_sha != "0" * 40
+        assert self.daemon._invalidate_script_sha
+        self.daemon.redis_pool.eval.assert_called_once()
+        self.daemon.redis_pool.script_load.assert_called_once_with(
+            xspct.InspectorDaemon._INVALIDATE_SCRIPT
+        )
+
+    async def test_setup_loads_lua_scripts(self, monkeypatch):
+        """Startup loads both script bodies and retains their Redis SHAs."""
+        pool = fakeredis.FakeAsyncRedis(decode_responses=True)
+        script_load = pool.script_load
+        pool.script_load = MagicMock(wraps=script_load)
+        redis_module = MagicMock()
+        redis_module.from_url.return_value = pool
+        monkeypatch.setattr(xspct, "redis", redis_module)
+        monkeypatch.setattr(xspct, "HAS_REDIS", True)
+        daemon = xspct.InspectorDaemon()
+
+        await daemon.setup()
+
+        assert pool.script_load.call_args_list == [
+            ((xspct.InspectorDaemon._INVALIDATE_SCRIPT,), {}),
+            ((xspct.InspectorDaemon._CACHE_STORE_SCRIPT,), {}),
+        ]
+        assert daemon._invalidate_script_sha
+        assert daemon._cache_store_script_sha
+        await daemon.teardown()
 
 
 @pytest.mark.skipif(not _HAS_FAKEREDIS, reason="fakeredis not installed")
@@ -5218,6 +5323,44 @@ class TestInvalidateCache:
         yield
         xspct.config["xspct_redis_cache"].update(saved)
         d.redis_pool = None
+
+    async def test_query_discards_peer_invalidated_local_report(self, client):
+        """A completed local report cannot outlive a peer's Redis deletion."""
+        daemon = client.app["daemon"]
+        file_hash = "f" * 64
+        await daemon.cache_report("s", file_hash, {"hash": file_hash})
+        peer = xspct.InspectorDaemon()
+        peer.redis_pool = daemon.redis_pool
+
+        await peer.invalidate_cached_report("s", file_hash)
+        response = await client.get(f"/v1/query?hash={file_hash}")
+
+        assert response.status == 404
+        assert (await response.json())["status"] == "not_found"
+        assert file_hash not in daemon.tasks
+
+    async def test_query_discards_redis_rejected_completed_task(self, client):
+        """A completed task whose Redis write lost the race is not served."""
+        daemon = client.app["daemon"]
+        file_hash = "e" * 64
+        stale_generation = await daemon.get_cache_generation("s", file_hash)
+
+        async def completed_report():
+            return {"hash": file_hash}
+
+        task = asyncio.create_task(completed_report())
+        await task
+        daemon.tasks[file_hash] = task
+        peer = xspct.InspectorDaemon()
+        peer.redis_pool = daemon.redis_pool
+        await peer.invalidate_cached_report("s", file_hash)
+        await daemon.cache_report("s", file_hash, {"hash": file_hash}, stale_generation)
+
+        response = await client.get(f"/v1/query?hash={file_hash}")
+
+        assert response.status == 404
+        assert (await response.json())["status"] == "not_found"
+        assert file_hash not in daemon.tasks
 
     async def test_second_request_is_cache_hit(self, client):
         r1 = await client.post("/v1/scan", data=_form(PDF_CLEAN, "inv1.pdf"))

@@ -2206,9 +2206,23 @@ class InspectorDaemon:
         """
         self.passwords: list[str] = []
         self.redis_pool = None
+        self._redis_legacy_client = False
         self._redis_error_count = 0
+        # SHA1 digests returned by SCRIPT LOAD at startup; used with EVALSHA
+        # so the script body isn't re-sent on every call. None until loaded
+        # (Redis disabled/unreachable) or after a NOSCRIPT miss until reloaded.
+        self._invalidate_script_sha: "str | None" = None
+        self._cache_store_script_sha: "str | None" = None
         self.tasks: OrderedDict = OrderedDict()
+        # Local fallback generation counter, authoritative only when Redis is
+        # disabled/unreachable. When Redis is enabled the generation counter
+        # is kept in Redis instead (see _redis_gen_key) so the invalidate_cache
+        # guard is correct across multiple daemon processes sharing one cache.
         self._cache_generations: dict[str, int] = {}
+        # Completed reports successfully accepted by Redis. /v1/query resolves
+        # these hashes from Redis so a peer's invalidation is observed before
+        # it returns a process-local terminal result.
+        self._redis_authoritative_hashes: set[str] = set()
         # In-flight PartialReport objects keyed by file_hash.
         # Populated by analyze_pipeline(); removed when the scan finishes.
         self._partials: dict = {}
@@ -2235,6 +2249,27 @@ class InspectorDaemon:
     # Redis helpers
     # ------------------------------------------------------------------
 
+    # Atomically bump the generation counter and drop the cached report, so a
+    # concurrent cache_report() write (running its own script, see below) can
+    # never interleave between the INCR and the DEL.
+    _INVALIDATE_SCRIPT = (
+        "local gen = redis.call('INCR', KEYS[1]) redis.call('DEL', KEYS[2]) return gen"
+    )
+
+    # Only store the report if the generation counter still matches the one
+    # captured when analysis started; otherwise a concurrent invalidate_cache
+    # request raced us and the report must not be written. This is a single
+    # atomic compare-and-set — a plain GET-then-SETEX from Python would leave
+    # a window where an invalidate happening in between goes unnoticed.
+    _CACHE_STORE_SCRIPT = (
+        "local current = redis.call('GET', KEYS[1]) "
+        "if (not current) or current == ARGV[1] then "
+        "redis.call('SETEX', KEYS[2], ARGV[2], ARGV[3]) "
+        "return 1 "
+        "end "
+        "return 0"
+    )
+
     def _redis_enabled(self, s: str) -> bool:
         if not config["xspct_redis_cache"]["enabled"] or not self.redis_pool:
             return False
@@ -2257,12 +2292,79 @@ class InspectorDaemon:
             logger.info("%s - Redis recovered, resetting circuit-breaker", s)
             self._redis_error_count = 0
 
-    async def get_cached_report(self, s: str, file_hash: str) -> "dict | None":
-        """Look up a previously computed report in Redis.
+    def _redis_gen_key(self, file_hash: str) -> str:
+        return config["xspct_redis_cache"]["prefix"] + "gen:" + file_hash
+
+    async def _redis_script_load(self, script: str) -> "str | None":
+        """SCRIPT LOAD *script* and return its SHA1, or ``None`` on failure."""
+        try:
+            return await self.redis_pool.script_load(script)
+        except Exception as exc:
+            logger.warning("Failed to cache Redis script: %s", exc)
+            return None
+
+    async def _redis_run_script(
+        self, script: str, sha_attr: str, keys: list, args: list
+    ):
+        """Run a Lua script via EVALSHA using the SHA cached at startup.
+
+        Falls back to sending the script body directly (``EVAL``) and
+        re-caching its SHA only when the server reports ``NOSCRIPT`` (e.g.
+        the SHA was never loaded, or the script cache was cleared by a
+        Redis restart/``FLUSHALL``). Tolerates both redis-py and legacy
+        aioredis clients.
+        """
+        sha = getattr(self, sha_attr)
+        if sha:
+            try:
+                if self._redis_legacy_client:
+                    return await self.redis_pool.evalsha(sha, keys=keys, args=args)
+                return await self.redis_pool.evalsha(sha, len(keys), *keys, *args)
+            except Exception as exc:
+                # Real Redis prefixes this "NOSCRIPT No matching script...";
+                # fakeredis (used in tests) omits the "NOSCRIPT" error code
+                # and only sends the message text, so match on both.
+                msg = str(exc).lower()
+                if "noscript" not in msg and "no matching script" not in msg:
+                    raise
+        if self._redis_legacy_client:
+            result = await self.redis_pool.eval(script, keys=keys, args=args)
+        else:
+            result = await self.redis_pool.eval(script, len(keys), *keys, *args)
+        setattr(self, sha_attr, await self._redis_script_load(script))
+        return result
+
+    async def _get_cached_report(
+        self, s: str, file_hash: str
+    ) -> "tuple[dict | None, bool]":
+        """Look up a Redis report and state whether Redis answered the read.
 
         Falls back gracefully when Redis is disabled or the circuit-breaker
-        is open. Cache misses (including errors) are counted in
-        :data:`stats`.
+        is open.
+
+        Returns:
+            The cached report (or ``None``) and whether Redis successfully
+            answered the request.
+        """
+        if not self._redis_enabled(s):
+            stats["redis_misses"] += 1
+            return None, False
+        key = config["xspct_redis_cache"]["prefix"] + file_hash
+        try:
+            raw = await self.redis_pool.get(key)
+            self._redis_reset_errors(s)
+        except Exception as exc:
+            self._redis_record_error(s, exc)
+            return None, False
+        if raw:
+            stats["redis_hits"] += 1
+            logger.debug("%s - Redis hit: %s", s, file_hash)
+            return json.loads(raw), True
+        stats["redis_misses"] += 1
+        return None, True
+
+    async def get_cached_report(self, s: str, file_hash: str) -> "dict | None":
+        """Look up a previously computed report in Redis.
 
         Args:
             s: Session tag for log messages.
@@ -2271,22 +2373,32 @@ class InspectorDaemon:
         Returns:
             The cached report dict, or ``None`` on a miss.
         """
-        if not self._redis_enabled(s):
-            stats["redis_misses"] += 1
-            return None
-        key = config["xspct_redis_cache"]["prefix"] + file_hash
-        try:
-            raw = await self.redis_pool.get(key)
-            self._redis_reset_errors(s)
-        except Exception as exc:
-            self._redis_record_error(s, exc)
-            return None
-        if raw:
-            stats["redis_hits"] += 1
-            logger.debug("%s - Redis hit: %s", s, file_hash)
-            return json.loads(raw)
-        stats["redis_misses"] += 1
-        return None
+        report, _ = await self._get_cached_report(s, file_hash)
+        return report
+
+    async def get_cache_generation(self, s: str, file_hash: str) -> int:
+        """Return the current cache generation for *file_hash*.
+
+        Reads the Redis-backed counter when Redis is enabled, so the
+        invalidate_cache guard stays consistent across multiple daemon
+        processes sharing the same cache; falls back to the local
+        in-process counter otherwise (or on a Redis error). The local
+        counter is bumped up to match Redis's value (never decreased) so a
+        later same-process :meth:`cache_report` call can tell a peer's
+        invalidation apart from genuine local staleness.
+        """
+        if self._redis_enabled(s):
+            try:
+                raw = await self.redis_pool.get(self._redis_gen_key(file_hash))
+                self._redis_reset_errors(s)
+                generation = int(raw) if raw else 0
+                self._cache_generations[file_hash] = max(
+                    self._cache_generations.get(file_hash, 0), generation
+                )
+                return generation
+            except Exception as exc:
+                self._redis_record_error(s, exc)
+        return self._cache_generations.get(file_hash, 0)
 
     async def invalidate_cached_report(self, s: str, file_hash: str) -> None:
         """Delete a completed report from the in-memory and Redis caches."""
@@ -2294,12 +2406,20 @@ class InspectorDaemon:
             self._cache_generations.get(file_hash, 0) + 1
         )
         self.tasks.pop(file_hash, None)
+        self._redis_authoritative_hashes.discard(file_hash)
         self._partials.pop(file_hash, None)
         if not self._redis_enabled(s):
             return
-        key = config["xspct_redis_cache"]["prefix"] + file_hash
         try:
-            await self.redis_pool.delete(key)
+            await self._redis_run_script(
+                self._INVALIDATE_SCRIPT,
+                "_invalidate_script_sha",
+                [
+                    self._redis_gen_key(file_hash),
+                    config["xspct_redis_cache"]["prefix"] + file_hash,
+                ],
+                [],
+            )
             self._redis_reset_errors(s)
             logger.info("%s - invalidated cached report for %s", s, file_hash)
         except Exception as exc:
@@ -2322,25 +2442,53 @@ class InspectorDaemon:
             s: Session tag for log messages.
             file_hash: SHA-256 hex digest used as the cache key.
             report: Finished analysis report dict to store.
-            cache_generation: Generation captured when analysis started. If
-                invalidation has advanced it, the stale report is discarded.
+            cache_generation: Generation captured when analysis started
+                (via :meth:`get_cache_generation`). Discarded locally first
+                if THIS process's own counter has since moved past it
+                (same-process invalidation) — not merely differs from it,
+                since a peer process's Redis-side bump legitimately puts
+                the captured value ahead of what this process has observed
+                locally. Checked again atomically against Redis (catches
+                invalidation from a peer daemon process sharing the same
+                cache) before the Redis write itself.
         """
-        if cache_generation is not None and cache_generation != (
-            self._cache_generations.get(file_hash, 0)
+        if cache_generation is not None and (
+            cache_generation < self._cache_generations.get(file_hash, 0)
         ):
             logger.info("%s - not caching invalidated report for %s", s, file_hash)
             return
-        self._store_terminal_result(file_hash, report)
         if not self._redis_enabled(s):
+            self._store_terminal_result(file_hash, report)
             return
         key = config["xspct_redis_cache"]["prefix"] + file_hash
         expire = int(config["xspct_redis_cache"]["expire"])
         try:
-            await self.redis_pool.setex(key, expire, json.dumps(report))
+            if cache_generation is None:
+                await self.redis_pool.setex(key, expire, json.dumps(report))
+            else:
+                stored = await self._redis_run_script(
+                    self._CACHE_STORE_SCRIPT,
+                    "_cache_store_script_sha",
+                    [self._redis_gen_key(file_hash), key],
+                    [str(cache_generation), expire, json.dumps(report)],
+                )
+                if not stored:
+                    self._redis_reset_errors(s)
+                    self._redis_authoritative_hashes.add(file_hash)
+                    logger.info(
+                        "%s - Redis generation advanced, discarding stale report "
+                        "for %s",
+                        s,
+                        file_hash,
+                    )
+                    return
             self._redis_reset_errors(s)
+            self._redis_authoritative_hashes.add(file_hash)
+            self._store_terminal_result(file_hash, report)
             logger.info("%s - cached report for %s (TTL %ds)", s, file_hash, expire)
         except Exception as exc:
             self._redis_record_error(s, exc)
+            self._store_terminal_result(file_hash, report)
 
     def _store_terminal_result(self, file_hash: str, result: dict) -> None:
         """Persist a terminal in-memory result for subsequent /query lookups."""
@@ -2361,7 +2509,8 @@ class InspectorDaemon:
 
     def _evict_tasks(self) -> None:
         while len(self.tasks) > self._TASKS_MAX_SIZE:
-            self.tasks.popitem(last=False)
+            file_hash, _ = self.tasks.popitem(last=False)
+            self._redis_authoritative_hashes.discard(file_hash)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -2449,11 +2598,19 @@ class InspectorDaemon:
                         password=rc["password"] or None,
                         decode_responses=True,
                     )
+                    self._redis_legacy_client = False
                 else:
                     self.redis_pool = await redis.create_redis_pool(
                         url, encoding="utf-8"
                     )
+                    self._redis_legacy_client = True
                 logger.info("Connected to Redis at %s", url)
+                self._invalidate_script_sha = await self._redis_script_load(
+                    self._INVALIDATE_SCRIPT
+                )
+                self._cache_store_script_sha = await self._redis_script_load(
+                    self._CACHE_STORE_SCRIPT
+                )
             except Exception as exc:
                 logger.error("Failed to connect to Redis: %s", exc)
                 self.redis_pool = None
@@ -8608,7 +8765,7 @@ class InspectorDaemon:
                 cached = None
             else:
                 cached = await self.get_cached_report(s, file_hash)
-            cache_generation = self._cache_generations.get(file_hash, 0)
+            cache_generation = await self.get_cache_generation(s, file_hash)
             if cached:
                 if cached.get("decrypted") or not custom_passwords:
                     logger.info("%s (%s) - cache hit for %s", s, timer(), file_hash)
@@ -8865,10 +9022,7 @@ class InspectorDaemon:
                         self._store_terminal_result(file_hash, error)
                         return self._build_response(error, request)
                     try:
-                        report = result.result()
-                        return self._build_response(
-                            {"status": "finished", "report": report}, request
-                        )
+                        result = result.result()
                     except Exception as exc:
                         error = self._make_terminal_error_result(file_hash)
                         self._store_terminal_result(file_hash, error)
@@ -8876,15 +9030,29 @@ class InspectorDaemon:
                             "%s - background task for %s raised: %s", s, file_hash, exc
                         )
                         return self._build_response(error, request)
-                # Task still running — return partial report if available.
-                partial = self._partials.get(file_hash)
-                if partial:
-                    snap = partial.snapshot()
-                    snap["status"] = "processing"
-                    return self._build_response(snap, request)
-                return self._build_response({"status": "processing"}, request)
+                else:
+                    # Task still running — return partial report if available.
+                    partial = self._partials.get(file_hash)
+                    if partial:
+                        snap = partial.snapshot()
+                        snap["status"] = "processing"
+                        return self._build_response(snap, request)
+                    return self._build_response({"status": "processing"}, request)
             if isinstance(result, dict) and result.get("status") == "error":
                 return self._build_response(result, request)
+            if file_hash in self._redis_authoritative_hashes:
+                redis_result, redis_answered = await self._get_cached_report(
+                    s, file_hash
+                )
+                if redis_answered:
+                    if redis_result:
+                        self._store_terminal_result(file_hash, redis_result)
+                        result = redis_result
+                    else:
+                        self.tasks.pop(file_hash, None)
+                        return self._build_response(
+                            {"status": "not_found"}, request, status=404
+                        )
             return self._build_response(
                 {"status": "finished", "report": result}, request
             )
