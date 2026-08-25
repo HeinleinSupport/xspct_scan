@@ -1,30 +1,62 @@
 # xspct_scan
 
 **xspct_scan** is an async HTTP daemon that analyses Office, PDF, HTML, ODF,
-image, and archive files for malware indicators. It is designed to integrate
-with [Rspamd](https://rspamd.com/) and other mail-security pipelines, and
-exposes a simple HTTP API for on-demand scanning.
+image, archive, and standalone-script files for malware indicators. It
+combines static structural analysis (VBA/OLE parsing, PDF object trees,
+archive extraction), signature-based scanning (YARA, ClamAV), and IOC/text
+extraction (URLs, IPs, domains, hashes, and more, including from OCR and
+decoded macros) into a single concurrent analysis pipeline, returning a
+unified JSON (or msgpack/CBOR) report per file.
+
+It is designed to sit alongside a mail-filtering stack —
+built primarily to integrate with [Rspamd](https://rspamd.com/) as an
+attachment-scanning backend, but usable standalone via its HTTP API or the
+bundled `xspct-scan-client` CLI for on-demand or scripted scanning. Analysis
+is parallelised across per-file-type analyzers with a two-tier
+foreground/background concurrency model, so slow scans degrade gracefully
+(`202 Accepted` + polling) instead of blocking the caller, and results can be
+cached in Redis (or served from an in-memory LRU) to avoid re-analysing the
+same file hash.
 
 ## Table of Contents
 
-- [Features](#features)
-- [Quick start](#quick-start)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [HTTP API](#http-api)
-- [Decrypting password-protected files](#decrypting-password-protected-files)
-- [YARA scanning](#yara-scanning)
-- [Sandboxed archive extraction](#sandboxed-archive-extraction)
-- [Image OCR and QR/barcode scanning](#image-ocr-and-qrbarcode-scanning)
-- [ODF analysis](#odf-analysis)
-- [SVG analysis](#svg-analysis)
-- [Standalone script analysis](#standalone-script-analysis)
-- [Windows shortcut (.lnk) analysis](#windows-shortcut-lnk-analysis)
-- [ClamAV integration](#clamav-integration)
-- [Systemd unit](#systemd-unit)
-- [Documentation](#documentation)
-- [Licence](#licence)
+- [xspct\_scan](#xspct_scan)
+  - [Table of Contents](#table-of-contents)
+  - [Features](#features)
+    - [Document analysis](#document-analysis)
+    - [Enrichment](#enrichment)
+    - [Multi-source text extraction](#multi-source-text-extraction)
+    - [Infrastructure](#infrastructure)
+  - [Quick start](#quick-start)
+  - [Requirements](#requirements)
+  - [Installation](#installation)
+    - [From GitHub](#from-github)
+    - [Optional extras](#optional-extras)
+    - [From source](#from-source)
+  - [Configuration](#configuration)
+  - [HTTP API](#http-api)
+    - [`POST /v1/scan`](#post-v1scan)
+    - [Endpoints](#endpoints)
+    - [`GET /v1/capabilities`](#get-v1capabilities)
+  - [Decrypting password-protected files](#decrypting-password-protected-files)
+    - [Global password list](#global-password-list)
+    - [Per-request passwords](#per-request-passwords)
+  - [YARA scanning](#yara-scanning)
+  - [Sandboxed archive extraction](#sandboxed-archive-extraction)
+  - [Image OCR and QR/barcode scanning](#image-ocr-and-qrbarcode-scanning)
+    - [OCR exclusion gates](#ocr-exclusion-gates)
+    - [System dependencies](#system-dependencies)
+  - [ODF analysis](#odf-analysis)
+  - [SVG analysis](#svg-analysis)
+  - [Standalone script analysis](#standalone-script-analysis)
+  - [Windows shortcut (.lnk) analysis](#windows-shortcut-lnk-analysis)
+  - [ClamAV integration](#clamav-integration)
+    - [Requirements](#requirements-1)
+    - [Configuration](#configuration-1)
+    - [Response fields](#response-fields)
+  - [Systemd unit](#systemd-unit)
+  - [Documentation](#documentation)
+  - [Licence](#licence)
 
 ---
 
