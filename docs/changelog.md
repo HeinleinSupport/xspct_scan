@@ -7,6 +7,8 @@
 
 ## Unreleased
 
+## 0.6.0 — 2026-08-25
+
 ### Added
 - **Digital signature detection** — a new `signature` analyzer, backed by
   the optional [pyhanko](https://github.com/MatthiasValvekens/pyhanko)
