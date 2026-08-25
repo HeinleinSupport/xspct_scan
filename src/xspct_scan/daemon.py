@@ -4369,6 +4369,7 @@ class InspectorDaemon:
                     return None
 
             if getattr(f, "password", None):
+                report["decrypted"] = True
                 report["decryption_password"] = str(f.password)
 
             def _walk_sflock(file_obj: object, current_depth: int) -> None:

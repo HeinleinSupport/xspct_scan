@@ -3351,6 +3351,7 @@ class TestAnalyzeArchiveSflock:
         result = daemon.analyze_archive("s", "enc.zip", b"FAKEARCHIVEBYTES", 0)
         assert result is not None
         assert result.get("decryption_password") == "infected"
+        assert result.get("decrypted") is True
 
     def test_sflock_exception_falls_back_gracefully(self, daemon, monkeypatch):
         monkeypatch.setattr(xspct, "HAS_SFLOCK", True)
