@@ -8,6 +8,34 @@
 ## Unreleased
 
 ### Added
+- **Digital signature detection** — a new `signature` analyzer, backed by
+  the optional [pyhanko](https://github.com/MatthiasValvekens/pyhanko)
+  dependency (`[advanced]` extra), covering three signature kinds:
+  - **VBA project signatures**: the `\x05DigitalSignature*` OLE2 stream (or
+    the equivalent `vbaProjectSignature*.bin` OOXML part) is parsed as a
+    [MS-OSHARED] DigSigBlob and its embedded PKCS#7/CMS signature is
+    validated against the embedded certificate.
+  - **OOXML whole-document signatures**: each `_xmlsignatures/*.xml`
+    XML-DSig signature is validated by re-hashing every manifest-listed
+    package part directly from the live ZIP and comparing it to the signed
+    digest, then verifying the outer `SignedInfo` signature against the
+    embedded certificate. `covers_whole_document` separately reports whether
+    every non-signature package member is included in the signed manifest.
+  - **PDF (PAdES) signatures**: detected and validated via `pyhanko`,
+    including whether the signature covers the entire file.
+  - Pure detection — never influences `verdict.score`/`severity`.
+    `trusted` is always `false`; certificate trust-store validation is a
+    separate, later stage.
+  - Results are reported under a new, additive `engines.signature` field
+    (single object, or an array when multiple signatures are found), with
+    `present`, `type`, `valid`, `signer`, `issuer_fingerprint`, `trusted`,
+    `key_usage_valid`, `cert_time_valid`, `covers_whole_document`, and an
+    optional `timestamp`.
+  - `key_usage_valid`/`cert_time_valid` are informational by default; set
+    the new `xspct_analyzers.signature.strict` config key (default
+    `false`) to also require both for `valid`.
+  - New config key `xspct_analyzers.signature.enabled` (default `true`).
+  - When `pyhanko` isn't installed, the analyzer cleanly skips.
 - **`invalidate_cache` scan option** — new query parameter and structured
   `metadata` field (bool, default `false`) for `POST /v1/scan`, alongside
   `force_analyzers`. When set, the daemon deletes the Redis and in-memory

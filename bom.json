@@ -543,6 +543,29 @@
       "version": "1.4.0"
     },
     {
+      "bom-ref": "asn1crypto==1.5.1",
+      "description": "Fast ASN.1 parser and serializer with definitions for private keys, public keys, certificates, CRL, OCSP, CMS, PKCS#3, PKCS#7, PKCS#8, PKCS#12, PKCS#5, X.509 and TSP",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata: Home-page",
+          "type": "website",
+          "url": "https://github.com/wbond/asn1crypto"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "asn1crypto",
+      "purl": "pkg:pypi/asn1crypto@1.5.1",
+      "type": "library",
+      "version": "1.5.1"
+    },
+    {
       "bom-ref": "attrs==26.1.0",
       "description": "Classes Without Boilerplate",
       "externalReferences": [
@@ -3074,6 +3097,29 @@
       "version": "4.13.0.92"
     },
     {
+      "bom-ref": "oscrypto==1.3.0",
+      "description": "TLS (SSL) sockets, key generation, encryption, decryption, signing, verification and KDFs using the OS crypto libraries. Does not require a compiler, and relies on the OS for patching. Works on Windows, OS X and Linux/BSD.",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata: Home-page",
+          "type": "website",
+          "url": "https://github.com/wbond/oscrypto"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "oscrypto",
+      "purl": "pkg:pypi/oscrypto@1.3.0",
+      "type": "library",
+      "version": "1.3.0"
+    },
+    {
       "bom-ref": "packageurl-python==0.17.6",
       "description": "A purl aka. Package URL parser and builder",
       "externalReferences": [
@@ -3548,6 +3594,49 @@
       "version": "1.1.0"
     },
     {
+      "bom-ref": "pyHanko==0.36.2",
+      "description": "Tools for stamping and signing PDF files",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Documentation",
+          "type": "documentation",
+          "url": "https://docs.pyhanko.eu/"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Issue Tracker",
+          "type": "issue-tracker",
+          "url": "https://github.com/MatthiasValvekens/pyHanko/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Source Code",
+          "type": "other",
+          "url": "https://github.com/MatthiasValvekens/pyHanko"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Changes",
+          "type": "release-notes",
+          "url": "https://docs.pyhanko.eu/en/latest/changelog.html"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Homepage",
+          "type": "website",
+          "url": "https://github.com/MatthiasValvekens/pyHanko"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "pyHanko",
+      "purl": "pkg:pypi/pyhanko@0.36.2",
+      "type": "library",
+      "version": "0.36.2"
+    },
+    {
       "bom-ref": "pybcj==1.0.7",
       "description": "bcj filter library",
       "externalReferences": [
@@ -3801,6 +3890,29 @@
       "purl": "pkg:pypi/pydantic-core@2.46.4",
       "type": "library",
       "version": "2.46.4"
+    },
+    {
+      "bom-ref": "pyhanko-certvalidator==0.31.4",
+      "description": "Validates X.509 certificates and paths; forked from wbond/certvalidator",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Homepage",
+          "type": "website",
+          "url": "https://github.com/MatthiasValvekens/pyHanko/tree/master/pkgs/pyhanko-certvalidator"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "pyhanko-certvalidator",
+      "purl": "pkg:pypi/pyhanko-certvalidator@0.31.4",
+      "type": "library",
+      "version": "0.31.4"
     },
     {
       "bom-ref": "pyparsing==3.3.2",
@@ -5448,6 +5560,39 @@
       "version": "2026.2"
     },
     {
+      "bom-ref": "tzlocal==5.4.4",
+      "description": "tzinfo object for the local timezone",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Issue tracker",
+          "type": "issue-tracker",
+          "url": "https://github.com/regebro/tzlocal/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Source code",
+          "type": "other",
+          "url": "https://github.com/regebro/tzlocal"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Changelog",
+          "type": "release-notes",
+          "url": "https://github.com/regebro/tzlocal/blob/master/CHANGES.txt"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "tzlocal",
+      "purl": "pkg:pypi/tzlocal@5.4.4",
+      "type": "library",
+      "version": "5.4.4"
+    },
+    {
       "bom-ref": "uri-template==1.3.0",
       "description": "RFC 6570 URI Template Processor",
       "externalReferences": [
@@ -5469,6 +5614,54 @@
       "purl": "pkg:pypi/uri-template@1.3.0",
       "type": "library",
       "version": "1.3.0"
+    },
+    {
+      "bom-ref": "uritools==6.1.3",
+      "description": "URI parsing, classification and composition",
+      "externalReferences": [
+        {
+          "comment": "from packaging metadata Project-URL: Documentation",
+          "type": "documentation",
+          "url": "https://uritools.readthedocs.io/en/stable/"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Issues",
+          "type": "issue-tracker",
+          "url": "https://github.com/tkem/uritools/issues"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Source",
+          "type": "other",
+          "url": "https://github.com/tkem/uritools/"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Changelog",
+          "type": "release-notes",
+          "url": "https://github.com/tkem/uritools/blob/master/CHANGELOG.rst"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Repository",
+          "type": "vcs",
+          "url": "https://github.com/tkem/uritools/"
+        },
+        {
+          "comment": "from packaging metadata Project-URL: Homepage",
+          "type": "website",
+          "url": "https://github.com/tkem/uritools/"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "acknowledgement": "declared",
+            "id": "MIT"
+          }
+        }
+      ],
+      "name": "uritools",
+      "purl": "pkg:pypi/uritools@6.1.3",
+      "type": "library",
+      "version": "6.1.3"
     },
     {
       "bom-ref": "urllib3==2.6.3",
@@ -5867,6 +6060,9 @@
         "tzdata==2026.2"
       ],
       "ref": "arrow==1.4.0"
+    },
+    {
+      "ref": "asn1crypto==1.5.1"
     },
     {
       "ref": "attrs==26.1.0"
@@ -6351,6 +6547,12 @@
     },
     {
       "dependsOn": [
+        "asn1crypto==1.5.1"
+      ],
+      "ref": "oscrypto==1.3.0"
+    },
+    {
+      "dependsOn": [
         "pytest==9.0.3",
         "setuptools==81.0.0"
       ],
@@ -6457,6 +6659,19 @@
     },
     {
       "dependsOn": [
+        "aiohttp==3.13.5",
+        "asn1crypto==1.5.1",
+        "cryptography==48.0.0",
+        "lxml==6.1.0",
+        "pillow==12.2.0",
+        "pyhanko-certvalidator==0.31.4",
+        "requests==2.33.1",
+        "tzlocal==5.4.4"
+      ],
+      "ref": "pyHanko==0.36.2"
+    },
+    {
+      "dependsOn": [
         "Pygments==2.20.0",
         "coverage==7.13.5",
         "pytest-cov==7.1.0",
@@ -6491,6 +6706,17 @@
         "typing_extensions==4.15.0"
       ],
       "ref": "pydantic_core==2.46.4"
+    },
+    {
+      "dependsOn": [
+        "aiohttp==3.13.5",
+        "asn1crypto==1.5.1",
+        "cryptography==48.0.0",
+        "oscrypto==1.3.0",
+        "requests==2.33.1",
+        "uritools==6.1.3"
+      ],
+      "ref": "pyhanko-certvalidator==0.31.4"
     },
     {
       "dependsOn": [
@@ -6847,7 +7073,19 @@
       "ref": "tzdata==2026.2"
     },
     {
+      "dependsOn": [
+        "pytest-cov==7.1.0",
+        "pytest==9.0.3",
+        "ruff==0.15.20",
+        "tzdata==2026.2"
+      ],
+      "ref": "tzlocal==5.4.4"
+    },
+    {
       "ref": "uri-template==1.3.0"
+    },
+    {
+      "ref": "uritools==6.1.3"
     },
     {
       "dependsOn": [
@@ -6925,7 +7163,7 @@
     }
   ],
   "metadata": {
-    "timestamp": "2026-08-24T22:32:53.528195+00:00",
+    "timestamp": "2026-08-25T12:56:22.092745+00:00",
     "tools": {
       "components": [
         {
@@ -7029,7 +7267,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:ec6671d6-1964-4a21-b544-e1ce52d7eace",
+  "serialNumber": "urn:uuid:55270282-c63a-4f95-9df6-77e242920deb",
   "version": 1,
   "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",

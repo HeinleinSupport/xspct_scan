@@ -50,6 +50,7 @@ same file hash.
   - [SVG analysis](#svg-analysis)
   - [Standalone script analysis](#standalone-script-analysis)
   - [Windows shortcut (.lnk) analysis](#windows-shortcut-lnk-analysis)
+  - [Digital signature detection](#digital-signature-detection)
   - [ClamAV integration](#clamav-integration)
     - [Requirements](#requirements-1)
     - [Configuration](#configuration-1)
@@ -89,6 +90,11 @@ same file hash.
   detection; uses [LnkParse3](https://github.com/Matmaus/LnkParse) when
   available. See
   [Windows shortcut (.lnk) analysis](#windows-shortcut-lnk-analysis)
+- **Digital signatures** — detects and cryptographically validates VBA
+  project signatures, OOXML whole-document XML-DSig signatures, and PDF
+  (PAdES) signatures via [pyhanko](https://github.com/MatthiasValvekens/pyhanko);
+  pure detection, never affects score/severity. See
+  [Digital signature detection](#digital-signature-detection)
 - **RTF** — embedded object extraction via `rtfobj` (opt-in per request)
 - **Dynamic JS emulation** — sandboxed execution with
   [quickjs](https://github.com/PetterS/quickjs) and deobfuscation with
@@ -217,7 +223,7 @@ pip install "git+https://github.com/HeinleinSupport/xspct_scan.git"
 | `redis` | `redis[asyncio]` | Persistent result cache across restarts |
 | `enrichment` | `Pillow`, `pytesseract`, `pyzbar`, `easyocr`, `clamd`, `jsbeautifier`, `quickjs`, `tree-sitter` | Image OCR/barcode/EXIF (Tesseract + EasyOCR), ClamAV integration, JS deobfuscation |
 | `openapi` | `pydantic>=2.0` | OpenAPI 3.0 spec + ReDoc UI |
-| `advanced` | `yara-python`, `yara-x`, `iocsearcher`, `odfdo`, `py7zr`, `SFlock2`, `tldextract`, `LnkParse3` | YARA scanning, extended IOCs, ODF analysis, sandboxed archive extraction, .lnk shortcut analysis |
+| `advanced` | `yara-python`, `yara-x`, `iocsearcher`, `odfdo`, `py7zr`, `SFlock2`, `tldextract`, `LnkParse3`, `pyhanko` | YARA scanning, extended IOCs, ODF analysis, sandboxed archive extraction, .lnk shortcut analysis, digital signature detection |
 | `serialization` | `msgpack`, `cbor2` | msgpack and CBOR response serialization |
 | `compression` | `zstandard` | zstd response compression and transparent upload decompression |
 
@@ -586,6 +592,45 @@ that raw fallback; global scanners such as YARA and ClamAV remain unaffected.
 ```bash
 xspct-scan-client suspicious.lnk
 ```
+
+---
+
+## Digital signature detection
+
+When [pyhanko](https://github.com/MatthiasValvekens/pyhanko) is installed
+(`[advanced]` extra), Office and PDF documents are checked for digital
+signatures. This is **pure detection** — results never influence
+`verdict.score`/`severity` — and reported under `engines.signature` (single
+object, or an array when multiple signatures are present):
+
+| Type | Source | `valid` means |
+|------|--------|----------------|
+| `vba_project` | `\x05DigitalSignature*` OLE2 stream, or the equivalent `vbaProjectSignature*.bin` OOXML part | The embedded PKCS#7/CMS signature is internally self-consistent (verifies against its own embedded certificate) |
+| `ooxml_document` | `_xmlsignatures/*.xml` (XML-DSig) | Every manifest-listed package part still matches its signed digest **and** the outer signature verifies; `covers_whole_document` says whether the signed manifest includes every non-signature package member |
+| `pdf` | Embedded PAdES signature | The CMS signature is intact and valid; `covers_whole_document` reflects whether it covers the entire file |
+
+Every entry also carries `signer` (certificate subject), `issuer_fingerprint`
+(`sha256:<hex>` of the cryptographically verified direct issuer certificate,
+or the signing certificate when no such issuer is embedded), `key_usage_valid` (the
+signing certificate's KeyUsage extension, if present, permits digital
+signatures), `cert_time_valid` (the certificate's `not_valid_before`/
+`not_valid_after` window covers the current time), and an optional
+`timestamp` (ISO-8601 UTC signing time). **`trusted` is always `false`** —
+certificate trust-store validation (verifying the signer's certificate
+chains to a trusted root) is out of scope for this stage.
+
+By default, `key_usage_valid`/`cert_time_valid` are reported for information
+only and never affect `valid` — a certificate with no signing-appropriate
+KeyUsage bits, or one that's expired/not-yet-valid, can still produce
+`valid: true` if the cryptographic checks pass. Set
+`xspct_analyzers.signature.strict: true` to additionally require both to be
+true for `valid`.
+
+OOXML signatures using XML-DSig transforms that xspct_scan does not implement
+are skipped rather than reported as validated.
+
+`xspct_analyzers.signature.enabled: false` disables the analyzer; if
+`pyhanko` isn't installed, it cleanly skips.
 
 ---
 

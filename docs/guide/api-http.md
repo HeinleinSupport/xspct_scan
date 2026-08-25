@@ -317,6 +317,23 @@ Possible keys: `title`, `author`, `subject`, `keywords`, `creator`, `producer`,
 | `archive` | `{files: [{name, size, detected_type, analyzers_run[], findings}]}` | Archives only |
 | `image` | `{exif{}?}` | Images/embedded images |
 | `rtf` | `{objects: [{is_ole, class_name, oledata_md5, is_package}]}` | RTF only |
+| `signature` | `{...}` or `[{...}, ...]` | Single object if exactly one signature was found, array if multiple — see below |
+
+`signature` — digital signature detection (VBA project, OOXML whole-document,
+PDF/PAdES). Pure detection: never affects `verdict.score`/`severity`.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `present` | bool | Always `true` (only emitted when a signature exists) |
+| `type` | string | `vba_project`\|`ooxml_document`\|`pdf` |
+| `valid` | bool | Signature is cryptographically self-consistent (and, for `ooxml_document`, that every manifest-listed package part still matches its signed digest) |
+| `signer` | string | Signing certificate subject |
+| `issuer_fingerprint` | string | `sha256:<hex>` of the cryptographically verified direct issuer certificate, or the signer's own certificate when no verified issuer is embedded |
+| `trusted` | bool | Always `false` — certificate trust-store validation is a separate, later stage |
+| `key_usage_valid` | bool | Signing certificate's KeyUsage extension, if present, permits digital signatures (informational only unless `xspct_analyzers.signature.strict: true`) |
+| `cert_time_valid` | bool | Certificate's `not_valid_before`/`not_valid_after` window covers the current time (informational only unless `xspct_analyzers.signature.strict: true`) |
+| `covers_whole_document` | bool | `true` when the signature covers the entire file/package, not just a subset |
+| `timestamp` | string | ISO-8601 UTC signing time, when available (otherwise omitted) |
 
 **Response `202 Accepted`** — analysis still running (timeout exceeded).
 The partial report snapshot is returned alongside bookkeeping fields.

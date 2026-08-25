@@ -29,12 +29,14 @@ import ntpath
 import os
 import re
 import secrets
+import struct
 import sys
 import time
 import timeit
 import urllib.parse
 import zipfile
 from collections import OrderedDict
+from datetime import datetime, timezone
 
 import yaml
 from aiohttp import web
@@ -506,6 +508,49 @@ except ImportError:
     HAS_LNKPARSE = False
 
 try:
+    from asn1crypto import cms as _cms
+    from asn1crypto import x509 as _asn1_x509
+    from cryptography import x509 as _cx509
+    from cryptography.exceptions import InvalidSignature as _InvalidSignature
+    from cryptography.hazmat.primitives import hashes as _chashes
+    from cryptography.hazmat.primitives.asymmetric import ec as _cec
+    from cryptography.hazmat.primitives.asymmetric import padding as _cpadding
+    from cryptography.hazmat.primitives.asymmetric import rsa as _crsa
+    from lxml import etree as _etree
+    from pyhanko.pdf_utils.reader import PdfFileReader as _PdfFileReader
+    from pyhanko.sign.validation import (
+        validate_cms_signature as _validate_cms_signature,
+    )
+    from pyhanko.sign.validation import (
+        validate_pdf_signature as _validate_pdf_signature,
+    )
+    from pyhanko.sign.validation.status import (
+        SignatureCoverageLevel as _SignatureCoverageLevel,
+    )
+
+    HAS_PYHANKO = True
+    # This stage never configures a signer trust store (see analyze_signatures()
+    # docstring — `trusted` is always False here), so chain-of-trust building
+    # fails for every signature and pyhanko logs a full, expected traceback.
+    # Silence just that logger to avoid spamming every scan.
+    logging.getLogger("pyhanko.sign.validation.generic_cms").setLevel(logging.CRITICAL)
+except ImportError:
+    _cms = None  # type: ignore[assignment]
+    _asn1_x509 = None  # type: ignore[assignment]
+    _cx509 = None  # type: ignore[assignment]
+    _InvalidSignature = Exception  # type: ignore[assignment,misc]
+    _chashes = None  # type: ignore[assignment]
+    _cec = None  # type: ignore[assignment]
+    _cpadding = None  # type: ignore[assignment]
+    _crsa = None  # type: ignore[assignment]
+    _etree = None  # type: ignore[assignment]
+    _PdfFileReader = None  # type: ignore[assignment,misc]
+    _validate_cms_signature = None  # type: ignore[assignment]
+    _validate_pdf_signature = None  # type: ignore[assignment]
+    _SignatureCoverageLevel = None  # type: ignore[assignment]
+    HAS_PYHANKO = False
+
+try:
     import msgpack as _msgpack
 
     HAS_MSGPACK = True
@@ -655,6 +700,7 @@ config: dict = {
         "text": {"enabled": True},
         "script": {"enabled": True},
         "lnk": {"enabled": True},
+        "signature": {"enabled": True, "strict": False},
     },
     # When True, 'text_preview' (a list of {source, text} truncated excerpts,
     # one per extractor) is included in the report. Enabled by default.
@@ -753,6 +799,8 @@ def _is_analyzer_hit(name: str, result: "dict | None") -> bool:
     if result.get("analyses"):
         return True
     if result.get("yara_matches"):
+        return True
+    if result.get("signatures"):
         return True
     if name == "clamav" and result.get("clamav", {}).get("status") == "infected":
         return True
@@ -2778,6 +2826,13 @@ class InspectorDaemon:
                     HAS_PYMUPDF,
                     _az.get("pdf", {}).get("enabled", True),
                     "pip install pymupdf",
+                ),
+                (
+                    "signature",
+                    "pyhanko",
+                    HAS_PYHANKO,
+                    _az.get("signature", {}).get("enabled", True),
+                    'pip install "xspct-scan[advanced]"',
                 ),
                 (
                     "yara",
@@ -6396,6 +6451,11 @@ class InspectorDaemon:
                 for item in value:
                     if item not in target["rtf_objects"]:
                         target["rtf_objects"].append(item)
+            elif key == "signatures":
+                existing_sigs = target.setdefault("signatures", [])
+                for item in value:
+                    if item not in existing_sigs:
+                        existing_sigs.append(item)
             elif key == "yara_matches":
                 existing = target.setdefault("yara_matches", [])
                 for item in value:
@@ -7268,6 +7328,14 @@ class InspectorDaemon:
                 iocs_res = self.analyze_iocsearcher(_ios_text, filename)
                 if iocs_res:
                     self.merge_reports(report, iocs_res)
+        # Digital signatures — Office/PDF containers only.
+        if "signature" in enabled and (
+            "office" in report.get("detected_type", "")
+            or "pdf" in report.get("detected_type", "")
+        ):
+            sig_res = self.analyze_signatures(data, filename, file_mime)
+            if sig_res:
+                self.merge_reports(report, sig_res)
         # ClamAV — scan raw bytes when engine is connected.
         # Skip when called for archive members and scan_members is False
         # (the parent archive scan already passes the whole archive to clamd).
@@ -7279,6 +7347,570 @@ class InspectorDaemon:
         # Derive text_preview/text_full lists from accumulated segments.
         self._finalize_text_fields(report)
         return report
+
+    # ------------------------------------------------------------------
+    # Digital signature detection and validation (Office / PDF)
+    # ------------------------------------------------------------------
+
+    #: OLE2 stream names ([MS-OSHARED] DigSigBlob) carrying a VBA project
+    #: digital signature, at the root of the VBA-project compound file.
+    _VBA_SIG_STREAMS = (
+        "\x05DigitalSignature",
+        "\x05DigitalSignatureAgile",
+        "\x05DigitalSignatureV3",
+    )
+    #: The same DigSigBlob structure, packaged as standalone OOXML parts.
+    _VBA_SIG_ZIP_MEMBERS = (
+        "vbaProjectSignature.bin",
+        "vbaProjectSignatureAgile.bin",
+        "vbaProjectSignatureV3.bin",
+    )
+    _DSIG_NS = "http://www.w3.org/2000/09/xmldsig#"
+    _DSIG_DIGEST_ALGOS = {
+        "http://www.w3.org/2000/09/xmldsig#sha1": "sha1",
+        "http://www.w3.org/2001/04/xmlenc#sha256": "sha256",
+        "http://www.w3.org/2001/04/xmldsig-more#sha384": "sha384",
+        "http://www.w3.org/2001/04/xmlenc#sha512": "sha512",
+    }
+    _DSIG_SIGNATURE_HASHES = {
+        "http://www.w3.org/2000/09/xmldsig#rsa-sha1": "sha1",
+        "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256": "sha256",
+        "http://www.w3.org/2001/04/xmldsig-more#rsa-sha384": "sha384",
+        "http://www.w3.org/2001/04/xmldsig-more#rsa-sha512": "sha512",
+        "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha1": "sha1",
+        "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha256": "sha256",
+        "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha384": "sha384",
+        "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha512": "sha512",
+    }
+
+    def analyze_signatures(
+        self, data: bytes, filename: str, file_mime: "str | None" = None
+    ) -> "dict | None":
+        """Detect and cryptographically validate document digital signatures.
+
+        Pure detection — this stage never influences score/severity. Covers
+        three signature kinds:
+
+        - **VBA project signature** (``\\x05DigitalSignature*`` OLE2 stream,
+          or the equivalent ``vbaProjectSignature*.bin`` OOXML part): the
+          embedded PKCS#7/CMS ``SignedData`` blob is parsed and validated
+          with :mod:`pyhanko`/:mod:`asn1crypto`. ``valid`` reflects that the
+          CMS signature is internally self-consistent (the signature
+          verifies against the embedded certificate and signed content) —
+          it does not re-derive the MS-OVBA project hash, so it does not by
+          itself prove the *current* macro source is unmodified.
+        - **OOXML whole-document signature** (``_xmlsignatures/*.xml``): an
+          XML-DSig signature covering a manifest of package parts. ``valid``
+          here does verify document integrity — each manifest-listed part
+          is re-hashed from the live ZIP and compared to the signed digest,
+          and the outer ``SignedInfo`` signature is verified against the
+          embedded certificate.
+        - **PDF signature**: detected and validated via :mod:`pyhanko`,
+          including whether the signature covers the entire file.
+
+        Certificate trust is out of scope: ``trusted`` is always ``False``
+        here — an administered trust store is a separate, later stage.
+
+        Args:
+            data: Raw file bytes.
+            filename: Original filename (log messages only).
+            file_mime: MIME type hint (unused; detection is structural).
+
+        Returns:
+            ``{"signatures": [...]}`` with one entry per signature found,
+            or ``None`` when no signature is present, the container isn't
+            recognised, or :mod:`pyhanko` isn't installed.
+        """
+        if not HAS_PYHANKO or not data:
+            return None
+        signatures: list[dict] = []
+        try:
+            if HAS_OLEFILE and _olefile.isOleFile(io.BytesIO(data)):
+                signatures.extend(self._extract_ole_vba_signatures(data))
+            elif zipfile.is_zipfile(io.BytesIO(data)):
+                signatures.extend(self._extract_ooxml_vba_signatures(data))
+                signatures.extend(
+                    self._extract_ooxml_document_signatures(data, filename)
+                )
+            elif data.startswith(b"%PDF"):
+                signatures.extend(self._extract_pdf_signatures(data))
+        except Exception as exc:
+            logger.error("%s - signature analysis error: %s", filename, exc)
+        return {"signatures": signatures} if signatures else None
+
+    def _extract_ole_vba_signatures(self, data: bytes) -> "list[dict]":
+        """Read VBA project signature streams from an OLE2 compound file."""
+        out: list[dict] = []
+        try:
+            ole = _olefile.OleFileIO(io.BytesIO(data))
+        except Exception:
+            return out
+        try:
+            for path in ole.listdir(streams=True, storages=False):
+                if path[-1] not in self._VBA_SIG_STREAMS:
+                    continue
+                try:
+                    raw = ole.openstream(path).read()
+                except Exception as exc:
+                    logger.debug("VBA signature stream read error: %s", exc)
+                    continue
+                entry = self._parse_vba_digsig(raw)
+                if entry:
+                    out.append(entry)
+        finally:
+            ole.close()
+        return out
+
+    def _extract_ooxml_vba_signatures(self, data: bytes) -> "list[dict]":
+        """Read VBA project signature parts from an OOXML zip container."""
+        out: list[dict] = []
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                names = z.namelist()
+                for member_name in self._VBA_SIG_ZIP_MEMBERS:
+                    for name in names:
+                        if name.rsplit("/", 1)[-1] != member_name:
+                            continue
+                        try:
+                            raw = z.read(name)
+                        except Exception as exc:
+                            logger.debug("VBA signature part read error: %s", exc)
+                            continue
+                        entry = self._parse_vba_digsig(raw)
+                        if entry:
+                            out.append(entry)
+        except zipfile.BadZipFile:
+            pass
+        return out
+
+    def _parse_vba_digsig(self, raw: bytes) -> "dict | None":
+        """Parse a DigSigBlob ([MS-OSHARED] 2.3.2.1) and validate its CMS signature."""
+        if len(raw) < 4:
+            return None
+        try:
+            (cb_sig,) = struct.unpack_from("<I", raw, 0)
+            sig_blob = raw[4 : 4 + cb_sig]
+            if not sig_blob:
+                return None
+            try:
+                signed_data = _cms.ContentInfo.load(sig_blob)["content"]
+            except Exception:
+                signed_data = _cms.SignedData.load(sig_blob)
+        except Exception as exc:
+            logger.debug("VBA DigSigBlob parse error: %s", exc)
+            return None
+        return self._build_cms_signature_entry(
+            signed_data, "vba_project", covers_whole_document=False
+        )
+
+    def _build_cms_signature_entry(
+        self, signed_data, sig_type: str, covers_whole_document: bool
+    ) -> "dict | None":
+        """Validate a CMS ``SignedData`` structure and build a signature entry."""
+        try:
+            status = _validate_cms_signature(signed_data)
+        except Exception as exc:
+            logger.debug("CMS signature validation error: %s", exc)
+            return None
+        cert = status.signing_cert
+        crypto_valid = bool(status.intact and status.valid)
+        key_usage_valid = self._asn1_cert_key_usage_valid(cert)
+        cert_time_valid = self._asn1_cert_time_valid(cert)
+        strict = config["xspct_analyzers"]["signature"].get("strict")
+        entry: dict = {
+            "present": True,
+            "type": sig_type,
+            "valid": (
+                crypto_valid and key_usage_valid and cert_time_valid
+                if strict
+                else crypto_valid
+            ),
+            "signer": cert.subject.human_friendly,
+            "issuer_fingerprint": self._cms_issuer_fingerprint(signed_data, cert),
+            "trusted": False,
+            "key_usage_valid": key_usage_valid,
+            "cert_time_valid": cert_time_valid,
+            "covers_whole_document": covers_whole_document,
+        }
+        timestamp = self._cms_signing_time(signed_data)
+        if timestamp:
+            entry["timestamp"] = timestamp
+        return entry
+
+    def _asn1_cert_key_usage_valid(self, cert) -> bool:
+        """True when *cert*'s KeyUsage extension (if present) permits signing.
+
+        Absence of the extension is treated as unrestricted, matching
+        standard X.509 path-validation semantics.
+        """
+        try:
+            value = cert.key_usage_value
+            if value is None:
+                return True
+            usage = value.native
+            return "digital_signature" in usage or "non_repudiation" in usage
+        except Exception:
+            return False
+
+    def _asn1_cert_time_valid(self, cert) -> bool:
+        """True when *now* falls within *cert*'s not_valid_before/after window."""
+        try:
+            now = datetime.now(timezone.utc)
+            return cert.not_valid_before <= now <= cert.not_valid_after
+        except Exception:
+            return False
+
+    def _cms_issuer_fingerprint(self, signed_data, signing_cert) -> str:
+        """Return ``sha256:<hex>`` for the CA cert that issued *signing_cert*.
+
+        Falls back to the signing certificate's own fingerprint when the
+        issuing certificate isn't included in the CMS certificate set or
+        cannot be cryptographically verified as its direct issuer.
+        """
+        try:
+            leaf = _cx509.load_der_x509_certificate(signing_cert.dump())
+            for choice in signed_data["certificates"]:
+                cert = choice.chosen
+                if not isinstance(cert, _asn1_x509.Certificate):
+                    continue
+                candidate = _cx509.load_der_x509_certificate(cert.dump())
+                try:
+                    leaf.verify_directly_issued_by(candidate)
+                except (ValueError, TypeError, _InvalidSignature):
+                    continue
+                return "sha256:" + candidate.fingerprint(_chashes.SHA256()).hex()
+        except Exception:
+            pass
+        return "sha256:" + signing_cert.sha256_fingerprint.replace(" ", "").lower()
+
+    def _cms_signing_time(self, signed_data) -> "str | None":
+        """Return the CMS signed ``signing_time`` attribute as ISO-8601, if present."""
+        try:
+            for signer_info in signed_data["signer_infos"]:
+                signed_attrs = signer_info["signed_attrs"]
+                if signed_attrs is None:
+                    continue
+                for attr in signed_attrs:
+                    if attr["type"].native == "signing_time":
+                        dt = attr["values"][0].native
+                        return dt.astimezone(timezone.utc).strftime(
+                            "%Y-%m-%dT%H:%M:%SZ"
+                        )
+        except Exception:
+            pass
+        return None
+
+    def _extract_pdf_signatures(self, data: bytes) -> "list[dict]":
+        """Detect and validate PDF (PAdES) signatures via :mod:`pyhanko`."""
+        out: list[dict] = []
+        try:
+            reader = _PdfFileReader(io.BytesIO(data), strict=False)
+            for sig in reader.embedded_signatures:
+                try:
+                    status = _validate_pdf_signature(sig)
+                except Exception as exc:
+                    logger.debug("PDF signature validation error: %s", exc)
+                    continue
+                cert = status.signing_cert
+                crypto_valid = bool(status.intact and status.valid)
+                key_usage_valid = self._asn1_cert_key_usage_valid(cert)
+                cert_time_valid = self._asn1_cert_time_valid(cert)
+                strict = config["xspct_analyzers"]["signature"].get("strict")
+                entry: dict = {
+                    "present": True,
+                    "type": "pdf",
+                    "valid": (
+                        crypto_valid and key_usage_valid and cert_time_valid
+                        if strict
+                        else crypto_valid
+                    ),
+                    "signer": cert.subject.human_friendly,
+                    "issuer_fingerprint": self._cms_issuer_fingerprint(
+                        sig.signed_data, cert
+                    ),
+                    "trusted": False,
+                    "key_usage_valid": key_usage_valid,
+                    "cert_time_valid": cert_time_valid,
+                    "covers_whole_document": (
+                        status.coverage == _SignatureCoverageLevel.ENTIRE_FILE
+                    ),
+                }
+                timestamp = self._cms_signing_time(sig.signed_data)
+                if timestamp:
+                    entry["timestamp"] = timestamp
+                out.append(entry)
+        except Exception as exc:
+            logger.debug("PDF signature extraction error: %s", exc)
+        return out
+
+    def _extract_ooxml_document_signatures(
+        self, data: bytes, filename: str
+    ) -> "list[dict]":
+        """Detect and validate OOXML whole-document (XML-DSig) signatures.
+
+        Each ``_xmlsignatures/*.xml`` part is a ``<Signature>`` covering an
+        ``idPackageObject`` manifest of package parts. Validation re-hashes
+        every manifest-listed part directly from the live ZIP and compares
+        it to the signed digest, then verifies the outer ``SignedInfo``
+        signature against the embedded certificate. ``covers_whole_document``
+        separately records whether every non-signature package member appears
+        in that verified manifest.
+        """
+        out: list[dict] = []
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                names = set(z.namelist())
+                sig_members = sorted(
+                    n
+                    for n in names
+                    if n.startswith("_xmlsignatures/") and n.endswith(".xml")
+                )
+                for member in sig_members:
+                    try:
+                        entry = self._validate_ooxml_signature_part(z, names, member)
+                    except Exception as exc:
+                        logger.debug(
+                            "%s - OOXML signature part %s error: %s",
+                            filename,
+                            member,
+                            exc,
+                        )
+                        continue
+                    if entry:
+                        out.append(entry)
+        except zipfile.BadZipFile:
+            pass
+        return out
+
+    def _validate_ooxml_signature_part(
+        self, z: "zipfile.ZipFile", names: "set[str]", member: str
+    ) -> "dict | None":
+        """Validate a single ``_xmlsignatures/*.xml`` OOXML signature part."""
+        max_size = int(config["xspct_archive_max_size"])
+        try:
+            signature_info = z.getinfo(member)
+        except KeyError:
+            return None
+        if signature_info.file_size > max_size:
+            return None
+        signature_xml = z.read(signature_info)
+        if b"<!DOCTYPE" in signature_xml:
+            return None
+        parser = _etree.XMLParser(
+            resolve_entities=False,
+            no_network=True,
+            load_dtd=False,
+        )
+        root = _etree.fromstring(signature_xml, parser=parser)
+        total_read = signature_info.file_size
+        ds = self._DSIG_NS
+
+        def _q(tag: str) -> str:
+            return f"{{{ds}}}{tag}"
+
+        signed_info = root.find(_q("SignedInfo"))
+        sig_value_el = root.find(_q("SignatureValue"))
+        cert_el = root.find(f"{_q('KeyInfo')}/{_q('X509Data')}/{_q('X509Certificate')}")
+        if signed_info is None or sig_value_el is None or cert_el is None:
+            return None
+        cert_der = base64.b64decode("".join((cert_el.text or "").split()))
+        cert = _cx509.load_der_x509_certificate(cert_der)
+        key_usage_valid = self._x509_cert_key_usage_valid(cert)
+        cert_time_valid = self._x509_cert_time_valid(cert)
+
+        objects_by_id = {}
+        for obj in root.findall(_q("Object")):
+            object_id = obj.get("Id")
+            if not object_id:
+                continue
+            if object_id in objects_by_id:
+                return None
+            objects_by_id[object_id] = obj
+
+        # 1. Every SignedInfo Reference must match its target Object's digest.
+        signed_object_ids: set[str] = set()
+        for ref in signed_info.findall(_q("Reference")):
+            uri = ref.get("URI", "")
+            if not uri.startswith("#") or uri[1:] not in objects_by_id:
+                return None  # unsupported reference shape — treat as unverifiable
+            if ref.find(_q("Transforms")) is not None:
+                return None
+            algo = self._dsig_digest_algo(ref)
+            if not algo:
+                return None
+            target_c14n = _etree.tostring(objects_by_id[uri[1:]], method="c14n")
+            digest_value = (ref.findtext(_q("DigestValue")) or "").strip()
+            if (
+                base64.b64encode(hashlib.new(algo, target_c14n).digest()).decode()
+                != digest_value
+            ):
+                return None
+            signed_object_ids.add(uri[1:])
+
+        # 2. Every package-part Reference inside the manifests must match the
+        #    live ZIP content — this is what actually proves the document
+        #    (not just the signature XML) is unmodified since signing.
+        package_object = objects_by_id.get("idPackageObject")
+        if package_object is None or "idPackageObject" not in signed_object_ids:
+            return None
+        manifest_ok = True
+        manifest_refs = 0
+        manifest_parts: set[str] = set()
+        for manifest in package_object.findall(_q("Manifest")):
+            for ref in manifest.findall(_q("Reference")):
+                manifest_refs += 1
+                if ref.find(_q("Transforms")) is not None:
+                    return None
+                algo = self._dsig_digest_algo(ref)
+                part = ref.get("URI", "").split("?", 1)[0].lstrip("/")
+                digest_value = (ref.findtext(_q("DigestValue")) or "").strip()
+                if not algo or part not in names:
+                    manifest_ok = False
+                    continue
+                manifest_parts.add(part)
+                try:
+                    part_info = z.getinfo(part)
+                except KeyError:
+                    manifest_ok = False
+                    continue
+                if part_info.file_size > max_size - total_read:
+                    return None
+                actual = base64.b64encode(
+                    hashlib.new(algo, z.read(part_info)).digest()
+                ).decode()
+                total_read += part_info.file_size
+                if actual != digest_value:
+                    manifest_ok = False
+        if not manifest_refs:
+            return None
+        package_parts = {
+            info.filename
+            for info in z.infolist()
+            if not info.is_dir() and not info.filename.startswith("_xmlsignatures/")
+        }
+        covers_whole_document = package_parts <= manifest_parts
+
+        # 3. Verify the SignedInfo signature itself against the certificate.
+        si_c14n = _etree.tostring(signed_info, method="c14n")
+        sig_bytes = base64.b64decode("".join((sig_value_el.text or "").split()))
+        hash_cls = self._dsig_signature_hash(signed_info)
+        if hash_cls is None:
+            return None
+        pubkey = cert.public_key()
+        sig_ok = False
+        try:
+            if isinstance(pubkey, _crsa.RSAPublicKey):
+                pubkey.verify(sig_bytes, si_c14n, _cpadding.PKCS1v15(), hash_cls())
+                sig_ok = True
+            elif isinstance(pubkey, _cec.EllipticCurvePublicKey):
+                pubkey.verify(sig_bytes, si_c14n, _cec.ECDSA(hash_cls()))
+                sig_ok = True
+        except _InvalidSignature:
+            sig_ok = False
+
+        crypto_valid = bool(sig_ok and manifest_ok)
+        strict = config["xspct_analyzers"]["signature"].get("strict")
+        entry: dict = {
+            "present": True,
+            "type": "ooxml_document",
+            "valid": (
+                crypto_valid and key_usage_valid and cert_time_valid
+                if strict
+                else crypto_valid
+            ),
+            "signer": cert.subject.rfc4514_string(),
+            "issuer_fingerprint": self._x509_issuer_fingerprint(cert, root, ds),
+            "trusted": False,
+            "key_usage_valid": key_usage_valid,
+            "cert_time_valid": cert_time_valid,
+            "covers_whole_document": covers_whole_document,
+        }
+        timestamp = self._ooxml_signing_time(objects_by_id, signed_object_ids)
+        if timestamp:
+            entry["timestamp"] = timestamp
+        return entry
+
+    def _dsig_digest_algo(self, ref) -> "str | None":
+        """Return the hashlib algorithm name for a ``<Reference>``'s DigestMethod."""
+        dm = ref.find(f"{{{self._DSIG_NS}}}DigestMethod")
+        if dm is None:
+            return None
+        return self._DSIG_DIGEST_ALGOS.get(dm.get("Algorithm", ""))
+
+    def _dsig_signature_hash(self, signed_info):
+        """Return the ``cryptography`` hash class for a supported SignatureMethod."""
+        sm = signed_info.find(f"{{{self._DSIG_NS}}}SignatureMethod")
+        algo_uri = sm.get("Algorithm", "") if sm is not None else ""
+        name = self._DSIG_SIGNATURE_HASHES.get(algo_uri)
+        if name is None:
+            return None
+        return {
+            "sha1": _chashes.SHA1,
+            "sha256": _chashes.SHA256,
+            "sha384": _chashes.SHA384,
+            "sha512": _chashes.SHA512,
+        }[name]
+
+    def _x509_issuer_fingerprint(self, cert, root, ds: str) -> str:
+        """Return ``sha256:<hex>`` for the CA cert (from KeyInfo) that issued *cert*."""
+        try:
+            for cert_el in root.findall(
+                f"{{{ds}}}KeyInfo/{{{ds}}}X509Data/{{{ds}}}X509Certificate"
+            ):
+                der = base64.b64decode("".join((cert_el.text or "").split()))
+                candidate = _cx509.load_der_x509_certificate(der)
+                try:
+                    cert.verify_directly_issued_by(candidate)
+                except (ValueError, TypeError, _InvalidSignature):
+                    continue
+                return "sha256:" + candidate.fingerprint(_chashes.SHA256()).hex()
+        except Exception:
+            pass
+        return "sha256:" + cert.fingerprint(_chashes.SHA256()).hex()
+
+    def _x509_cert_key_usage_valid(self, cert) -> bool:
+        """True when *cert*'s KeyUsage extension (if present) permits signing.
+
+        Absence of the extension is treated as unrestricted, matching
+        standard X.509 path-validation semantics.
+        """
+        try:
+            ku = cert.extensions.get_extension_for_class(_cx509.KeyUsage).value
+            return bool(ku.digital_signature or ku.content_commitment)
+        except _cx509.ExtensionNotFound:
+            return True
+        except Exception:
+            return False
+
+    def _x509_cert_time_valid(self, cert) -> bool:
+        """True when *now* falls within *cert*'s not_valid_before/after window."""
+        try:
+            now = datetime.now(timezone.utc)
+            return cert.not_valid_before_utc <= now <= cert.not_valid_after_utc
+        except Exception:
+            return False
+
+    def _ooxml_signing_time(self, objects_by_id, signed_object_ids) -> "str | None":
+        """Return the OOXML ``mdssi:SignatureTime`` value, if present.
+
+        Only searches ``Object`` elements that SignedInfo actually verified
+        (``signed_object_ids``) — an unsigned/injected SignatureTime element
+        elsewhere in the XML must not be reported as if it were proven.
+        """
+        try:
+            for oid in signed_object_ids:
+                obj = objects_by_id.get(oid)
+                if obj is None:
+                    continue
+                for el in obj.iter():
+                    if _etree.QName(el).localname != "SignatureTime":
+                        continue
+                    for child in el:
+                        if _etree.QName(child).localname == "Value" and child.text:
+                            return child.text.strip()
+        except Exception:
+            pass
+        return None
 
     # ------------------------------------------------------------------
     # Parallel analysis pipeline
@@ -7306,6 +7938,7 @@ class InspectorDaemon:
                 "type": "MetaInformation",
             },
             "rtf_objects": [],
+            "signatures": [],
             "decrypted": False,
             "decryption_password": None,
             "iocs": {"urls": [], "ips": [], "domains": []},
@@ -7687,6 +8320,10 @@ class InspectorDaemon:
         if rtf_objects:
             engines["rtf"] = {"objects": rtf_objects}
 
+        signatures = v1.get("signatures", [])
+        if signatures:
+            engines["signature"] = signatures[0] if len(signatures) == 1 else signatures
+
         if engines:
             v2["engines"] = engines
 
@@ -7771,6 +8408,12 @@ class InspectorDaemon:
         clamav_enabled = HAS_CLAMD and config["xspct_clamav"]["enabled"]
         if clamav_enabled:
             pending.append("clamav")
+        # Signature detection runs for Office/PDF containers only.
+        signature_enabled = "signature" in enabled and any(
+            t in ("pdf", "office") for t in types_to_run
+        )
+        if signature_enabled:
+            pending.append("signature")
 
         base = self._make_base_report(filename, file_hash, file_mime, file_desc)
         base["analyzers_completed"] = []
@@ -7882,6 +8525,14 @@ class InspectorDaemon:
                     _run("clamav", self.analyze_clamav, data, filename, s)
                 )
             )
+        if signature_enabled:
+            tasks.append(
+                asyncio.create_task(
+                    _run(
+                        "signature", self.analyze_signatures, data, filename, file_mime
+                    )
+                )
+            )
 
         if tasks:
             await asyncio.gather(*tasks)
@@ -7966,7 +8617,9 @@ class InspectorDaemon:
         # --- Finalise ---
         # detected_type reflects only primary content-type analyzers
         # (pdf/html/office/image/archive); supplementary analyzers excluded.
-        _SUPPLEMENTARY = frozenset({"iocs", "yara", "javascript", "clamav"})
+        _SUPPLEMENTARY = frozenset(
+            {"iocs", "yara", "javascript", "clamav", "signature"}
+        )
         successful = [a for a in partial.successful if a not in _SUPPLEMENTARY]
         report["detected_type"] = (
             ",".join(sorted(successful)) if successful else "unknown"
@@ -9190,6 +9843,10 @@ class InspectorDaemon:
                 "mime_patterns": [],
                 "mime_types": sorted(TYPE_ROUTING["script"]["mime_exact"]),
                 "scope": "type-routed",
+            },
+            "signature": {
+                "active": _az_active("signature", HAS_PYHANKO),
+                "scope": "post-processing",
             },
             "lnk": {
                 "active": _az_active("lnk", HAS_LNKPARSE),

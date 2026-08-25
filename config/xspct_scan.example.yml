@@ -95,6 +95,7 @@ xspct_analyzers:
   text:       {enabled: true}   # plain text (feeds YARA + iocsearcher)
   script:     {enabled: true}   # standalone .vbs/.vbe/.js/.jse/.wsf/.wsh/.ps1/.bat/.cmd — .hta is handled by html
   lnk:        {enabled: true}   # false disables structural + raw-fallback LNK processing (global YARA/ClamAV still run)
+  signature:  {enabled: true, strict: false}   # detect/validate VBA project, OOXML document and PDF digital signatures (pure detection — never affects score). strict: true also requires KeyUsage + certificate validity period for `valid`
 
 # When true (default), 'text_preview' (a list of {source, text} truncated
 # excerpts, one per extractor) is included in every response.

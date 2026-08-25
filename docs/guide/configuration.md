@@ -119,6 +119,7 @@ xspct_analyzers:
   text:       { enabled: true }
   script:     { enabled: true }   # standalone .vbs/.vbe/.js/.jse/.wsf/.wsh/.ps1/.bat/.cmd
   lnk:        { enabled: true }   # Windows shortcut (.lnk) — target/arguments, LOLBins, UNC targets, icon mismatch
+  signature:  { enabled: true }   # VBA project / OOXML document / PDF digital signature detection
   iocs:       { enabled: true }
   javascript: { enabled: true, quickjs: false }
   yara:       { enabled: false, rules_path: '' }
@@ -176,6 +177,25 @@ raw text fallback still feeds IOC extraction. Setting
 `xspct_analyzers.lnk.enabled: false` disables both structural LNK analysis and
 the raw fallback; global YARA/ClamAV scanning remains unaffected.
 
+The **`signature`** analyzer detects and cryptographically validates digital
+signatures via the optional `pyhanko` dependency (`advanced` extra): VBA
+project signatures (the `\x05DigitalSignature*` OLE2 stream, or the
+equivalent `vbaProjectSignature*.bin` OOXML part), OOXML whole-document
+XML-DSig signatures (`_xmlsignatures/*.xml`), and PDF/PAdES signatures. This
+is pure detection — it never influences `verdict.score`/`severity` — and
+`trusted` is always `false`, since certificate trust-store validation is a
+separate, later stage. Results are reported under `engines.signature`. If
+`pyhanko` is not installed, or an OOXML XML-DSig uses an unsupported
+transform, the analyzer cleanly skips. OOXML signature and manifest part
+reads are bounded by `xspct_archive_max_size` (see below), same as archive
+extraction.
+
+Each entry also reports `key_usage_valid` (KeyUsage extension, if present,
+permits digital signatures) and `cert_time_valid` (certificate is within its
+`not_valid_before`/`not_valid_after` window) for information — by default
+these never affect `valid`. Set `xspct_analyzers.signature.strict: true` to
+require both to be true for `valid` as well.
+
 When YARA rules are loaded, YARA runs on **every** file regardless of type —
 PDFs, images, Office documents, plain text, and unknown blobs.  In the
 synchronous sub-pipeline (used for files inside archives), YARA is invoked
@@ -203,7 +223,7 @@ and unknown blobs.
 | Key | Default | Description |
 |-----|---------|-------------|
 | `xspct_archive_max_depth` | `2` | Maximum recursion depth when extracting nested archives. Set to `0` to disable. |
-| `xspct_archive_max_size` | `52428800` | Maximum total bytes to extract from a single archive (default 50 MiB). |
+| `xspct_archive_max_size` | `52428800` | Maximum total bytes to extract from a single archive (default 50 MiB). Also bounds OOXML signature/manifest part reads (see `signature` analyzer, above). |
 
 **Extraction backend** — when `SFlock2` is installed (included in the
 `advanced` extra), all archive extraction runs inside the **zipjail** usermode

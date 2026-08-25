@@ -83,6 +83,7 @@ advanced = [
     "SFlock2>=0.3",
     "odfdo>=3.20",
     "LnkParse3>=1.3",
+    "pyhanko>=0.25",
 ]
 docs   = [
     "sphinx>=7",
@@ -115,6 +116,7 @@ all = [
     "SFlock2>=0.3",
     "odfdo>=3.20",
     "LnkParse3>=1.3",
+    "pyhanko>=0.25",
 ]
 
 [project.urls]
