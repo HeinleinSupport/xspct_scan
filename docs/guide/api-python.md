@@ -9,7 +9,7 @@ optional dependencies are installed:
 
 | Flag | `True` when |
 |------|-------------|
-| `HAS_PYMUPDF` | `PyMuPDF` (`fitz`) is installed |
+| `HAS_PYMUPDF` | `PyMuPDF` is installed |
 | `HAS_JSBEAUTIFIER` | `jsbeautifier` is installed |
 | `HAS_QUICKJS` | `quickjs` is installed |
 | `HAS_OCR` | `Pillow` + `pytesseract` are installed |

@@ -79,9 +79,9 @@ def _skip(name: str, reason: str) -> None:
 def make_pdfs() -> None:
     print("\n--- PDF fixtures ---")
     try:
-        import fitz  # type: ignore[import-untyped]
+        import pymupdf  # type: ignore[import-untyped]
     except ImportError:
-        _skip("pdf_*.pdf", "PyMuPDF (fitz) not installed")
+        _skip("pdf_*.pdf", "PyMuPDF not installed")
         return
 
     def _inject_openaction_js(doc, js_code: str) -> None:
@@ -106,7 +106,7 @@ def make_pdfs() -> None:
         doc.update_object(cat_xref, cat_obj_new)
 
     # -- pdf_javascript.pdf ---------------------------------------------------
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page()
     page.insert_text((50, 72), "PDF with JavaScript — xspct_scan test fixture")
     _inject_openaction_js(
@@ -122,7 +122,7 @@ def make_pdfs() -> None:
     _ok(out)
 
     # -- pdf_embedded.pdf -----------------------------------------------------
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page()
     page.insert_text((50, 72), "PDF with embedded file — xspct_scan test fixture")
     # embfile_add(name, buffer, filename, ufilename, desc)
@@ -139,13 +139,13 @@ def make_pdfs() -> None:
     _ok(out)
 
     # -- pdf_uri.pdf ----------------------------------------------------------
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page()
     page.insert_text((50, 72), "PDF with external URI — xspct_scan test fixture")
     page.insert_link(
         {
-            "kind": fitz.LINK_URI,
-            "from": fitz.Rect(50, 100, 300, 120),
+            "kind": pymupdf.LINK_URI,
+            "from": pymupdf.Rect(50, 100, 300, 120),
             "uri": "https://evil.example.com/openaction-uri",
         }
     )
@@ -226,9 +226,9 @@ def make_zip() -> None:
 
     # Nested PDF — use PyMuPDF if available, else raw bytes
     try:
-        import fitz  # type: ignore[import-untyped]
+        import pymupdf  # type: ignore[import-untyped]
 
-        doc = fitz.open()
+        doc = pymupdf.open()
         page = doc.new_page()
         page.insert_text((50, 72), "Nested PDF inside archive — xspct_scan fixture")
         # Inject JS via OpenAction using the same helper as make_pdfs()

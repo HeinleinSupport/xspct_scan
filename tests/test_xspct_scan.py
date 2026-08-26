@@ -77,11 +77,11 @@ import pytest
 from xspct_scan import client as xspct_client
 
 try:
-    import fitz as _fitz
+    import pymupdf as _pymupdf
 
-    _HAS_FITZ = True
+    _HAS_PYMUPDF = True
 except ImportError:
-    _HAS_FITZ = False
+    _HAS_PYMUPDF = False
 
 try:
     import fakeredis
@@ -129,13 +129,13 @@ _PDF_ENC_PASSWORD = "TestPwd42"
 
 def _make_encrypted_pdf(user_pw: str) -> bytes:
     """Return a minimal AES-256-encrypted PDF protected by *user_pw*."""
-    if not _HAS_FITZ:
-        return b""  # tests that need this are skipped via _HAS_FITZ guard
-    doc = _fitz.open()
+    if not _HAS_PYMUPDF:
+        return b""  # tests that need this are skipped via _HAS_PYMUPDF guard
+    doc = _pymupdf.open()
     page = doc.new_page()
     page.insert_text((50, 50), "Encrypted test document")
     buf = doc.tobytes(
-        encryption=_fitz.PDF_ENCRYPT_AES_256,
+        encryption=_pymupdf.PDF_ENCRYPT_AES_256,
         owner_pw="owner",
         user_pw=user_pw,
     )
@@ -143,7 +143,7 @@ def _make_encrypted_pdf(user_pw: str) -> bytes:
     return buf
 
 
-PDF_ENCRYPTED: bytes = _make_encrypted_pdf(_PDF_ENC_PASSWORD) if _HAS_FITZ else b""
+PDF_ENCRYPTED: bytes = _make_encrypted_pdf(_PDF_ENC_PASSWORD) if _HAS_PYMUPDF else b""
 
 HTML_CLEAN = (
     b"<html><body><p>Hello world. Visit https://example.com for more.</p></body></html>"
@@ -560,7 +560,7 @@ class TestAnalyzePdf:
         assert isinstance(r["text_preview"], list)
 
 
-@pytest.mark.skipif(not _HAS_FITZ, reason="PyMuPDF not installed")
+@pytest.mark.skipif(not _HAS_PYMUPDF, reason="PyMuPDF not installed")
 class TestAnalyzePdfEncrypted:
     """Tests for password-protected PDF decryption via analyze_pdf / sync_analyze."""
 
@@ -1079,7 +1079,7 @@ class TestScanEndpoint:
         r = await client.post("/v1/scan", data=form)
         assert r.status == 200
 
-    @pytest.mark.skipif(not _HAS_FITZ, reason="PyMuPDF not installed")
+    @pytest.mark.skipif(not _HAS_PYMUPDF, reason="PyMuPDF not installed")
     async def test_scan_encrypted_pdf_wrong_password(self, client):
         """Encrypted PDF with no matching password: report flags is_encrypted, decrypted=False."""
         form = aiohttp.FormData()
@@ -1091,7 +1091,7 @@ class TestScanEndpoint:
         assert body.get("flags", {}).get("encrypted", False) is True
         assert body.get("flags", {}).get("decrypted", False) is False
 
-    @pytest.mark.skipif(not _HAS_FITZ, reason="PyMuPDF not installed")
+    @pytest.mark.skipif(not _HAS_PYMUPDF, reason="PyMuPDF not installed")
     async def test_scan_encrypted_pdf_correct_password(self, client):
         """Encrypted PDF unlocked via the passwords field: decrypted=True."""
         form = aiohttp.FormData()
@@ -1819,7 +1819,7 @@ class TestScanMultipartMetadata:
         body = await r.json()
         assert body["file"]["name"] == "invoice.pdf"
 
-    @pytest.mark.skipif(not _HAS_FITZ, reason="PyMuPDF not installed")
+    @pytest.mark.skipif(not _HAS_PYMUPDF, reason="PyMuPDF not installed")
     async def test_metadata_passwords_used_for_decryption(self, client):
         r = await client.post(
             "/v1/scan",
@@ -1831,7 +1831,7 @@ class TestScanMultipartMetadata:
         body = await r.json()
         assert body.get("flags", {}).get("decrypted", False) is True
 
-    @pytest.mark.skipif(not _HAS_FITZ, reason="PyMuPDF not installed")
+    @pytest.mark.skipif(not _HAS_PYMUPDF, reason="PyMuPDF not installed")
     async def test_metadata_passwords_override_query_param(self, client):
         r = await client.post(
             "/v1/scan?passwords=wrong-only",
@@ -1906,7 +1906,7 @@ class TestScanMultipartMetadata:
         result = await r.json()
         assert result["request"]["rspamd_uid"] == "base64-metadata"
 
-    @pytest.mark.skipif(not _HAS_FITZ, reason="PyMuPDF not installed")
+    @pytest.mark.skipif(not _HAS_PYMUPDF, reason="PyMuPDF not installed")
     async def test_metadata_passwords_are_stripped(self, client):
         """A password with incidental whitespace must still decrypt (regression:
         metadata passwords used to keep the raw, un-stripped string)."""
@@ -6516,7 +6516,7 @@ class TestAnalyzeSignatures:
     # PDF signature (PAdES) via a real pyhanko-signed fixture
     # -----------------------------------------------------------------------
 
-    @pytest.mark.skipif(not _HAS_FITZ, reason="pymupdf not installed")
+    @pytest.mark.skipif(not _HAS_PYMUPDF, reason="pymupdf not installed")
     def test_pdf_signature_valid(self, daemon, tmp_path):
         from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
         from pyhanko.sign import signers as _signers
@@ -6524,7 +6524,7 @@ class TestAnalyzeSignatures:
         key_file, cert_file, _cert = _make_test_cert_key(tmp_path)
         signer = _signers.SimpleSigner.load(key_file, cert_file)
 
-        doc = _fitz.open()
+        doc = _pymupdf.open()
         doc.new_page()
         plain_pdf = doc.tobytes()
         doc.close()

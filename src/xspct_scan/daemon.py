@@ -352,7 +352,7 @@ except ImportError:
         HAS_REDIS = False
 
 try:
-    import fitz  # PyMuPDF
+    import pymupdf
 
     HAS_PYMUPDF = True
 except ImportError:
@@ -5292,7 +5292,7 @@ class InspectorDaemon:
     ) -> "dict | None":
         """Analyse a PDF document for malware indicators.
 
-        When PyMuPDF (``fitz``) is available the PDF object graph is walked
+        When PyMuPDF is available the PDF object graph is walked
         directly: JavaScript actions, URI/Launch/GoToR/SubmitForm link
         annotations, embedded files, OpenAction, AcroForm/XFA fields, and
         document-level JavaScript are all inspected via the parsed object
@@ -5374,7 +5374,7 @@ class InspectorDaemon:
         """Deep PDF inspection using the PyMuPDF object graph.
 
         Populates *report* in-place.  Called by :meth:`analyze_pdf` when
-        ``fitz`` is available.
+        PyMuPDF is available.
 
         Args:
             data: Raw PDF bytes.
@@ -5394,7 +5394,7 @@ class InspectorDaemon:
                 report["iocs"]["urls"].append(url)
 
         try:
-            doc = fitz.open(stream=data, filetype="pdf")
+            doc = pymupdf.open(stream=data, filetype="pdf")
         except Exception as exc:
             logger.warning("PyMuPDF could not open PDF: %s", exc)
             self._analyze_pdf_bytescan(data, report)
@@ -5554,7 +5554,7 @@ class InspectorDaemon:
                         if uri:
                             _add_url(uri)
                         # kind 4 = launch action
-                        if kind == fitz.LINK_LAUNCH:
+                        if kind == pymupdf.LINK_LAUNCH:
                             report["has_launch"] = True
                             _add(
                                 "Execution",
@@ -5562,7 +5562,7 @@ class InspectorDaemon:
                                 f"Launch action found: {uri or '(no URI)'}",
                             )
                         # kind 5 = named action  (e.g. GoToR)
-                        if kind == fitz.LINK_NAMED:
+                        if kind == pymupdf.LINK_NAMED:
                             _add(
                                 "AutoExecute",
                                 "/Named",
@@ -6238,7 +6238,7 @@ class InspectorDaemon:
         if "pdf" in mime_lower or data.startswith(b"%PDF"):
             if HAS_PYMUPDF:
                 try:
-                    doc = fitz.open(stream=data, filetype="pdf")
+                    doc = pymupdf.open(stream=data, filetype="pdf")
                     parts = []
                     for page in doc:
                         parts.append(page.get_text())
