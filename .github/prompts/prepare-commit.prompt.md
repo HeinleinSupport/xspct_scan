@@ -50,29 +50,52 @@ List the files staged.
 
 ### 7. Suggest a commit message
 
-Ask the user (or infer from the changes) what was done, then suggest a commit message using the
-**`[Tag] Description`** format:
+Ask the user (or infer from the changes) what was done, then suggest a commit
+message following [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/),
+per `CONTRIBUTING.md` (the authoritative source — re-check it if these tables
+go stale):
 
-| Tag | When to use |
-|-----|-------------|
-| `[Feature]` | New user-visible feature |
-| `[Fix]` | Bug fix |
-| `[Minor]` | Small/trivial change (whitespace, nil check, typo) |
-| `[Rework]` | Major refactoring |
-| `[Conf]` | Configuration change |
-| `[Test]` | Test-only change |
-| `[Docs]` | Documentation only |
-| `[Project]` | Build system, CI, packaging |
+```
+<type>(<scope>): <description>
 
-Example: `[Feature] Add foreground/background query queue with 503/504 responses`
+[optional body]
+
+[optional footer(s)]
+```
+
+| Type | When to use |
+|------|-------------|
+| `feat` | New functionality |
+| `fix` | Bug fix |
+| `docs` | Documentation only |
+| `refactor` | Restructuring without behavior change |
+| `test` | Test-only change |
+| `perf` | Performance improvement |
+| `build` | Build system, dependencies, `pyproject.toml` |
+| `ci` | CI configuration |
+| `chore` | Other maintenance |
+
+Scopes: `api`, `analyzer`, `verdict`, `cache`, `client`, `config` (omit the
+scope for `ci`/`build`/`docs`/`test`/`chore` changes that don't target one of
+these areas). Mark breaking changes with `!` after the scope and/or a
+`BREAKING CHANGE:` footer.
+
+Rules:
+- Description in the imperative mood, lowercase, no trailing period.
+- First line at most 72 characters.
+- Independent changes go in separate commits — don't mix an analyzer
+  extension with an API change in the same commit.
+
+Example: `feat(api): add foreground/background query queue with 503/504 responses`
 
 ### 8. GPG signing reminder
 
-**ALL commits must be GPG-signed:**
+**ALL commits and tags must be GPG-signed:**
 ```bash
-git commit -S -m "[Tag] Description"
+git commit -S -m "feat(api): add multipart metadata part"
+git tag -s X.Y.Z -m "Tag message"
 ```
-Remind the user to use `-S`. Tags must also be signed: `git tag -s X.Y.Z -m "message"`.
+Remind the user to use `-S`.
 
 ## Hard rules
 
