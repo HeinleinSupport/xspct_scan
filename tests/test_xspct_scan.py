@@ -11,7 +11,7 @@ Coverage:
     - IOC extraction (URLs, IPs, dedup, UTF-16, invalid IPs)
     - analyze_pdf  (clean, all markers, /URI IOC, password-protected)
     - analyze_html (clean, all suspicious JS keywords, forms, iframes, meta-refresh,
-                   SpamRedirect, inline-script → analyze_javascript wiring,
+                   RemoteScriptInjection, inline-script → analyze_javascript wiring,
                    data-URI image wiring)
     - analyze_javascript (static patterns, source_label, clean JS, empty/None)
     - analyze_image (empty bytes, invalid bytes, real PNG structure)
@@ -2413,12 +2413,12 @@ class TestAnalyzeImage:
 
 
 # ===========================================================================
-# UNIT TESTS — analyze_html extras (SpamRedirect, inline JS wiring)
+# UNIT TESTS — analyze_html extras (RemoteScriptInjection, inline JS wiring)
 # ===========================================================================
 
 
 class TestAnalyzeHtmlExtras:
-    def test_spam_redirect_tracker_script_detected(self, daemon):
+    def test_remote_script_injection_tracker_script_detected(self, daemon):
         data = (
             b"<html><body>"
             b'<script src="https://track.evil.com/?u=Ab3Cd7Ef"></script>'
@@ -2426,19 +2426,19 @@ class TestAnalyzeHtmlExtras:
         )
         r = daemon.analyze_html(data)
         types = {a["type"] for a in r["analyses"]}
-        assert "SpamRedirect" in types
+        assert "RemoteScriptInjection" in types
 
-    def test_spam_redirect_keyword(self, daemon):
+    def test_remote_script_injection_keyword(self, daemon):
         data = b'<html><script src="https://evil.com/?u=ABCDEFGH"></script></html>'
         r = daemon.analyze_html(data)
         kw = {a["keyword"] for a in r["analyses"]}
         assert "script-tracker-url" in kw
 
-    def test_spam_redirect_not_triggered_without_u_param(self, daemon):
+    def test_remote_script_injection_not_triggered_without_u_param(self, daemon):
         data = b'<html><script src="https://cdn.example.com/lib.js"></script></html>'
         r = daemon.analyze_html(data)
         types = {a["type"] for a in r["analyses"]}
-        assert "SpamRedirect" not in types
+        assert "RemoteScriptInjection" not in types
 
     def test_external_script_detected(self, daemon):
         data = (
@@ -2455,13 +2455,13 @@ class TestAnalyzeHtmlExtras:
         assert "external-script-src" in kw
 
     def test_tracker_url_not_double_counted_as_external(self, daemon):
-        # A ?u= tracker URL should produce SpamRedirect but NOT also ExternalScript
+        # A ?u= tracker URL should produce RemoteScriptInjection but NOT also ExternalScript
         data = (
             b'<html><script src="https://track.evil.com/?u=Ab3Cd7Ef"></script></html>'
         )
         r = daemon.analyze_html(data)
         types = [a["type"] for a in r["analyses"]]
-        assert types.count("SpamRedirect") == 1
+        assert types.count("RemoteScriptInjection") == 1
         # ExternalScript should NOT appear because the URL is already in tracker_scripts
         assert "ExternalScript" not in types
 

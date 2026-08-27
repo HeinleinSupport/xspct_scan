@@ -167,7 +167,7 @@ tests/
 | `TestAnalyzePdf` | unit | PDF analyzer (clean, markers, IOCs) |
 | `TestAnalyzePdfEncrypted` | unit | Encrypted PDF (requires PyMuPDF) |
 | `TestAnalyzeHtml` | unit | HTML analyzer |
-| `TestAnalyzeHtmlExtras` | unit | SpamRedirect, inline JS, data URIs |
+| `TestAnalyzeHtmlExtras` | unit | RemoteScriptInjection, inline JS, data URIs |
 | `TestAnalyzeJavascript` | unit | JS keyword detection |
 | `TestAnalyzeImage` | unit | Image analyzer (empty, invalid, PNG) |
 | `TestAnalyzeYaraNoEngine` | unit | YARA — no-engine path |

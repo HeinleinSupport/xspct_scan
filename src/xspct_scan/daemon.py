@@ -6071,9 +6071,13 @@ class InspectorDaemon:
             )
         # External script injection: <script src="https://...">
         # Two sub-patterns:
-        #   1. Tracker/affiliate URLs with a ?u= token (original narrow pattern)
+        #   1. Tracker/affiliate-style URLs with a ?u= token (original narrow
+        #      pattern) — a common signature for injected malicious loaders.
         #   2. Any external HTTP(S) script src — remote script injection is
         #      inherently suspicious regardless of query parameter name.
+        # Neither pattern is fetched or executed, so we can only report the
+        # injection itself, not what the remote script actually does (e.g.
+        # redirect vs. exfiltration vs. further payload loading).
         tracker_scripts = re.findall(
             r'<script[^>]+src=["\']([^"\']*\?u=[a-zA-Z0-9]{8,}[^"\']*)["\']',
             text,
@@ -6082,11 +6086,12 @@ class InspectorDaemon:
         if tracker_scripts:
             report["analyses"].append(
                 {
-                    "type": "SpamRedirect",
+                    "type": "RemoteScriptInjection",
                     "keyword": "script-tracker-url",
                     "description": (
-                        f"Injected tracker/affiliate redirect script found "
-                        f"({len(tracker_scripts)} URL(s) with ?u= parameter)"
+                        f"Injected remote script with tracker/affiliate-style "
+                        f"?u= URL found ({len(tracker_scripts)} URL(s)) — "
+                        f"remote code execution risk"
                     ),
                 }
             )
