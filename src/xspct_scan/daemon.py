@@ -34,6 +34,7 @@ import sys
 import time
 import timeit
 import urllib.parse
+import warnings
 import zipfile
 from collections import OrderedDict
 from datetime import datetime, timezone
@@ -412,6 +413,11 @@ try:
     import easyocr as _easyocr
 
     HAS_EASYOCR = True
+    # torch.utils.data.DataLoader(pin_memory=True) warns on every batch when no
+    # accelerator is present (we always run gpu=False). Filter this globally at
+    # import time — a per-call warnings.catch_warnings() is not thread-safe and
+    # was observed leaking the warning under concurrent OCR requests.
+    warnings.filterwarnings("ignore", message=".*pin_memory.*", category=UserWarning)
 except ImportError:
     HAS_EASYOCR = False
 
@@ -4056,7 +4062,6 @@ class InspectorDaemon:
                 # as soon as they are submitted to the thread pool.
                 _rgb_img = img.resize(ocr_img.size, _PILImage.LANCZOS).convert("RGB")
                 import concurrent.futures as _cf
-                import warnings as _warnings
 
                 from PIL import ImageOps as _ImageOps
 
@@ -4087,17 +4092,13 @@ class InspectorDaemon:
                             _vname,
                             _easy_arr.shape,
                         )
-                        with _warnings.catch_warnings():
-                            _warnings.filterwarnings(
-                                "ignore", message=".*pin_memory.*", category=UserWarning
-                            )
-                            res = self._easyocr_reader.readtext(
-                                _easy_arr,
-                                detail=0,
-                                paragraph=False,
-                                contrast_ths=0.05,
-                                adjust_contrast=0.8,
-                            )
+                        res = self._easyocr_reader.readtext(
+                            _easy_arr,
+                            detail=0,
+                            paragraph=False,
+                            contrast_ths=0.05,
+                            adjust_contrast=0.8,
+                        )
                         logger.debug(
                             "%s easyocr variant=%s detections=%d raw=%r",
                             s,
@@ -4120,15 +4121,11 @@ class InspectorDaemon:
                 # Ensure EasyOCR reader is initialised on THIS thread before
                 # we hand off to the executor (Reader.__init__ is not reentrant).
                 if HAS_EASYOCR and self._easyocr_reader is None:
-                    with _warnings.catch_warnings():
-                        _warnings.filterwarnings(
-                            "ignore", message=".*pin_memory.*", category=UserWarning
-                        )
-                        self._easyocr_reader = _easyocr.Reader(
-                            ["en", "de"],
-                            gpu=False,
-                            verbose=False,
-                        )
+                    self._easyocr_reader = _easyocr.Reader(
+                        ["en", "de"],
+                        gpu=False,
+                        verbose=False,
+                    )
 
                 # Submit both engines in parallel; collect results.
                 _futures: dict[str, "_cf.Future"] = {}
