@@ -112,6 +112,7 @@ xspct_analyzers:
   office:     { enabled: true }
   image:
     enabled: true
+    ocr_preload_at_startup: true  # load the EasyOCR reader (and download its models) at startup, not on first scan
     ocr_max_bytes:   2097152   # skip OCR for files > 2 MB (camera JPEGs)
     ocr_max_pixels:  4000000   # skip OCR for images > 4 megapixels
     ocr_skip_camera: true      # skip OCR when EXIF Make/Model present
@@ -132,6 +133,7 @@ xspct_analyzers:
 | `xspct_analyzers.javascript.quickjs` | `false` | Enable sandboxed JS emulation via QuickJS. Disabled by default because it adds significant per-request CPU time. Set to `true` to activate (requires the `enrichment` extra). |
 | `xspct_analyzers.yara.rules_path` | `` | Path to a YARA rules file or directory. Required when `yara.enabled` is `true`. |
 | `xspct_analyzers.yara_x.rules_path` | `` | Same as above for the yara-x engine. |
+| `xspct_analyzers.image.ocr_preload_at_startup` | `true` | EasyOCR downloads its detection/recognition models on first use if not already cached. When `true`, the reader is initialised during daemon startup so that (one-time) download happens at startup instead of stalling an arbitrary client scan. Has no effect when EasyOCR is not installed. |
 
 #### Image OCR exclusion gates
 

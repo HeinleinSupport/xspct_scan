@@ -217,11 +217,15 @@ def reset_global_state():
     saved_stats = dict(xspct.stats)
     saved_pw_file = xspct.config["xspct_password_file"]
     saved_stats_en = xspct.config["xspct_stats_enabled"]
+    saved_ocr_preload = xspct.config["xspct_analyzers"]["image"]["ocr_preload_at_startup"]
 
     xspct.config["xspct_api_key"] = []
     xspct.config["xspct_api_key_verify_fail"] = True
     xspct.config["xspct_password_file"] = PASSWD_FILE
     xspct.config["xspct_stats_enabled"] = False  # no background tasks in tests
+    # Don't block every test's daemon.setup() on an EasyOCR model load/download;
+    # tests that exercise OCR call analyze_image directly (lazy-init path).
+    xspct.config["xspct_analyzers"]["image"]["ocr_preload_at_startup"] = False
     for k, v in xspct.stats.items():
         xspct.stats[k] = {} if isinstance(v, dict) else 0
 
@@ -231,6 +235,7 @@ def reset_global_state():
     xspct.config["xspct_api_key_verify_fail"] = saved_fail
     xspct.config["xspct_password_file"] = saved_pw_file
     xspct.config["xspct_stats_enabled"] = saved_stats_en
+    xspct.config["xspct_analyzers"]["image"]["ocr_preload_at_startup"] = saved_ocr_preload
     for k, val in saved_stats.items():
         xspct.stats[k] = val
 

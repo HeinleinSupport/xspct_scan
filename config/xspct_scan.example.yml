@@ -81,6 +81,11 @@ xspct_analyzers:
   yara_x:     {enabled: false, rules_path: ''}   # modern yara-x (Rust) engine — enable both for comparison
   image:
     enabled: true
+    # EasyOCR downloads its detection/recognition models on first use if not
+    # already cached on disk. When true (default), the reader is initialised
+    # during daemon startup so the (one-time) download happens at startup
+    # instead of stalling an arbitrary client scan.
+    ocr_preload_at_startup: true
     # --- OCR exclusion gates (0 = disabled; override per-request with ?force_analyzers=image.ocr) ---
     ocr_max_bytes:    2097152    # skip OCR for files > 2 MB (camera JPEGs are 3–15 MB)
     ocr_max_pixels:   4000000    # skip OCR for images > 4 megapixels (2000×2000)

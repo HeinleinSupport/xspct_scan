@@ -682,6 +682,11 @@ config: dict = {
         "yara_x": {"enabled": False, "rules_path": ""},
         "image": {
             "enabled": True,
+            # EasyOCR downloads its detection/recognition models on first use
+            # if not already cached on disk. When True (default), the reader
+            # is initialised during daemon startup so that download happens
+            # once at startup instead of stalling an arbitrary client scan.
+            "ocr_preload_at_startup": True,
             # --- OCR exclusion gates ---
             # Set to 0 to disable a gate; use force_analyzers to override per-request.
             "ocr_max_bytes": 2
@@ -2602,6 +2607,37 @@ class InspectorDaemon:
                 logger.info("engine - %-10s - %-16s    install: %s", _cat, _name, _pip)
 
         self._compile_yara_rules()
+
+        # EasyOCR downloads its detection/recognition models on first use if
+        # they are not already cached on disk. Initialising the reader here
+        # (at startup) rather than lazily on first scan means that download —
+        # which can take minutes — happens once during daemon startup instead
+        # of stalling an arbitrary client request and eating into its
+        # foreground timeout.
+        if (
+            HAS_EASYOCR
+            and "image" in self._resolve_enabled_analyzers()
+            and config["xspct_analyzers"]["image"].get("ocr_preload_at_startup", True)
+        ):
+            logger.info(
+                "Pre-loading EasyOCR reader (downloads models on first run "
+                "if not already cached)..."
+            )
+            loop = asyncio.get_running_loop()
+            try:
+                self._easyocr_reader = await loop.run_in_executor(
+                    self._executor,
+                    lambda: _easyocr.Reader(["en", "de"], gpu=False, verbose=False),
+                )
+                logger.info("EasyOCR reader ready")
+            except Exception as exc:
+                logger.error(
+                    "Failed to initialise EasyOCR reader at startup: %s — "
+                    "EasyOCR will be retried lazily on first scan",
+                    exc,
+                )
+                self._easyocr_reader = None
+
         # Semaphores must be created inside the running event loop.
         self._fg_sem = asyncio.Semaphore(int(config.get("xspct_foreground_slots", 16)))
         self._bg_sem = asyncio.Semaphore(int(config.get("xspct_background_slots", 4)))
