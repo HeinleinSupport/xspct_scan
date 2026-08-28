@@ -809,9 +809,7 @@ def main() -> None:
             "--capabilities, --query, and FILE arguments are mutually exclusive"
         )
     if not args.capabilities and not args.query and not args.files:
-        parser.error(
-            "provide FILE arguments to scan, or use --capabilities or --query"
-        )
+        parser.error("provide FILE arguments to scan, or use --capabilities or --query")
     if args.legacy_multipart and (args.rspamd_uid or args.queue_id or args.message_id):
         parser.error(
             "--rspamd-uid/--queue-id/--message-id require the structured "
