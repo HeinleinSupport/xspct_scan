@@ -6,7 +6,7 @@
 try:
     from importlib.metadata import version as _pkg_version
 
-    __version__: str = _pkg_version("xspct-scan")
+    __version__: str = _pkg_version("xspct_scan")
 except Exception:  # package not installed (editable install not yet synced)
     __version__ = "unknown"
 __author__ = "Carsten Rosenberg"

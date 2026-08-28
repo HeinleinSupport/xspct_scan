@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: EUPL-1.2
 # Copyright (C) 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
-# xspct-scan example configuration
+# xspct_scan example configuration
 # Pass this file as the first argument:
-#   xspct-scan /etc/xspct_scan/config.yml
+#   xspct_scan /etc/xspct_scan/config.yml
 
 # Listen addresses (list or single string)
 xspct_listen_address:
@@ -13,7 +13,7 @@ xspct_listen_backlog: 256
 
 # Logging: 10=DEBUG  20=INFO  30=WARNING  40=ERROR
 xspct_log_level: 10
-xspct_log_prefix: 'xspct-scan'
+xspct_log_prefix: 'xspct_scan'
 
 # API key authentication (leave empty to disable)
 xspct_api_header: 'X-Api-Key'
@@ -101,8 +101,8 @@ xspct_include_text_full: false
 # Response serialization format.
 # auto    - negotiate from Accept header, then Content-Type, then fall back to JSON
 # json    - always return application/json (default behaviour)
-# msgpack - always return application/x-msgpack  (requires xspct-scan[serialization])
-# cbor    - always return application/cbor        (requires xspct-scan[serialization])
+# msgpack - always return application/x-msgpack  (requires xspct_scan[serialization])
+# cbor    - always return application/cbor        (requires xspct_scan[serialization])
 xspct_response_format: auto
 
 # Maximum characters for 'text_preview' (the short excerpt included in every

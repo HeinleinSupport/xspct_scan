@@ -7,6 +7,23 @@
 
 ## Unreleased
 
+### Changed
+- **BREAKING: project naming unified to `xspct_scan` (underscore)
+  everywhere.** The distribution name, console scripts, logger name, and
+  default `xspct_log_prefix` previously used a hyphen (`xspct-scan`,
+  `xspct-scan-client`) while the Python package, GitHub repository, and
+  documentation titles used an underscore. All of it now uses the
+  underscore form consistently:
+  - PyPI/distribution name: `xspct-scan` → `xspct_scan`.
+  - Console scripts: `xspct-scan` → `xspct_scan`, `xspct-scan-client` →
+    `xspct_scan_client`. Update systemd units, shell scripts, and Rspamd
+    integration configs that invoke the old hyphenated command names.
+  - Logger name and `xspct_log_prefix` default: `"xspct-scan"` →
+    `"xspct_scan"`. Anything grepping log output for the old prefix needs
+    updating.
+  - No config keys, HTTP response fields, or Prometheus metric names are
+    affected — those were already underscored.
+
 ### Fixed
 - **MIME recognition gaps vs. Rspamd's `lua_magic`** — several content-types
   Rspamd's built-in magic detector reports (`types.lua`) weren't recognized

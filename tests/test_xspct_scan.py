@@ -54,7 +54,7 @@ Coverage:
     - GET /apidoc/redoc: 200 with ReDoc HTML when pydantic installed
 
 Run:
-    cd /home/cr/git/xspct-scan
+    cd /home/cr/git/xspct_scan
     pip install -e .[dev]
     python3 -m pytest tests/ -v
 """
@@ -938,7 +938,7 @@ class TestSyncAnalyze:
 
     def test_meta_always_present(self, daemon):
         r = daemon.sync_analyze("<t>", "x.pdf", PDF_CLEAN, "application/pdf")
-        assert r["meta"]["script_name"] == "xspct-scan"
+        assert r["meta"]["script_name"] == "xspct_scan"
         assert r["meta"]["version"] == xspct._ENGINE_VERSION
 
     @pytest.mark.skipif(not os.path.exists(OLE_FILE), reason="OLE sample not present")
@@ -1032,7 +1032,7 @@ class TestHealthPingRoot:
     async def test_root_200_xspct(self, client):
         r = await client.get("/")
         assert r.status == 200
-        assert "xspct-scan" in await r.text()
+        assert "xspct_scan" in await r.text()
 
 
 class TestMetricsEndpoint:
@@ -5843,7 +5843,7 @@ class TestCapabilities:
         for key in ("engine", "limits", "response_formats", "analyzers", "mime_types"):
             assert key in data, f"Missing top-level key: {key}"
         # engine block
-        assert data["engine"]["name"] == "xspct-scan"
+        assert data["engine"]["name"] == "xspct_scan"
         assert data["engine"]["version"] == xspct._ENGINE_VERSION
         assert data["engine"]["schema_version"] == xspct._REPORT_SCHEMA_VERSION
         # limits block

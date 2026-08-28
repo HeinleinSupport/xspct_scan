@@ -5788,7 +5788,7 @@
       "version": "0.5.1"
     },
     {
-      "bom-ref": "xspct-scan==0.6.0",
+      "bom-ref": "xspct_scan==0.6.0",
       "description": "Async HTTP daemon for scanning Office/PDF/HTML documents for malware indicators",
       "externalReferences": [
         {
@@ -5815,17 +5815,9 @@
           }
         }
       ],
-      "name": "xspct-scan",
+      "name": "xspct_scan",
       "type": "library",
       "version": "0.6.0"
-    },
-    {
-      "bom-ref": "xspct-scan==2.0.0",
-      "description": "Async HTTP daemon for scanning Office/PDF/HTML documents for malware indicators",
-      "name": "xspct-scan",
-      "purl": "pkg:pypi/xspct-scan@2.0.0",
-      "type": "library",
-      "version": "2.0.0"
     },
     {
       "bom-ref": "yara-python==4.5.4",
@@ -7109,9 +7101,6 @@
       "ref": "webencodings==0.5.1"
     },
     {
-      "ref": "xspct-scan==0.6.0"
-    },
-    {
       "dependsOn": [
         "PyMuPDF==1.27.2.3",
         "PyYAML==6.0.3",
@@ -7139,7 +7128,7 @@
         "yara-python==4.5.4",
         "yara-x==1.16.0"
       ],
-      "ref": "xspct-scan==2.0.0"
+      "ref": "xspct_scan==0.6.0"
     },
     {
       "ref": "yara-python==4.5.4"
@@ -7163,7 +7152,7 @@
     }
   ],
   "metadata": {
-    "timestamp": "2026-08-25T20:25:15.605635+00:00",
+    "timestamp": "2026-08-28T07:51:09.218242+00:00",
     "tools": {
       "components": [
         {
@@ -7267,7 +7256,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:cc48d255-d902-463c-9cd9-c09e3173da54",
+  "serialNumber": "urn:uuid:ea82a293-ef0d-45c5-bbf8-505ab970c143",
   "version": 1,
   "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",

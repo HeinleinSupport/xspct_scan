@@ -11,7 +11,7 @@ unified JSON (or msgpack/CBOR) report per file.
 It is designed to sit alongside a mail-filtering stack —
 built primarily to integrate with [Rspamd](https://rspamd.com/) as an
 attachment-scanning backend, but usable standalone via its HTTP API or the
-bundled `xspct-scan-client` CLI for on-demand or scripted scanning. Analysis
+bundled `xspct_scan_client` CLI for on-demand or scripted scanning. Analysis
 is parallelised across per-file-type analyzers with a two-tier
 foreground/background concurrency model, so slow scans degrade gracefully
 (`202 Accepted` + polling) instead of blocking the caller, and results can be
@@ -172,7 +172,7 @@ Available sources: `pdf`, `pdf-image`, `office`, `office-macro`, `odf`,
 
 ```bash
 pip install "git+https://github.com/HeinleinSupport/xspct_scan.git"
-xspct-scan /etc/xspct_scan/config.yml
+xspct_scan /etc/xspct_scan/config.yml
 ```
 
 Scan a document:
@@ -247,7 +247,7 @@ Copy the example config and edit to suit:
 
 ```bash
 cp config/xspct_scan.example.yml /etc/xspct_scan/config.yml
-xspct-scan /etc/xspct_scan/config.yml
+xspct_scan /etc/xspct_scan/config.yml
 ```
 
 Key settings:
@@ -323,7 +323,7 @@ Example response (schema v2.0 — omit-empty, grouped):
 ```json
 {
   "schema_version": "2.0",
-  "engine":  { "name": "xspct-scan", "version": "0.5.0" },
+  "engine":  { "name": "xspct_scan", "version": "0.5.0" },
   "file":    { "name": "malware.xlsm", "sha256": "sha256...", "sha1": "sha1...",
                "rspamd_digest": "blake2b...", "size": 48291,
                "mime": "application/vnd.openxmlformats-officedocument...",
@@ -351,7 +351,7 @@ Poll `/v1/query?hash=<sha256>` for the result:
 curl "http://localhost:8080/v1/query?hash=sha256..."
 
 # CLI — looks up the hash directly, no need to re-upload the file
-xspct-scan-client --query sha256...
+xspct_scan_client --query sha256...
 ```
 
 ### Endpoints
@@ -379,8 +379,8 @@ limits — useful for building a dynamic MIME include filter in Rspamd:
 curl -s http://localhost:8080/v1/capabilities | python3 -m json.tool
 
 # CLI client
-xspct-scan-client --capabilities
-xspct-scan-client --capabilities --json
+xspct_scan_client --capabilities
+xspct_scan_client --capabilities --json
 ```
 
 Responses carry an `ETag`; use `If-None-Match` to avoid redundant transfers:
@@ -494,8 +494,8 @@ threshold to `0` to disable that gate. Override gates for a single scan:
 curl -F "doc=@photo.jpg" 'http://localhost:8080/v1/scan?force_analyzers=image.ocr'
 
 # CLI
-xspct-scan-client --force-ocr photo.jpg
-xspct-scan-client --force-analyzers image.ocr photo.jpg
+xspct_scan_client --force-ocr photo.jpg
+xspct_scan_client --force-analyzers image.ocr photo.jpg
 ```
 
 ### System dependencies
@@ -565,7 +565,7 @@ persistence, AMSI bypass, and obfuscation density. All extracted/decoded
 text feeds the same IOC and iocsearcher pipeline as every other analyzer.
 
 ```bash
-xspct-scan-client suspicious.ps1
+xspct_scan_client suspicious.ps1
 ```
 
 ---
@@ -593,7 +593,7 @@ text fallback still feeds IOC extraction without raising a hard error. Setting
 that raw fallback; global scanners such as YARA and ClamAV remain unaffected.
 
 ```bash
-xspct-scan-client suspicious.lnk
+xspct_scan_client suspicious.lnk
 ```
 
 ---
@@ -699,8 +699,8 @@ After=network.target
 
 [Service]
 Type=simple
-User=xspct-scan
-ExecStart=/usr/local/bin/xspct-scan /etc/xspct_scan/config.yml
+User=xspct_scan
+ExecStart=/usr/local/bin/xspct_scan /etc/xspct_scan/config.yml
 Restart=on-failure
 
 [Install]

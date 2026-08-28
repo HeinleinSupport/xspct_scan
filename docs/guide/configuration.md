@@ -25,7 +25,7 @@ xspct_log_level: 20
 | Key | Default | Description |
 |-----|---------|-------------|
 | `xspct_log_level` | `20` | Python log level integer (`10`=DEBUG, `20`=INFO, `30`=WARNING, `40`=ERROR). |
-| `xspct_log_prefix` | `xspct-scan` | Logger name used in log output. |
+| `xspct_log_prefix` | `xspct_scan` | Logger name used in log output. |
 
 ### Authentication
 

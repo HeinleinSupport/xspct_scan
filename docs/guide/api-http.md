@@ -106,7 +106,7 @@ Sections are **omitted when empty** (no null/empty noise).
 ```json
 {
   "schema_version": "2.0",
-  "engine": { "name": "xspct-scan", "version": "0.5.0" },
+  "engine": { "name": "xspct_scan", "version": "0.5.0" },
 
   "file": {
     "name": "invoice.docx",
@@ -380,7 +380,7 @@ curl -s -X POST http://localhost:8080/v1/query \
 **CLI** — look up a hash directly without re-uploading the file:
 
 ```bash
-xspct-scan-client --query sha256hex...
+xspct_scan_client --query sha256hex...
 ```
 
 **Response `200 OK`** — the scan report wrapped in `{status, report}`:
@@ -469,7 +469,7 @@ build a dynamic MIME include filter without maintaining a static list.
 
 ```json
 {
-  "engine": { "name": "xspct-scan", "version": "0.5.0", "schema_version": "2.0" },
+  "engine": { "name": "xspct_scan", "version": "0.5.0", "schema_version": "2.0" },
   "limits": {
     "max_file_size": 52428800,
     "default_timeout": 10,
@@ -532,10 +532,10 @@ can hold the response for up to 60 seconds.
 **CLI client**
 
 ```bash
-xspct-scan-client --capabilities
-xspct-scan-client --capabilities --json          # raw JSON
-xspct-scan-client --capabilities --url http://scan.internal:8080
-xspct-scan-client --capabilities --output caps.json
+xspct_scan_client --capabilities
+xspct_scan_client --capabilities --json          # raw JSON
+xspct_scan_client --capabilities --url http://scan.internal:8080
+xspct_scan_client --capabilities --output caps.json
 ```
 
 **Rspamd integration note**

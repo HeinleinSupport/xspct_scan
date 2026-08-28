@@ -288,7 +288,7 @@ def make_eml() -> None:
     msg["From"] = "attacker@evil.example.com"
     msg["To"] = "victim@company.example.com"
     msg["Subject"] = "Invoice Q1/2026 — please review"
-    msg["Message-ID"] = "<fixture-001@xspct-scan.test>"
+    msg["Message-ID"] = "<fixture-001@xspct_scan.test>"
     msg.set_content(
         "Dear Sir/Madam,\n\n"
         "Please find attached the invoice for Q1/2026.\n\n"

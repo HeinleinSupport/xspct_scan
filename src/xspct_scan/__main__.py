@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: EUPL-1.2
 # SPDX-FileCopyrightText: 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
-"""xspct_scan entry point — invoked by ``xspct-scan`` console script or ``python -m xspct_scan``."""
+"""xspct_scan entry point — invoked by ``xspct_scan`` console script or ``python -m xspct_scan``."""
 
 import asyncio
 import logging
@@ -22,7 +22,7 @@ def main() -> None:
     load_config(path)
     configure_logging()
 
-    _logger = logging.getLogger("xspct-scan")
+    _logger = logging.getLogger("xspct_scan")
 
     if uvloop is not None:
         uvloop.install()

@@ -66,7 +66,7 @@ After=network.target
 
 [Service]
 Type=simple
-User=xspct-scan
+User=xspct_scan
 ExecStart=/usr/local/bin/xspct_scan /etc/xspct_scan/config.yml
 Restart=on-failure
 

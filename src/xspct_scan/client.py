@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: EUPL-1.2
 # SPDX-FileCopyrightText: 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
 """
-xspct-scan-client — command-line client for the xspct-scan HTTP API.
+xspct_scan_client — command-line client for the xspct_scan HTTP API.
 
 Usage::
 
-    xspct-scan-client [options] FILE [FILE ...]
+    xspct_scan_client [options] FILE [FILE ...]
 
 Options::
 
@@ -534,7 +534,7 @@ async def _fetch_capabilities(args: argparse.Namespace) -> int:
 
     eng = payload.get("engine", {})
     _console.print(
-        f"[bold cyan]xspct-scan[/bold cyan] "
+        f"[bold cyan]xspct_scan[/bold cyan] "
         f"[green]{eng.get('version', '?')}[/green]  "
         f"(schema {eng.get('schema_version', '?')})"
     )
@@ -659,8 +659,8 @@ async def _run(args: argparse.Namespace) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="xspct-scan-client",
-        description="Submit files to an xspct-scan daemon for analysis.",
+        prog="xspct_scan_client",
+        description="Submit files to an xspct_scan daemon for analysis.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("files", nargs="*", metavar="FILE", help="Files to scan")
@@ -795,12 +795,12 @@ def main() -> None:
 
     parser.epilog = (
         "Examples:\n"
-        "  xspct-scan-client invoice.pdf\n"
-        "  xspct-scan-client --url http://scan.internal:8080 --json report.zip\n"
-        "  xspct-scan-client --poll --timeout 60 large_archive.zip\n"
-        "  xspct-scan-client --api-key s3cr3t --output result.json sample.doc\n"
-        "  xspct-scan-client --capabilities --url http://scan.internal:8080\n"
-        "  xspct-scan-client --query <sha256>\n"
+        "  xspct_scan_client invoice.pdf\n"
+        "  xspct_scan_client --url http://scan.internal:8080 --json report.zip\n"
+        "  xspct_scan_client --poll --timeout 60 large_archive.zip\n"
+        "  xspct_scan_client --api-key s3cr3t --output result.json sample.doc\n"
+        "  xspct_scan_client --capabilities --url http://scan.internal:8080\n"
+        "  xspct_scan_client --query <sha256>\n"
     )
 
     args = parser.parse_args()

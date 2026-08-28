@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: EUPL-1.2
 # SPDX-FileCopyrightText: 2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>
 """
-xspct-scan Daemon
+xspct_scan Daemon
 =================
 Async HTTP service for analyzing Office/PDF/HTML documents for malware indicators.
 
 Public API
 ----------
     load_config(path)       -- load and merge a YAML config file into `config`
-    configure_logging()     -- configure the 'xspct-scan' logger from current `config`
+    configure_logging()     -- configure the 'xspct_scan' logger from current `config`
     make_app()              -- coroutine returning a configured aiohttp.web.Application
     config                  -- module-level dict with current configuration
     stats                   -- module-level dict with runtime counters
@@ -300,7 +300,7 @@ def _rspamd_digest(data: bytes) -> str:
 
     This matches the ``part->digest`` value Rspamd stores for every decoded
     MIME part, enabling direct correlation between Rspamd scan tasks and
-    xspct-scan reports.
+    xspct_scan reports.
 
     Returns:
         128-character lowercase hex string.
@@ -685,7 +685,7 @@ config: dict = {
     "xspct_listen_port": 8080,
     "xspct_listen_backlog": 256,
     "xspct_log_level": 20,
-    "xspct_log_prefix": "xspct-scan",
+    "xspct_log_prefix": "xspct_scan",
     "xspct_api_header": "X-Api-Key",
     "xspct_api_key": [],
     "xspct_api_key_verify_fail": True,
@@ -840,7 +840,7 @@ Exposed as Prometheus metrics via ``GET /v1/metrics``.
 # Logger — NullHandler so we don't warn when used as a library.
 # Call configure_logging() to attach a real handler.
 # ---------------------------------------------------------------------------
-logger = logging.getLogger("xspct-scan")
+logger = logging.getLogger("xspct_scan")
 logger.addHandler(logging.NullHandler())
 
 
@@ -975,7 +975,7 @@ class _SessionLogFormatter(logging.Formatter):
 
 
 def configure_logging() -> None:
-    """Attach a ``StreamHandler`` to the *xspct-scan* logger using current ``config``.
+    """Attach a ``StreamHandler`` to the *xspct_scan* logger using current ``config``.
 
     Safe to call multiple times; existing non-NullHandler handlers are removed
     first so reconfiguration works correctly.
@@ -1358,7 +1358,7 @@ if HAS_PYDANTIC:
         spec: dict = {
             "openapi": "3.0.3",
             "info": {
-                "title": "xspct-scan API",
+                "title": "xspct_scan API",
                 "version": _ENGINE_VERSION,
                 "description": (
                     "HTTP API for scanning Office, PDF, and HTML files "
@@ -1617,7 +1617,7 @@ if HAS_PYDANTIC:
 else:
 
     def _get_openapi_spec() -> dict:  # type: ignore[misc]
-        return {"error": "pydantic not installed; install xspct-scan[openapi]"}
+        return {"error": "pydantic not installed; install xspct_scan[openapi]"}
 
 
 # ---------------------------------------------------------------------------
@@ -2801,21 +2801,21 @@ class InspectorDaemon:
                     "sflock2",
                     HAS_SFLOCK,
                     _az.get("archive", {}).get("enabled", True),
-                    'pip install "xspct-scan[advanced]"',
+                    'pip install "xspct_scan[advanced]"',
                 ),
                 (
                     "cache",
                     "redis",
                     HAS_REDIS,
                     config.get("xspct_redis_cache", {}).get("enabled", False),
-                    'pip install "xspct-scan[redis]"',
+                    'pip install "xspct_scan[redis]"',
                 ),
                 (
                     "clamav",
                     "clamav",
                     HAS_CLAMD,
                     _cv.get("enabled", False),
-                    'pip install "xspct-scan[enrichment]"',
+                    'pip install "xspct_scan[enrichment]"',
                 ),
                 ("core", "python-magic", HAS_MAGIC, True, "pip install python-magic"),
                 (
@@ -2837,7 +2837,7 @@ class InspectorDaemon:
                     "odfdo",
                     HAS_ODFDO,
                     _az.get("office", {}).get("enabled", True),
-                    'pip install "xspct-scan[advanced]"',
+                    'pip install "xspct_scan[advanced]"',
                 ),
                 (
                     "office",
@@ -2851,21 +2851,21 @@ class InspectorDaemon:
                     "iocsearcher",
                     HAS_IOCSEARCHER,
                     _az.get("iocs", {}).get("enabled", True),
-                    'pip install "xspct-scan[advanced]"',
+                    'pip install "xspct_scan[advanced]"',
                 ),
                 (
                     "image",
                     "pyzbar",
                     HAS_PYZBAR,
                     _az.get("image", {}).get("enabled", True),
-                    'pip install "xspct-scan[enrichment]"  # also: apt install libzbar0',
+                    'pip install "xspct_scan[enrichment]"  # also: apt install libzbar0',
                 ),
                 (
                     "image",
                     "tesseract-ocr",
                     HAS_OCR,
                     _az.get("image", {}).get("enabled", True),
-                    'pip install "xspct-scan[enrichment]"  # also: apt install tesseract-ocr',
+                    'pip install "xspct_scan[enrichment]"  # also: apt install tesseract-ocr',
                 ),
                 (
                     "image",
@@ -2879,7 +2879,7 @@ class InspectorDaemon:
                     "jsbeautifier",
                     HAS_JSBEAUTIFIER,
                     _az.get("javascript", {}).get("enabled", True),
-                    'pip install "xspct-scan[enrichment]"',
+                    'pip install "xspct_scan[enrichment]"',
                 ),
                 (
                     "javascript",
@@ -2887,21 +2887,21 @@ class InspectorDaemon:
                     HAS_QUICKJS,
                     _az.get("javascript", {}).get("enabled", True)
                     and _az.get("javascript", {}).get("quickjs", False),
-                    'pip install "xspct-scan[enrichment]"',
+                    'pip install "xspct_scan[enrichment]"',
                 ),
                 (
                     "javascript",
                     "tree-sitter-js",
                     HAS_TREESITTER,
                     _az.get("javascript", {}).get("enabled", True),
-                    'pip install "xspct-scan[enrichment]"',
+                    'pip install "xspct_scan[enrichment]"',
                 ),
                 (
                     "lnk",
                     "LnkParse3",
                     HAS_LNKPARSE,
                     _az.get("lnk", {}).get("enabled", True),
-                    'pip install "xspct-scan[advanced]"',
+                    'pip install "xspct_scan[advanced]"',
                 ),
                 (
                     "pdf",
@@ -2915,21 +2915,21 @@ class InspectorDaemon:
                     "pyhanko",
                     HAS_PYHANKO,
                     _az.get("signature", {}).get("enabled", True),
-                    'pip install "xspct-scan[advanced]"',
+                    'pip install "xspct_scan[advanced]"',
                 ),
                 (
                     "yara",
                     "yara-python",
                     HAS_YARA,
                     _az.get("yara", {}).get("enabled", False),
-                    'pip install "xspct-scan[advanced]"',
+                    'pip install "xspct_scan[advanced]"',
                 ),
                 (
                     "yara",
                     "yara-x",
                     HAS_YARA_X,
                     _az.get("yara_x", {}).get("enabled", False),
-                    'pip install "xspct-scan[advanced]"',
+                    'pip install "xspct_scan[advanced]"',
                 ),
             ]
         )
@@ -8015,7 +8015,7 @@ class InspectorDaemon:
             "has_macro": False,
             "analyses": [],
             "meta": {
-                "script_name": "xspct-scan",
+                "script_name": "xspct_scan",
                 "version": _ENGINE_VERSION,
                 "type": "MetaInformation",
             },
@@ -8151,7 +8151,7 @@ class InspectorDaemon:
         # engine
         v2: dict = {
             "schema_version": _REPORT_SCHEMA_VERSION,
-            "engine": {"name": "xspct-scan", "version": _ENGINE_VERSION},
+            "engine": {"name": "xspct_scan", "version": _ENGINE_VERSION},
         }
 
         # file
@@ -8934,7 +8934,7 @@ class InspectorDaemon:
             if not self._SERIALIZE_FORMAT_WARN_LOGGED.get("zstd_decompress"):
                 logger.warning(
                     "zstd-compressed %s received but zstandard library not installed; "
-                    "passing raw bytes. Install xspct-scan[compression].",
+                    "passing raw bytes. Install xspct_scan[compression].",
                     label,
                 )
                 self._SERIALIZE_FORMAT_WARN_LOGGED["zstd_decompress"] = True
@@ -9173,7 +9173,7 @@ class InspectorDaemon:
             if not self._SERIALIZE_FORMAT_WARN_LOGGED.get("msgpack"):
                 logger.warning(
                     "msgpack requested but msgpack library not installed; "
-                    "falling back to JSON. Install xspct-scan[serialization]."
+                    "falling back to JSON. Install xspct_scan[serialization]."
                 )
                 self._SERIALIZE_FORMAT_WARN_LOGGED["msgpack"] = True
 
@@ -9184,7 +9184,7 @@ class InspectorDaemon:
             if not self._SERIALIZE_FORMAT_WARN_LOGGED.get("cbor"):
                 logger.warning(
                     "cbor requested but cbor2 library not installed; "
-                    "falling back to JSON. Install xspct-scan[serialization]."
+                    "falling back to JSON. Install xspct_scan[serialization]."
                 )
                 self._SERIALIZE_FORMAT_WARN_LOGGED["cbor"] = True
 
@@ -9837,7 +9837,7 @@ class InspectorDaemon:
 
         # --- engine block -----------------------------------------------
         engine = {
-            "name": "xspct-scan",
+            "name": "xspct_scan",
             "version": _ENGINE_VERSION,
             "schema_version": _REPORT_SCHEMA_VERSION,
         }
@@ -10282,7 +10282,7 @@ class InspectorDaemon:
         html = """<!DOCTYPE html>
 <html>
 <head>
-  <title>xspct-scan API</title>
+  <title>xspct_scan API</title>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>body { margin: 0; padding: 0; }</style>
@@ -10443,7 +10443,7 @@ async def make_app() -> web.Application:
     /v1/apidoc/redoc   GET     :meth:`~InspectorDaemon.handle_redoc`
     /health            GET     Returns ``OK`` (unversioned)
     /ping              GET     Returns ``pong`` (unversioned)
-    /                  GET     Returns ``xspct-scan``
+    /                  GET     Returns ``xspct_scan``
     =================  ======
 
     Returns:
@@ -10455,11 +10455,11 @@ async def make_app() -> web.Application:
         await daemon.setup()
         if config["xspct_stats_enabled"]:
             asyncio.create_task(_log_stats_periodically(daemon))
-        logger.info("xspct-scan ready")
+        logger.info("xspct_scan ready")
 
     async def _on_shutdown(app: web.Application) -> None:
         await daemon.teardown()
-        logger.info("xspct-scan stopped")
+        logger.info("xspct_scan stopped")
 
     app = web.Application(client_max_size=MAX_UPLOAD_BYTES)
     app["daemon"] = daemon
@@ -10481,7 +10481,7 @@ async def make_app() -> web.Application:
         return web.Response(text="pong")
 
     async def _root(r: web.Request) -> web.Response:
-        return web.Response(text="xspct-scan")
+        return web.Response(text="xspct_scan")
 
     app.router.add_get("/health", _health)
     app.router.add_get("/ping", _ping)
