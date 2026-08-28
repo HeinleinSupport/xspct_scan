@@ -5981,6 +5981,44 @@ class TestCapabilities:
         )
         assert result.returncode == 2
 
+    def test_client_query_and_files_mutually_exclusive(self):
+        """--query combined with FILE arguments must exit with code 2."""
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "xspct_scan.client",
+                "--query",
+                "a" * 64,
+                "somefile.pdf",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2
+
+    def test_client_query_and_capabilities_mutually_exclusive(self):
+        """--query combined with --capabilities must exit with code 2."""
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "xspct_scan.client",
+                "--query",
+                "a" * 64,
+                "--capabilities",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2
+
     def test_client_legacy_multipart_with_rspamd_uid_rejected(self):
         """--legacy-multipart has no metadata part to carry --rspamd-uid/
         --queue-id/--message-id; combining them must fail fast instead of

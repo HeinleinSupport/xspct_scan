@@ -377,6 +377,12 @@ curl -s -X POST http://localhost:8080/v1/query \
   -d '{"hash": "sha256hex..."}'
 ```
 
+**CLI** — look up a hash directly without re-uploading the file:
+
+```bash
+xspct-scan-client --query sha256hex...
+```
+
 **Response `200 OK`** — the scan report wrapped in `{status, report}`:
 
 ```json

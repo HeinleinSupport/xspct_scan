@@ -16,6 +16,9 @@ Options::
     --invalidate-cache  Delete the daemon's cached report and force a full rescan
     --poll              Poll /v1/query after a 202 response until the result is ready
     --poll-interval N   Seconds between poll attempts (default: 2)
+    --query HASH        Look up a report by SHA-256 hash via GET /v1/query instead
+                         of submitting a file (no re-upload needed for a scan
+                         that is still processing in the background)
     --json              Output raw JSON instead of a human-readable summary
     --output FILE       Write JSON result(s) to FILE (single result or JSON array)
     --no-color          Disable rich/colour output
@@ -424,6 +427,62 @@ def _print_error(msg: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _fetch_query(args: argparse.Namespace) -> int:
+    """Fetch ``GET /v1/query?hash=...`` and display or write the result.
+
+    Unlike ``--poll`` (which follows a 202 from a just-submitted scan), this
+    looks up a report by hash alone — useful for checking on a scan that is
+    still processing in the background without re-uploading the file.
+    """
+    ssl_ctx: bool | ssl.SSLContext = False if args.insecure else True
+    headers: dict[str, str] = {}
+    if args.api_key:
+        headers["X-Api-Key"] = args.api_key
+
+    base_url = args.url.rstrip("/")
+    try:
+        async with aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(ssl=ssl_ctx)
+        ) as session:
+            async with session.get(
+                f"{base_url}/v1/query",
+                params={"hash": args.query},
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 401:
+                    _print_error("Unauthorized — provide --api-key")
+                    return 1
+                if resp.status == 404:
+                    _print_error(f"No report found for hash {args.query}")
+                    return 1
+                if resp.status != 200:
+                    _print_error(f"HTTP {resp.status} from {base_url}/v1/query")
+                    return 1
+                body: dict[str, Any] = await resp.json(content_type=None)
+    except aiohttp.ClientConnectorError as exc:
+        _print_error(f"Cannot connect to {base_url}: {exc}")
+        return 1
+    except aiohttp.ClientError as exc:
+        _print_error(f"Request error: {exc}")
+        return 1
+
+    result = _normalize_result_payload(body)
+    if args.output:
+        out_path = Path(args.output)
+        out_path.write_text(
+            json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        if HAS_RICH and not args.no_color:
+            _console.print(f"[green]Wrote result to {out_path}[/green]")
+        else:
+            print(f"Wrote result to {out_path}")
+        return 0
+
+    _emit_result(result, args.query, args.json, args.no_color)
+    return 0
+
+
 async def _fetch_capabilities(args: argparse.Namespace) -> int:
     """Fetch ``GET /v1/capabilities`` and display or write the result."""
     ssl_ctx: bool | ssl.SSLContext = False if args.insecure else True
@@ -534,6 +593,9 @@ async def _fetch_capabilities(args: argparse.Namespace) -> int:
 async def _run(args: argparse.Namespace) -> int:
     if args.capabilities:
         return await _fetch_capabilities(args)
+
+    if args.query:
+        return await _fetch_query(args)
 
     if not args.files:
         _print_error("No files given. Provide FILE arguments or use --capabilities.")
@@ -693,6 +755,16 @@ def main() -> None:
         help="Poll /v1/query until the result is ready when a 202 is returned",
     )
     parser.add_argument(
+        "--query",
+        metavar="HASH",
+        default=None,
+        help=(
+            "Look up a report by SHA-256 hash via GET /v1/query instead of "
+            "submitting a file. Useful for checking on a scan that is still "
+            "processing in the background without re-uploading it."
+        ),
+    )
+    parser.add_argument(
         "--poll-interval",
         type=float,
         default=2.0,
@@ -728,13 +800,18 @@ def main() -> None:
         "  xspct-scan-client --poll --timeout 60 large_archive.zip\n"
         "  xspct-scan-client --api-key s3cr3t --output result.json sample.doc\n"
         "  xspct-scan-client --capabilities --url http://scan.internal:8080\n"
+        "  xspct-scan-client --query <sha256>\n"
     )
 
     args = parser.parse_args()
-    if args.capabilities and args.files:
-        parser.error("--capabilities cannot be combined with FILE arguments")
-    if not args.capabilities and not args.files:
-        parser.error("provide FILE arguments to scan, or use --capabilities")
+    if sum(bool(x) for x in (args.capabilities, args.query, args.files)) > 1:
+        parser.error(
+            "--capabilities, --query, and FILE arguments are mutually exclusive"
+        )
+    if not args.capabilities and not args.query and not args.files:
+        parser.error(
+            "provide FILE arguments to scan, or use --capabilities or --query"
+        )
     if args.legacy_multipart and (args.rspamd_uid or args.queue_id or args.message_id):
         parser.error(
             "--rspamd-uid/--queue-id/--message-id require the structured "

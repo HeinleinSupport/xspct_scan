@@ -349,6 +349,9 @@ Poll `/v1/query?hash=<sha256>` for the result:
 
 ```bash
 curl "http://localhost:8080/v1/query?hash=sha256..."
+
+# CLI — looks up the hash directly, no need to re-upload the file
+xspct-scan-client --query sha256...
 ```
 
 ### Endpoints
