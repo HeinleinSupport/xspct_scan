@@ -7,6 +7,11 @@
 
 ## Unreleased
 
+## 0.7.1 — 2026-08-28
+
+### Changed
+- CI now also tests against Python 3.13 and 3.14, in addition to 3.10–3.12.
+
 ## 0.7.0 — 2026-08-28
 
 ### Changed

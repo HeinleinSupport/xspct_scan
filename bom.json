@@ -5788,7 +5788,7 @@
       "version": "0.5.1"
     },
     {
-      "bom-ref": "xspct_scan==0.7.0",
+      "bom-ref": "xspct_scan==0.7.1",
       "description": "Async HTTP daemon for scanning Office/PDF/HTML documents for malware indicators",
       "externalReferences": [
         {
@@ -5817,7 +5817,7 @@
       ],
       "name": "xspct_scan",
       "type": "library",
-      "version": "0.7.0"
+      "version": "0.7.1"
     },
     {
       "bom-ref": "yara-python==4.5.4",
@@ -7139,7 +7139,7 @@
         "yara-x==1.16.0",
         "zstandard==0.25.0"
       ],
-      "ref": "xspct_scan==0.7.0"
+      "ref": "xspct_scan==0.7.1"
     },
     {
       "ref": "yara-python==4.5.4"
@@ -7163,7 +7163,7 @@
     }
   ],
   "metadata": {
-    "timestamp": "2026-08-28T08:40:47.560978+00:00",
+    "timestamp": "2026-08-28T09:00:56.189813+00:00",
     "tools": {
       "components": [
         {
@@ -7267,7 +7267,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:09b4238f-eb37-4714-abc9-5bc888f8fe20",
+  "serialNumber": "urn:uuid:404b795c-6754-4822-86c4-796e788a50bc",
   "version": 1,
   "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
