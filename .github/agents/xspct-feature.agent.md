@@ -30,22 +30,30 @@ You are a feature implementation specialist for **xspct_scan** — an async Pyth
 
 ## Commit Convention
 
-All commits must follow the format: **`[Tag] Description`**
+Commits follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/):
+**`<type>(<scope>): <description>`** — see `CONTRIBUTING.md` for the
+authoritative rules.
 
-| Tag | When to use |
-|-----|-------------|
-| `[Feature]` | New user-visible feature |
-| `[Fix]` | Bug fix |
-| `[Minor]` | Small/trivial change (whitespace, nil check, typo) |
-| `[Rework]` | Major refactoring |
-| `[Conf]` | Configuration change |
-| `[Test]` | Test-only change |
-| `[Docs]` | Documentation only |
-| `[Project]` | Build system, CI, packaging |
+| Type | When to use |
+|------|-------------|
+| `feat` | New functionality |
+| `fix` | Bug fix |
+| `docs` | Documentation only |
+| `refactor` | Restructuring without behavior change |
+| `test` | Test-only change |
+| `perf` | Performance improvement |
+| `build` | Build system, dependencies, `pyproject.toml` |
+| `ci` | CI configuration |
+| `chore` | Other maintenance |
+
+Scopes: `api`, `analyzer`, `verdict`, `cache`, `client`, `config`. Mark
+breaking changes with `!` after the scope and/or a `BREAKING CHANGE:`
+footer. Description is imperative, lowercase, no trailing period, first
+line ≤ 72 chars. Independent changes go in separate commits.
 
 **ALL commits and tags must be GPG-signed:**
 ```bash
-git commit -S -m "[Tag] Description"
+git commit -S -m "feat(api): add multipart metadata part"
 git tag -s X.Y.Z -m "Tag message"
 ```
 
