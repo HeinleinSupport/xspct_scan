@@ -7,6 +7,8 @@
 
 ## Unreleased
 
+## 0.7.0 — 2026-08-28
+
 ### Changed
 - **BREAKING: project naming unified to `xspct_scan` (underscore)
   everywhere.** The distribution name, console scripts, logger name, and

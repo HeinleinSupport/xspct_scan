@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "xspct_scan"
-version = "0.6.0"
+version = "0.7.0"
 description = "Async HTTP daemon for scanning Office/PDF/HTML documents for malware indicators"
 readme = "README.md"
 license = { text = "EUPL-1.2" }

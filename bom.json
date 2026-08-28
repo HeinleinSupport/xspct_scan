@@ -5788,7 +5788,7 @@
       "version": "0.5.1"
     },
     {
-      "bom-ref": "xspct_scan==0.6.0",
+      "bom-ref": "xspct_scan==0.7.0",
       "description": "Async HTTP daemon for scanning Office/PDF/HTML documents for malware indicators",
       "externalReferences": [
         {
@@ -5817,7 +5817,7 @@
       ],
       "name": "xspct_scan",
       "type": "library",
-      "version": "0.6.0"
+      "version": "0.7.0"
     },
     {
       "bom-ref": "yara-python==4.5.4",
@@ -7102,33 +7102,44 @@
     },
     {
       "dependsOn": [
+        "LnkParse3==1.6.0",
         "PyMuPDF==1.27.2.3",
         "PyYAML==6.0.3",
         "SFlock2==0.3.86",
         "aiohttp==3.13.5",
+        "cbor2==6.0.1",
         "clamd==1.0.2",
+        "easyocr==1.7.2",
+        "fakeredis==2.35.1",
         "iocsearcher==2.8.2",
         "jsbeautifier==1.15.4",
+        "lupa==2.8",
+        "msgpack==1.1.2",
         "msoffcrypto-tool==6.0.0",
+        "odfdo==3.22.10",
         "oletools==0.60.2",
         "pillow==12.2.0",
         "py7zr==1.1.0",
+        "pyHanko==0.36.2",
         "pydantic==2.13.4",
         "pytesseract==0.3.13",
         "pytest-aiohttp==1.1.0",
         "pytest-asyncio==1.3.0",
+        "pytest-cov==7.1.0",
         "pytest==9.0.3",
         "python-magic==0.4.27",
         "pyzbar==0.1.9",
         "quickjs==1.19.4",
         "redis==7.4.0",
+        "tldextract==5.3.1",
         "tree-sitter-javascript==0.25.0",
         "tree-sitter==0.25.2",
         "uvloop==0.22.1",
         "yara-python==4.5.4",
-        "yara-x==1.16.0"
+        "yara-x==1.16.0",
+        "zstandard==0.25.0"
       ],
-      "ref": "xspct_scan==0.6.0"
+      "ref": "xspct_scan==0.7.0"
     },
     {
       "ref": "yara-python==4.5.4"
@@ -7152,7 +7163,7 @@
     }
   ],
   "metadata": {
-    "timestamp": "2026-08-28T07:51:09.218242+00:00",
+    "timestamp": "2026-08-28T08:40:47.560978+00:00",
     "tools": {
       "components": [
         {
@@ -7256,7 +7267,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:ea82a293-ef0d-45c5-bbf8-505ab970c143",
+  "serialNumber": "urn:uuid:09b4238f-eb37-4714-abc9-5bc888f8fe20",
   "version": 1,
   "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
