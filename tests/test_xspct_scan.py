@@ -3692,6 +3692,48 @@ class TestTwoTierConcurrency:
             xspct.config["xspct_foreground_slots"] = 16
             xspct.config["xspct_background_slots"] = 4
 
+    async def test_duplicate_scan_attaches_to_in_flight_task(
+        self, aiohttp_client, monkeypatch
+    ):
+        """Resubmitting the same file while it is still being analyzed must not
+        start a second, redundant analysis task."""
+        app = await xspct.make_app()
+        client = await aiohttp_client(app)
+        daemon = app["daemon"]
+
+        call_count = 0
+        release = asyncio.Event()
+
+        async def _slow(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            await release.wait()
+            return {"file_hash": args[1]}
+
+        monkeypatch.setattr(daemon, "analyze_task", _slow)
+        before = xspct.stats["requests_deduped"]
+        try:
+            r1 = await client.post(
+                "/v1/scan?timeout=0.05", data=_form(PDF_CLEAN, "dup.pdf")
+            )
+            assert r1.status == 202
+            body1 = await r1.json()
+            assert body1.get("status") == "processing"
+
+            r2 = await client.post(
+                "/v1/scan?timeout=0.05", data=_form(PDF_CLEAN, "dup.pdf")
+            )
+            assert r2.status == 202
+            body2 = await r2.json()
+            assert body2.get("status") == "processing"
+            assert body2.get("file_hash") == body1.get("file_hash")
+
+            assert call_count == 1
+            assert xspct.stats["requests_deduped"] > before
+        finally:
+            release.set()
+            await asyncio.sleep(0.05)
+
     async def test_background_failure_becomes_stable_query_error(
         self, aiohttp_client, monkeypatch
     ):
@@ -3757,6 +3799,7 @@ class TestTwoTierConcurrency:
             "xspct_background_errors",
             "xspct_foreground_slots_free",
             "xspct_background_slots_free",
+            "xspct_requests_deduped",
         ):
             assert key in text, f"metric {key!r} missing from /metrics"
 

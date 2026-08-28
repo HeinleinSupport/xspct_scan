@@ -772,6 +772,7 @@ stats: dict = {
     "requests_total": 0,
     "requests_finished": 0,
     "requests_timeout": 0,
+    "requests_deduped": 0,  # requests attached to an already in-flight scan for the same hash
     "redis_hits": 0,
     "redis_misses": 0,
     "redis_errors": 0,
@@ -9538,24 +9539,48 @@ class InspectorDaemon:
 
             bg_acquired = False
             try:
-                # 2. Launch analysis task while holding the foreground slot.
-                task = asyncio.create_task(
-                    self.analyze_task(
+                # 2. Launch analysis task while holding the foreground slot —
+                #    unless a scan for this exact hash is already in flight
+                #    (e.g. the same file resubmitted while still processing
+                #    in the background), in which case attach to it instead
+                #    of starting a redundant duplicate scan. Requests that
+                #    need different treatment (custom passwords, forced
+                #    analyzers, or an explicit cache invalidation) always get
+                #    their own fresh task.
+                existing_task = self.tasks.get(file_hash)
+                if (
+                    isinstance(existing_task, asyncio.Task)
+                    and not existing_task.done()
+                    and not custom_passwords
+                    and not force_analyzers
+                    and not invalidate_cache
+                ):
+                    logger.info(
+                        "%s (%s) - scan already in progress for %s, attaching to it",
                         s,
+                        timer(),
                         file_hash,
-                        filename,
-                        filedata,
-                        file_mime,
-                        file_desc,
-                        custom_passwords,
-                        list(types_to_run),
-                        force_analyzers,
-                        cache_generation=cache_generation,
                     )
-                )
-                self.tasks[file_hash] = task
-                self.tasks.move_to_end(file_hash)
-                self._evict_tasks()
+                    stats["requests_deduped"] += 1
+                    task = existing_task
+                else:
+                    task = asyncio.create_task(
+                        self.analyze_task(
+                            s,
+                            file_hash,
+                            filename,
+                            filedata,
+                            file_mime,
+                            file_desc,
+                            custom_passwords,
+                            list(types_to_run),
+                            force_analyzers,
+                            cache_generation=cache_generation,
+                        )
+                    )
+                    self.tasks[file_hash] = task
+                    self.tasks.move_to_end(file_hash)
+                    self._evict_tasks()
 
                 try:
                     report = await asyncio.wait_for(
@@ -10009,6 +10034,9 @@ class InspectorDaemon:
             "# HELP xspct_requests_timeout Scan requests that timed out (202)",
             "# TYPE xspct_requests_timeout counter",
             f"xspct_requests_timeout {stats['requests_timeout']}",
+            "# HELP xspct_requests_deduped Requests attached to an already in-flight scan for the same hash",
+            "# TYPE xspct_requests_deduped counter",
+            f"xspct_requests_deduped {stats['requests_deduped']}",
             "# HELP xspct_redis_hits Redis cache hits",
             "# TYPE xspct_redis_hits counter",
             f"xspct_redis_hits {stats['redis_hits']}",
