@@ -11,6 +11,9 @@ Authentication (when enabled) is via the `X-Api-Key` header — see
 All API endpoints are versioned under the `/v1/` prefix.
 Health-check endpoints (`/health`, `/ping`) are unversioned.
 
+See [CLI client](cli-client.md) for the bundled `xspct_scan_client` command
+that wraps this API for on-demand or scripted scanning.
+
 ## Endpoints
 
 ### `GET /health`

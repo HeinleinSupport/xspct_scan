@@ -18,6 +18,7 @@ guide/installation
 guide/configuration
 guide/api-http
 guide/api-python
+guide/cli-client
 guide/development
 ```
 

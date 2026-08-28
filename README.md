@@ -38,6 +38,7 @@ same file hash.
     - [`POST /v1/scan`](#post-v1scan)
     - [Endpoints](#endpoints)
     - [`GET /v1/capabilities`](#get-v1capabilities)
+  - [CLI client](#cli-client)
   - [Decrypting password-protected files](#decrypting-password-protected-files)
     - [Global password list](#global-password-list)
     - [Per-request passwords](#per-request-passwords)
@@ -57,6 +58,8 @@ same file hash.
     - [Response fields](#response-fields)
   - [Systemd unit](#systemd-unit)
   - [Documentation](#documentation)
+  - [Development](#development)
+  - [Changelog](#changelog)
   - [Licence](#licence)
 
 ---
@@ -394,6 +397,65 @@ curl -si -H "If-None-Match: $ETAG" http://localhost:8080/v1/capabilities
 
 ---
 
+## CLI client
+
+`xspct_scan_client` is a standalone CLI, installed alongside the daemon, for
+scanning files or querying results without writing your own HTTP client:
+
+```bash
+# Scan one or more files
+xspct_scan_client invoice.pdf malware.docx
+
+# Talk to a remote/authenticated daemon
+xspct_scan_client --url https://scan.internal:8443 --api-key s3cr3t invoice.pdf
+
+# Wait for a slow scan instead of getting a 202 back
+xspct_scan_client --poll --timeout 60 large_archive.zip
+
+# Write the full JSON report to a file instead of printing a summary
+xspct_scan_client --json --output result.json sample.doc
+
+# Look up a report later without re-uploading the file
+xspct_scan_client --query <sha256>
+
+# Correlate with an Rspamd task (placed in the structured metadata part)
+xspct_scan_client --rspamd-uid 7f3a9c1e-b2d4 --queue-id 1a2b3c invoice.docx
+
+# Inspect what the daemon can scan
+xspct_scan_client --capabilities
+```
+
+Full flag reference:
+
+| Flag | Description |
+|------|-------------|
+| `--url URL` | Daemon base URL (default: `http://localhost:8080`) |
+| `--api-key KEY` | `X-Api-Key` header value |
+| `--timeout SECS` | Analysis timeout in seconds sent to the daemon (default: `30`) |
+| `--passwords LIST` | Comma-separated passwords to try for encrypted files |
+| `--force-analyzers LIST` | Comma-separated analyzer paths to bypass exclusion gates for this request (e.g. `image.ocr`) |
+| `--force-ocr` | Shortcut for `--force-analyzers image.ocr` |
+| `--invalidate-cache` | Delete the daemon's cached report and force a full rescan |
+| `--legacy-multipart` | Use the legacy `doc` multipart field instead of the structured `metadata` + `file` shape (default) |
+| `--rspamd-uid ID` | `rspamd_uid` correlation value placed in the metadata part |
+| `--queue-id ID` | `queue_id` placed in the metadata part |
+| `--message-id ID` | `message_id` placed in the metadata part |
+| `--poll` | Poll `/v1/query` until the result is ready when a `202` is returned |
+| `--poll-interval SECS` | Seconds between poll attempts (default: `2`) |
+| `--query HASH` | Look up a report by SHA-256 hash via `GET /v1/query` instead of submitting a file |
+| `--capabilities` | Fetch `GET /v1/capabilities` and display the active analyzer/MIME overview |
+| `--json` | Output raw JSON instead of a formatted summary |
+| `--output FILE` | Write JSON result(s) to `FILE` |
+| `--no-color` | Disable coloured `rich` output |
+| `--insecure` | Skip TLS certificate verification |
+
+`--capabilities`, `--query`, and `FILE` arguments are mutually exclusive.
+`--rspamd-uid`/`--queue-id`/`--message-id` require the structured metadata
+shape and cannot be combined with `--legacy-multipart`. Multiple `FILE`
+arguments are scanned concurrently.
+
+---
+
 ## Decrypting password-protected files
 
 xspct_scan automatically tries to decrypt encrypted Office and PDF documents
@@ -717,6 +779,32 @@ Full docs are in the [docs/](docs/) directory and can be built with Sphinx:
 pip install "xspct_scan[docs] @ git+https://github.com/HeinleinSupport/xspct_scan.git"
 sphinx-build docs docs/_build/html
 ```
+
+---
+
+## Development
+
+```bash
+git clone https://github.com/HeinleinSupport/xspct_scan.git
+cd xspct_scan
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev,enrichment,openapi,advanced]"
+
+# Run tests
+pytest
+
+# Run tests with coverage
+pytest --cov
+```
+
+See [docs/guide/development.md](docs/guide/development.md) for fixture files,
+useful `pytest` flags, and the full test-class reference.
+
+---
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
