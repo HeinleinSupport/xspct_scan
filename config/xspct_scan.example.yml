@@ -94,6 +94,11 @@ xspct_analyzers:
     # This prevents EXIF/XMP namespace URIs and binary noise from feeding IOC extractors.
     # Enable only if you specifically need text content from JPEG/PNG binary streams.
     raw_text_fallback: false
+    # Cap embedded images (PDF pages, OOXML/ODF media parts, HTML data-URIs)
+    # scanned per document. Prevents pathologically long scans of image-heavy
+    # documents (e.g. a 250-page PDF with dozens of pictures per page).
+    # 0 = unlimited.
+    max_images_per_document: 20
   archive:    {enabled: true}
   iocs:       {enabled: true}
   javascript: {enabled: true, quickjs: false}  # set quickjs: true to enable sandboxed JS emulation

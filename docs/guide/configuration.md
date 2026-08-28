@@ -116,6 +116,7 @@ xspct_analyzers:
     ocr_max_bytes:   2097152   # skip OCR for files > 2 MB (camera JPEGs)
     ocr_max_pixels:  4000000   # skip OCR for images > 4 megapixels
     ocr_skip_camera: true      # skip OCR when EXIF Make/Model present
+    max_images_per_document: 20  # cap embedded images scanned per document (0 = unlimited)
   archive:    { enabled: true }
   text:       { enabled: true }
   script:     { enabled: true }   # standalone .vbs/.vbe/.js/.jse/.wsf/.wsh/.ps1/.bat/.cmd
@@ -146,6 +147,7 @@ document text.  Set any gate to `0` to disable it.
 | `xspct_analyzers.image.ocr_max_bytes` | `2097152` | Skip OCR when the raw file exceeds this many bytes (2 MiB). Camera JPEGs are typically 3–15 MB; phishing screenshots and QR images are usually <500 KB. |
 | `xspct_analyzers.image.ocr_max_pixels` | `4000000` | Skip OCR when `width × height` exceeds this value (4 MP = 2000×2000). |
 | `xspct_analyzers.image.ocr_skip_camera` | `true` | Skip OCR when EXIF tags `Make` or `Model` are present, indicating a camera photo rather than a document scan or screenshot. |
+| `xspct_analyzers.image.max_images_per_document` | `20` | Cap the number of embedded images (PDF pages, OOXML/ODF media parts, HTML data-URIs) scanned per document. Prevents pathologically long scans of image-heavy documents (e.g. a 250-page PDF with dozens of pictures per page). Set to `0` for unlimited. When the cap is hit, a `ScanLimit`/`max-images-per-document:<source>` finding is added to `analyses` (`<source>` is `pdf-image`, `html-image`, `ooxml-image`, or `odf-image`). |
 
 When a gate triggers the reason is reported in `scan.exclusions`:
 

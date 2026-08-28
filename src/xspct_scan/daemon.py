@@ -766,6 +766,11 @@ config: dict = {
             # image files, preventing EXIF/XMP namespace fragments from feeding
             # the IOC extractors and producing noisy results.
             "raw_text_fallback": False,
+            # Cap embedded-image OCR/QR scanning per document (PDF pages,
+            # OOXML/ODF media parts, HTML data-URIs) — large documents with
+            # dozens/hundreds of images can otherwise make a single scan take
+            # minutes. 0 = unlimited.
+            "max_images_per_document": 20,
         },
         "archive": {"enabled": True},
         "iocs": {"enabled": True},
@@ -5720,13 +5725,20 @@ class InspectorDaemon:
 
             # -- Image extraction + OCR / QR scan -------------------------
             if HAS_OCR or HAS_PYZBAR:
+                _img_limit = self._embedded_image_limit()
+                _img_seen = 0
+                _img_limited = False
                 try:
                     for page in doc:
                         for img_info in page.get_images():
+                            if _img_limit and _img_seen >= _img_limit:
+                                _img_limited = True
+                                break
                             xref = img_info[0]
                             base_image = doc.extract_image(xref)
                             img_bytes = base_image.get("image", b"")
                             if img_bytes:
+                                _img_seen += 1
                                 img_result = self.analyze_image(
                                     img_bytes,
                                     label=f"PDF page {page.number} xref {xref}",
@@ -5734,6 +5746,10 @@ class InspectorDaemon:
                                 self._merge_image_result(
                                     report, img_result, "pdf-image"
                                 )
+                        if _img_limited:
+                            break
+                    if _img_limited:
+                        self._note_image_limit(report, _img_limit, "pdf-image")
                 except Exception as exc:
                     logger.debug("PDF image extraction failed: %s", exc)
 
@@ -6273,6 +6289,8 @@ class InspectorDaemon:
                             report["analyses"].append(hit)
         # Analyse inline base64-encoded images (data URIs)
         if HAS_OCR or HAS_PYZBAR:
+            _img_limit = self._embedded_image_limit()
+            _img_seen = 0
             for i, (mime_hint, b64data) in enumerate(
                 re.findall(
                     r'<img[^>]+src=["\']data:(image/[^;]+);base64,([A-Za-z0-9+/=\s]{100,})["\']',
@@ -6280,10 +6298,14 @@ class InspectorDaemon:
                     re.I,
                 )
             ):
+                if _img_limit and _img_seen >= _img_limit:
+                    self._note_image_limit(report, _img_limit, "html-image")
+                    break
                 try:
                     img_bytes = __import__("base64").b64decode(
                         b64data.replace(" ", "").replace("\n", "").replace("\r", "")
                     )
+                    _img_seen += 1
                     img_result = self.analyze_image(
                         img_bytes, label=f"HTML data-URI image {i + 1} ({mime_hint})"
                     )
@@ -8143,6 +8165,32 @@ class InspectorDaemon:
                 report, source, seg.get("text", ""), module=seg.get("module")
             )
 
+    def _embedded_image_limit(self) -> int:
+        """Max embedded images scanned per document, 0 = unlimited."""
+        return max(
+            0,
+            int(config["xspct_analyzers"]["image"].get("max_images_per_document", 20)),
+        )
+
+    def _note_image_limit(self, report: dict, limit: int, source: str) -> None:
+        """Record that embedded-image scanning stopped early at *limit*.
+
+        *source* (e.g. ``pdf-image``, ``html-image``) identifies which
+        analyzer hit the cap, so distinct analyzers each get their own
+        finding while repeated hits from the same analyzer across merged
+        sub-file reports still dedupe to one entry.
+        """
+        entry = {
+            "type": "ScanLimit",
+            "keyword": f"max-images-per-document:{source}",
+            "description": (
+                f"{source}: stopped scanning embedded images after {limit} "
+                "(xspct_analyzers.image.max_images_per_document)"
+            ),
+        }
+        if entry not in report["analyses"]:
+            report["analyses"].append(entry)
+
     # ------------------------------------------------------------------
     # v2 report transformer
     # ------------------------------------------------------------------
@@ -8744,11 +8792,17 @@ class InspectorDaemon:
             data: Raw OOXML file bytes.
             report: Report dict to merge image analysis results into.
         """
+        _img_limit = self._embedded_image_limit()
+        _img_seen = 0
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as z:
                 for name in z.namelist():
                     if re.match(r"(?:word|xl|ppt)/media/", name, re.I):
+                        if _img_limit and _img_seen >= _img_limit:
+                            self._note_image_limit(report, _img_limit, "ooxml-image")
+                            break
                         img_bytes = z.read(name)
+                        _img_seen += 1
                         img_result = self.analyze_image(
                             img_bytes, label=f"OOXML {name}", s=s
                         )
@@ -8769,11 +8823,17 @@ class InspectorDaemon:
             data: Raw ODF file bytes.
             report: Report dict to merge image analysis results into.
         """
+        _img_limit = self._embedded_image_limit()
+        _img_seen = 0
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as z:
                 for name in z.namelist():
                     if re.match(r"Pictures/", name, re.I) and not name.endswith("/"):
+                        if _img_limit and _img_seen >= _img_limit:
+                            self._note_image_limit(report, _img_limit, "odf-image")
+                            break
                         img_bytes = z.read(name)
+                        _img_seen += 1
                         img_result = self.analyze_image(
                             img_bytes, label=f"ODF {name}", s=s
                         )

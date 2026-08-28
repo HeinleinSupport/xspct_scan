@@ -8,6 +8,14 @@
 ## Unreleased
 
 ### Added
+- **`xspct_analyzers.image.max_images_per_document` config option** (default
+  `20`) — caps the number of embedded images (PDF pages, OOXML/ODF media
+  parts, HTML data-URIs) sent through OCR/QR analysis per document. Prevents
+  pathologically long scans of image-heavy documents such as a multi-hundred
+  page PDF with dozens of pictures per page. Set to `0` for unlimited. When
+  the cap is hit, a `ScanLimit`/`max-images-per-document:<source>` finding
+  is added to `analyses`, tagged with the analyzer that hit the cap
+  (`pdf-image`, `html-image`, `ooxml-image`, or `odf-image`).
 - **VHD/VHDX archive support** — `.vhd` / `.vhdx` (Virtual Hard Disk), a
   known Mark-of-the-Web-bypass container for malware delivery (the same
   rationale as the existing ISO support), are now routed to the `archive`

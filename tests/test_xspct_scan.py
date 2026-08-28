@@ -2660,6 +2660,136 @@ class TestOcrGate:
         assert "image.qr" in fa
 
 
+class TestImageCountLimit:
+    """Unit tests for the max_images_per_document document-level cap."""
+
+    def test_default_limit_is_twenty(self, daemon):
+        assert daemon._embedded_image_limit() == 20
+
+    def test_limit_reads_config_override(self, daemon, monkeypatch):
+        monkeypatch.setitem(
+            xspct.config["xspct_analyzers"]["image"], "max_images_per_document", 5
+        )
+        assert daemon._embedded_image_limit() == 5
+
+    def test_zero_means_unlimited(self, daemon, monkeypatch):
+        monkeypatch.setitem(
+            xspct.config["xspct_analyzers"]["image"], "max_images_per_document", 0
+        )
+        assert daemon._embedded_image_limit() == 0
+
+    def test_negative_limit_is_normalized_to_unlimited(self, daemon, monkeypatch):
+        monkeypatch.setitem(
+            xspct.config["xspct_analyzers"]["image"], "max_images_per_document", -1
+        )
+        assert daemon._embedded_image_limit() == 0
+
+    @pytest.mark.skipif(
+        not (xspct.HAS_OCR or xspct.HAS_PYZBAR),
+        reason="requires OCR or QR backend to run the image-extraction loop",
+    )
+    @pytest.mark.skipif(not _HAS_PIL_FOR_TESTS, reason="Pillow not installed")
+    def test_html_data_uri_images_capped(self, daemon, monkeypatch):
+        import base64
+
+        monkeypatch.setitem(
+            xspct.config["xspct_analyzers"]["image"], "max_images_per_document", 2
+        )
+        png = _make_png(10, 10)
+        b64 = base64.b64encode(png).decode()
+        imgs = "".join(f'<img src="data:image/png;base64,{b64}">' for _ in range(5))
+        data = f"<html><body>{imgs}</body></html>".encode()
+        analyze_image = MagicMock(return_value={"analyses": [], "iocs": {}})
+        monkeypatch.setattr(daemon, "analyze_image", analyze_image)
+        r = daemon.analyze_html(data)
+        assert r is not None
+        assert analyze_image.call_count == 2
+        limit_hits = [
+            a
+            for a in r["analyses"]
+            if a["type"] == "ScanLimit"
+            and a["keyword"] == "max-images-per-document:html-image"
+        ]
+        assert len(limit_hits) == 1
+
+    @pytest.mark.skipif(not _HAS_PYMUPDF, reason="PyMuPDF not installed")
+    def test_pdf_at_limit_is_not_reported_as_truncated(self, daemon, monkeypatch):
+        monkeypatch.setattr(xspct, "HAS_OCR", True)
+        monkeypatch.setattr(xspct, "HAS_PYZBAR", False)
+        monkeypatch.setitem(
+            xspct.config["xspct_analyzers"]["image"], "max_images_per_document", 2
+        )
+        image = _make_png(10, 10)
+        document = _pymupdf.open()
+        page = document.new_page()
+        page.insert_image((0, 0, 10, 10), stream=image)
+        page.insert_image((20, 0, 30, 10), stream=image)
+        data = document.tobytes()
+        document.close()
+        analyze_image = MagicMock(return_value={"analyses": [], "iocs": {}})
+        monkeypatch.setattr(daemon, "analyze_image", analyze_image)
+        r = daemon.analyze_pdf(data)
+        assert r is not None
+        assert analyze_image.call_count == 2
+        assert not any(a["type"] == "ScanLimit" for a in r["analyses"])
+
+    @pytest.mark.skipif(not _HAS_PYMUPDF, reason="PyMuPDF not installed")
+    def test_pdf_limit_identifies_pdf_image_source(self, daemon, monkeypatch):
+        monkeypatch.setattr(xspct, "HAS_OCR", True)
+        monkeypatch.setattr(xspct, "HAS_PYZBAR", False)
+        monkeypatch.setitem(
+            xspct.config["xspct_analyzers"]["image"], "max_images_per_document", 2
+        )
+        image = _make_png(10, 10)
+        document = _pymupdf.open()
+        page = document.new_page()
+        for left in (0, 20, 40):
+            page.insert_image((left, 0, left + 10, 10), stream=image)
+        data = document.tobytes()
+        document.close()
+        analyze_image = MagicMock(return_value={"analyses": [], "iocs": {}})
+        monkeypatch.setattr(daemon, "analyze_image", analyze_image)
+        r = daemon.analyze_pdf(data)
+        assert r is not None
+        assert analyze_image.call_count == 2
+        assert any(
+            a["keyword"] == "max-images-per-document:pdf-image" for a in r["analyses"]
+        )
+
+    @pytest.mark.parametrize(
+        ("member_prefix", "source"),
+        [
+            ("word/media", "ooxml-image"),
+            ("Pictures", "odf-image"),
+        ],
+    )
+    def test_zip_image_limit_identifies_source(
+        self, daemon, monkeypatch, member_prefix, source
+    ):
+        monkeypatch.setitem(
+            xspct.config["xspct_analyzers"]["image"], "max_images_per_document", 2
+        )
+        image = _make_png(10, 10)
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as z:
+            for number in range(3):
+                z.writestr(f"{member_prefix}/image{number}.png", image)
+        report = daemon._make_base_report("document", "hash", None, None)
+        analyze_image = MagicMock(return_value={"analyses": [], "iocs": {}})
+        monkeypatch.setattr(daemon, "analyze_image", analyze_image)
+        extractor = (
+            daemon._extract_ooxml_images
+            if source == "ooxml-image"
+            else daemon._extract_odf_images
+        )
+        extractor("<test>", archive.getvalue(), report)
+        assert analyze_image.call_count == 2
+        assert any(
+            a["keyword"] == f"max-images-per-document:{source}"
+            for a in report["analyses"]
+        )
+
+
 # ===========================================================================
 # UNIT TESTS — Rspamd digest
 # ===========================================================================
