@@ -141,6 +141,9 @@ TYPE_ROUTING: "dict[str, dict]" = {
             "application/gzip",
             "application/x-gzip",
             "application/x-bzip2",
+            # Rspamd's lua_magic reports plain "x-bzip" (no "2") for bzip2
+            # content (types.lua) — libmagic elsewhere emits "x-bzip2".
+            "application/x-bzip",
             "application/x-xz",
             "application/x-rar-compressed",
             "application/vnd.rar",
@@ -151,7 +154,13 @@ TYPE_ROUTING: "dict[str, dict]" = {
             "application/x-lzh",
             "application/x-lzh-compressed",
             "application/x-iso9660-image",
+            # Rspamd's lua_magic reports "x-iso" (not "x-iso9660-image") for
+            # ISO 9660 images.
+            "application/x-iso",
             "application/x-lzip",
+            # Unix "compress" (.Z) — legacy LZW-based compression, still seen
+            # as an email attachment and reported by Rspamd's lua_magic.
+            "application/x-compress",
         ),
         "mime_prefixes": (),
         "mime_fragments": (),
@@ -171,6 +180,7 @@ TYPE_ROUTING: "dict[str, dict]" = {
             ".lha",
             ".iso",
             ".lz",
+            ".z",
             ".zpaq",
             ".msg",
             ".eml",
@@ -232,7 +242,13 @@ TYPE_ROUTING: "dict[str, dict]" = {
         "magic_keywords": (),
     },
     "lnk": {
-        "mime_exact": ("application/x-ms-shortcut",),
+        # application/x-ms-application is Rspamd's lua_magic content-type for
+        # .lnk (types.lua) — but lua_magic reports the *same* string for PE
+        # executables too, so it's listed here for capabilities/routing
+        # visibility only; get_detected_type() does not trust it alone and
+        # requires the extension or magic-byte GUID to confirm (see
+        # _LNK_AMBIGUOUS_MIMES below).
+        "mime_exact": ("application/x-ms-shortcut", "application/x-ms-application"),
         "mime_prefixes": (),
         "mime_fragments": (),
         "extensions": (".lnk",),
@@ -247,6 +263,30 @@ TYPE_ROUTING: "dict[str, dict]" = {
 _LNK_MAGIC = (
     b"\x4c\x00\x00\x00\x01\x14\x02\x00\x00\x00\x00\x00\xc0\x00\x00\x00\x00\x00\x00\x46"
 )
+
+# MIME strings that name .lnk but are also used by some detectors for other
+# formats (application/x-ms-application is Rspamd's lua_magic content-type
+# for both .lnk and PE executables) — get_detected_type() requires the
+# extension or the ShellLinkHeader GUID to corroborate these before routing
+# to "lnk", rather than trusting the MIME string alone as it does for the
+# unambiguous "application/x-ms-shortcut".
+_LNK_AMBIGUOUS_MIMES = frozenset({"application/x-ms-application"})
+
+# MIME types / extensions that get no dedicated content analyzer (no
+# TYPE_ROUTING entry, detected_type stays "unknown") but should still be
+# declared in GET /v1/capabilities so an upstream MIME filter (e.g. Rspamd's
+# lua_magic-based one) forwards them for the global scanners (YARA, ClamAV,
+# iocsearcher) that already run regardless of detected_type. Detached S/MIME
+# signatures (.p7s) are the first case: parsing the standalone CMS
+# SignedData blob itself (signer info, cert chain) would be new analyzer
+# work, not a routing fix, so it's out of scope here.
+_UNROUTED_RECOGNIZED_MIME: "dict[str, tuple]" = {
+    "mime_exact": (
+        "application/pkcs7-signature",
+        "application/x-pkcs7-signature",
+    ),
+    "extensions": (".p7s",),
+}
 
 # Rspamd-compatible attachment digest key.
 # Rspamd computes keyed BLAKE2b-512 over decoded MIME-part content, keyed
@@ -6405,10 +6445,13 @@ class InspectorDaemon:
 
         # Windows shortcuts (.lnk) — matched by MIME, magic description,
         # filename extension, or (fallback, since some libmagic builds don't
-        # recognize the format) the fixed ShellLinkHeader GUID signature.
+        # recognize the format) the fixed ShellLinkHeader GUID signature. A
+        # MIME listed in _LNK_AMBIGUOUS_MIMES is shared with other formats by
+        # some detectors, so it alone isn't trusted — it still needs the
+        # extension or magic bytes to confirm.
         _lnk = _t["lnk"]
         if (
-            mime in _lnk["mime_exact"]
+            (mime in _lnk["mime_exact"] and mime not in _LNK_AMBIGUOUS_MIMES)
             or any(kw in desc for kw in _lnk["magic_keywords"])
             or any(filename.endswith(e) for e in _lnk["extensions"])
             or (data and data.startswith(_LNK_MAGIC))
@@ -9953,6 +9996,10 @@ class InspectorDaemon:
             _prefixes.update(_r.get("mime_prefixes", ()))
             _patterns.update(f + "*" for f in _r.get("mime_fragments", ()))
             _extensions.update(_r.get("extensions", ()))
+        # Formats with no dedicated content analyzer but still worth
+        # forwarding for the global scanners (see _UNROUTED_RECOGNIZED_MIME).
+        _exact.update(_UNROUTED_RECOGNIZED_MIME["mime_exact"])
+        _extensions.update(_UNROUTED_RECOGNIZED_MIME["extensions"])
 
         _global_scanners = sorted(
             n

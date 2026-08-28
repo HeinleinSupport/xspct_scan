@@ -784,6 +784,50 @@ class TestGetDetectedType:
         )
         assert daemon.get_detected_type("", "", "", header) == "lnk"
 
+    def test_lnk_ambiguous_mime_with_extension_routes_to_lnk(self, daemon):
+        """application/x-ms-application is Rspamd's lua_magic content-type
+        for .lnk, but it's also used for PE executables — confirmed by the
+        .lnk extension, it must still route to "lnk"."""
+        assert (
+            daemon.get_detected_type(
+                "application/x-ms-application", "", "shortcut.lnk", b""
+            )
+            == "lnk"
+        )
+
+    def test_lnk_ambiguous_mime_with_magic_bytes_routes_to_lnk(self, daemon):
+        header = (
+            b"\x4c\x00\x00\x00\x01\x14\x02\x00\x00\x00\x00\x00"
+            b"\xc0\x00\x00\x00\x00\x00\x00\x46"
+        )
+        assert (
+            daemon.get_detected_type("application/x-ms-application", "", "", header)
+            == "lnk"
+        )
+
+    def test_lnk_ambiguous_mime_alone_does_not_route_to_lnk(self, daemon):
+        """Without a confirming extension or magic-byte signature, the
+        ambiguous MIME alone (e.g. an actual PE executable reported with
+        the same content-type by some detectors) must not be misrouted."""
+        assert (
+            daemon.get_detected_type("application/x-ms-application", "", "app.exe", b"")
+            != "lnk"
+        )
+
+    @pytest.mark.parametrize(
+        "mime",
+        ["application/x-bzip", "application/x-iso", "application/x-compress"],
+    )
+    def test_rspamd_lua_magic_archive_mime_variants_recognized(self, daemon, mime):
+        """Rspamd's lua_magic reports these content-types (types.lua) for
+        bzip2/ISO9660/Unix-compress content; xspct's own libmagic-derived
+        variants ("x-bzip2", "x-iso9660-image") were already recognized but
+        these weren't."""
+        assert daemon.get_detected_type(mime, "", "", b"") == "archive"
+
+    def test_unix_compress_extension_routes_to_archive(self, daemon):
+        assert daemon.get_detected_type("", "", "archive.Z", b"") == "archive"
+
 
 class TestMergeReports:
     def _base_target(self):
@@ -5863,6 +5907,24 @@ class TestCapabilities:
             assert "application/pdf" not in data["mime_types"]["exact"]
         finally:
             xspct.config["xspct_analyzers"]["pdf"]["enabled"] = orig
+
+    @pytest.mark.asyncio
+    async def test_p7s_recognized_but_unrouted(self, client):
+        """.p7s / application/pkcs7-signature has no dedicated content
+        analyzer (detached S/MIME signature parsing is out of scope), but
+        must still be declared so an upstream MIME filter (e.g. Rspamd's
+        lua_magic-based one) forwards it for the global scanners."""
+        resp = await client.get("/v1/capabilities")
+        data = await resp.json()
+        assert "application/pkcs7-signature" in data["mime_types"]["exact"]
+        assert ".p7s" in data["mime_types"]["extensions"]
+        daemon_inst = client.app["daemon"]
+        assert (
+            daemon_inst.get_detected_type(
+                "application/pkcs7-signature", "", "smime.p7s", b""
+            )
+            == "unknown"
+        )
 
     # -----------------------------------------------------------------------
     # 3. Consistency: every exact MIME routes to an active type-routed analyzer

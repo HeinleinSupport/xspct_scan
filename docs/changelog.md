@@ -7,6 +7,26 @@
 
 ## Unreleased
 
+### Fixed
+- **MIME recognition gaps vs. Rspamd's `lua_magic`** — several content-types
+  Rspamd's built-in magic detector reports (`types.lua`) weren't recognized
+  by `xspct_scan`, so a Rspamd integration that builds its MIME filter from
+  `GET /v1/capabilities` would never forward these attachments for scanning:
+  - `application/x-bzip` (bzip2) and `application/x-iso` (ISO 9660 image)
+    are now recognized alongside the existing `x-bzip2`/`x-iso9660-image`
+    variants, routed to the `archive` analyzer.
+  - `.Z` / `application/x-compress` (Unix `compress`) is now recognized and
+    routed to `archive`.
+  - `.lnk` / `application/x-ms-application` is now recognized — Rspamd
+    reports this same content-type for both `.lnk` shortcuts and PE
+    executables, so it is not trusted alone; the `.lnk` extension or the
+    `ShellLinkHeader` GUID magic bytes must corroborate it before routing to
+    the `lnk` analyzer.
+  - `.p7s` / `application/pkcs7-signature` (detached S/MIME signature) is
+    now declared in `/v1/capabilities` so it gets forwarded and covered by
+    the global YARA/ClamAV/`iocsearcher` scanners; it has no dedicated
+    content analyzer, so `detected_type` remains `unknown`.
+
 ## 0.6.0 — 2026-08-25
 
 ### Added
