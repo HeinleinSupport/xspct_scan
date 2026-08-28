@@ -127,9 +127,10 @@ same file hash.
   require `[enrichment]`)
 - **Archive extraction** — sandboxed extraction via
   [SFlock2](https://github.com/doomedraven/sflock2) (zipjail usermode sandbox)
-  covering ZIP, 7z, RAR, TAR/TGZ/TBZ2, CAB, ACE, ISO, EML, MSG, MSO, lzip,
-  and ZPAQ; configurable depth/size limits, password loop, recursive sub-file
-  analysis. Falls back to stdlib `zipfile`/`py7zr` without SFlock2.
+  covering ZIP, 7z, RAR, TAR/TGZ/TBZ2, CAB, ACE, ISO, VHD/VHDX, EML, MSG,
+  MSO, lzip, and ZPAQ; configurable depth/size limits, password loop,
+  recursive sub-file analysis. Falls back to stdlib `zipfile`/`py7zr`
+  without SFlock2.
 - **ClamAV integration** — every file and individual archive members forwarded
   to a running `clamd` daemon for antivirus signature matching (optional;
   requires `[enrichment]`)
@@ -518,7 +519,9 @@ sudo apt-get install p7zip-full rar unace-nonfree cabextract lzip zpaq
 ```
 
 With SFlock2 installed the following formats are extracted in-sandbox:
-ZIP, 7z, RAR, TAR, TAR.GZ, TBZ2, CAB, ACE, ISO, EML, MSG, MSO, lzip, ZPAQ.
+ZIP, 7z, RAR, TAR, TAR.GZ, TBZ2, CAB, ACE, ISO, VHD, VHDX, EML, MSG, MSO,
+lzip, ZPAQ. VHD/VHDX use SFlock2's bundled 7-Zip binary, so no extra system
+package is needed for them.
 **EML and MSG** files are routed through the archive pipeline automatically
 so that email attachments are extracted and analysed.
 

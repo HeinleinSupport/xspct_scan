@@ -126,8 +126,15 @@ TYPE_ROUTING: "dict[str, dict]" = {
             ".tif",
             ".webp",
             ".ico",
+            # EMF (Enhanced Metafile): a GDI vector image format with a
+            # history of parser exploits and a frequent OLE-embedded-object
+            # carrier. Pillow cannot decode it (analyze_image() degrades
+            # gracefully, no OCR/QR output), but routing it here still gets
+            # it declared in /v1/capabilities and covered by the global
+            # YARA/ClamAV/iocsearcher scanners.
+            ".emf",
         ),
-        "magic_keywords": (),
+        "magic_keywords": ("windows enhanced metafile",),
     },
     "archive": {
         # message/rfc822 and application/vnd.ms-outlook are the mail MIMEs
@@ -185,8 +192,23 @@ TYPE_ROUTING: "dict[str, dict]" = {
             ".msg",
             ".eml",
             ".mso",
+            # Virtual Hard Disk (fixed/dynamic) and VHDX — a known
+            # Mark-of-the-Web-bypass container for malware delivery, same
+            # rationale as ISO above. Extracted via SFlock2's zip7-backed
+            # VHDFile unpacker (excludes [SYSTEM]* to skip huge OS volumes);
+            # no stdlib fallback exists (py7zr does not support VHD/VHDX).
+            ".vhd",
+            ".vhdx",
         ),
-        "magic_keywords": ("zip archive", "7-zip", "rar archive", "tar archive"),
+        "magic_keywords": (
+            "zip archive",
+            "7-zip",
+            "rar archive",
+            "tar archive",
+            # Matches both "Microsoft Disk Image, ..." (VHD) and "Microsoft
+            # Disk Image Extended, ..." (VHDX) libmagic descriptions.
+            "microsoft disk image",
+        ),
     },
     "text": {
         "mime_exact": (),
@@ -4267,8 +4289,9 @@ class InspectorDaemon:
 
         When sflock2 is installed (``HAS_SFLOCK=True``) extraction runs inside
         the zipjail usermode sandbox, giving coverage for ZIP, 7z, RAR, TAR,
-        TAR.GZ, CAB, ACE, ISO, EML, MSG, MSO, and more.  Without sflock2 the
-        fallback uses :mod:`zipfile` (stdlib) and :mod:`py7zr` (optional).
+        TAR.GZ, CAB, ACE, ISO, VHD/VHDX, EML, MSG, MSO, and more.  Without
+        sflock2 the fallback uses :mod:`zipfile` (stdlib) and :mod:`py7zr`
+        (optional) — VHD/VHDX have no stdlib fallback.
 
         Password-protected archives are tried with the daemon password list;
         sflock is called once per candidate password until ``children`` is

@@ -3458,6 +3458,26 @@ class TestGetDetectedTypeSflockFormats:
             daemon.get_detected_type(None, "rar archive data", None, None) == "archive"
         )
 
+    def test_vhd_by_extension(self, daemon):
+        assert daemon.get_detected_type(None, None, "disk.vhd", None) == "archive"
+
+    def test_vhdx_by_extension(self, daemon):
+        assert daemon.get_detected_type(None, None, "disk.vhdx", None) == "archive"
+
+    def test_vhd_by_magic_desc(self, daemon):
+        assert (
+            daemon.get_detected_type(
+                None, "Microsoft Disk Image, Virtual Server", None, None
+            )
+            == "archive"
+        )
+
+    def test_vhdx_by_magic_desc(self, daemon):
+        assert (
+            daemon.get_detected_type(None, "Microsoft Disk Image Extended", None, None)
+            == "archive"
+        )
+
 
 # ===========================================================================
 # UNIT TESTS — PartialReport
@@ -5930,6 +5950,22 @@ class TestCapabilities:
             == "unknown"
         )
 
+    @pytest.mark.asyncio
+    async def test_emf_recognized_as_image(self, client):
+        """.emf has no OCR/QR value (Pillow cannot decode the GDI record
+        format) but is routed through the existing "image" analyzer so it
+        is declared in /v1/capabilities and still covered by the global
+        YARA/ClamAV/iocsearcher scanners."""
+        resp = await client.get("/v1/capabilities")
+        data = await resp.json()
+        assert ".emf" in data["mime_types"]["extensions"]
+        daemon_inst = client.app["daemon"]
+        assert (
+            daemon_inst.get_detected_type("image/emf", "", "picture.emf", b"")
+            == "image"
+        )
+        assert daemon_inst.get_detected_type(None, None, "picture.emf", None) == "image"
+
     # -----------------------------------------------------------------------
     # 3. Consistency: every exact MIME routes to an active type-routed analyzer
     # -----------------------------------------------------------------------
@@ -6204,10 +6240,10 @@ def _make_ooxml_document_signature_zip(
     with its own redundant namespace declaration silently corrupts lxml's
     canonicalization of descendants.
     """
-    from lxml import etree as _test_etree
     from cryptography.hazmat.primitives import hashes as _test_hashes
     from cryptography.hazmat.primitives import serialization as _test_serialization
     from cryptography.hazmat.primitives.asymmetric import padding as _test_padding
+    from lxml import etree as _test_etree
 
     key = _test_serialization.load_pem_private_key(
         open(key_file, "rb").read(), password=None

@@ -7,6 +7,18 @@
 
 ## Unreleased
 
+### Added
+- **VHD/VHDX archive support** — `.vhd` / `.vhdx` (Virtual Hard Disk), a
+  known Mark-of-the-Web-bypass container for malware delivery (the same
+  rationale as the existing ISO support), are now routed to the `archive`
+  analyzer and extracted via SFlock2's `zip7`-backed unpacker. No stdlib
+  fallback exists for this format (`py7zr` does not support VHD/VHDX).
+- **EMF recognition** — `.emf` (Enhanced Metafile) is now routed to the
+  existing `image` analyzer. Pillow cannot decode the GDI record format, so
+  there's no OCR/QR output, but the file is now declared in
+  `/v1/capabilities` and still covered by the global YARA/ClamAV/
+  `iocsearcher` scanners instead of going unrecognized.
+
 ## 0.7.1 — 2026-08-28
 
 ### Changed

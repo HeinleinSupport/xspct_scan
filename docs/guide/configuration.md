@@ -230,8 +230,9 @@ and unknown blobs.
 **Extraction backend** — when `SFlock2` is installed (included in the
 `advanced` extra), all archive extraction runs inside the **zipjail** usermode
 sandbox.  Supported formats include ZIP, 7z, RAR, TAR/TAR.GZ/TBZ2, CAB, ACE,
-ISO, EML, MSG, MSO, lzip, and ZPAQ.  Without SFlock2 the fallback uses
-stdlib `zipfile` (ZIP) and optional `py7zr` (7z).
+ISO, VHD/VHDX, EML, MSG, MSO, lzip, and ZPAQ.  Without SFlock2 the fallback
+uses stdlib `zipfile` (ZIP) and optional `py7zr` (7z) — VHD/VHDX have no
+stdlib fallback.
 
 Installing sflock2 and enabling full format support:
 
