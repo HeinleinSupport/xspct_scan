@@ -75,6 +75,32 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
 
+  minimal:
+    name: Test without optional dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libmagic1
+
+      - name: Install project without optional extras
+        run: pip install -e ".[dev]"
+
+      # Guards the "missing optional library = clean skip" contract. The test
+      # matrix installs every extra, so it cannot catch a conftest optional
+      # import whose except-branch forgets to bind the alias (that breaks
+      # collection outright, before any skipif marker can apply) nor a
+      # positive-path test that silently depends on an optional engine.
+      - name: Run test suite with every optional dependency hidden
+        run: pytest -p tests.optional_dep_blocker -q
+
   audit:
     name: Dependency Audit
     runs-on: ubuntu-latest
