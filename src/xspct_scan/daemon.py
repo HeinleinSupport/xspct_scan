@@ -480,6 +480,12 @@ try:
     # import time — a per-call warnings.catch_warnings() is not thread-safe and
     # was observed leaking the warning under concurrent OCR requests.
     warnings.filterwarnings("ignore", message=".*pin_memory.*", category=UserWarning)
+    # EasyOCR's recognition network builds a quantized dynamic LSTM at reader
+    # init, which triggers torch's deprecated quantize_per_tensor/per_channel
+    # API (removal scheduled, see pytorch/pytorch#184982). Not actionable here.
+    warnings.filterwarnings(
+        "ignore", message=".*quantize_per_tensor.*", category=UserWarning
+    )
 except ImportError:
     HAS_EASYOCR = False
 
@@ -4596,6 +4602,18 @@ class InspectorDaemon:
                                     _analyse_member(info.filename, member_data)
                                     break
                                 except RuntimeError:
+                                    continue
+                                except zipfile.BadZipFile:
+                                    # A wrong ZipCrypto password can clear the
+                                    # 1-byte header check and only fail later
+                                    # at CRC, so encrypted members must keep
+                                    # trying the wordlist. For a plain member
+                                    # BadZipFile means real corruption, and
+                                    # retrying would repeat the same full
+                                    # decompress + CRC pass for every one of
+                                    # the remaining candidates.
+                                    if not info.flag_bits & 0x1:
+                                        break
                                     continue
                                 except Exception as exc:
                                     logger.debug(

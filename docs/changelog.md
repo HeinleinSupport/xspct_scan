@@ -27,6 +27,17 @@
   `/v1/capabilities` and still covered by the global YARA/ClamAV/
   `iocsearcher` scanners instead of going unrecognized.
 
+### Fixed
+- **ZIP fallback password handling** — the optional stdlib ZIP fallback now
+  continues trying configured passwords when a ZipCrypto candidate passes its
+  one-byte header check but fails the member CRC. Corrupt unencrypted members
+  still stop after one attempt, avoiding repeated decompression for every
+  configured password.
+- Suppressed a noisy `UserWarning` from torch's deprecated
+  `quantize_per_tensor`/`quantize_per_channel` API, triggered by EasyOCR's
+  quantized recognition network at reader init (once per process, not
+  per-scan; not actionable on our side).
+
 ## 0.7.1 — 2026-08-28
 
 ### Changed
