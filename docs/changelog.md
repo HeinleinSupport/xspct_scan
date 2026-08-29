@@ -27,6 +27,19 @@
   `/v1/capabilities` and still covered by the global YARA/ClamAV/
   `iocsearcher` scanners instead of going unrecognized.
 
+- **`xspct_scan_client` config file support** — the CLI client now reads
+  defaults (`url`, `api_key`, `timeout`, etc.) from a YAML config file, so
+  common options no longer need to be repeated on every invocation. Discovery
+  order: `--config PATH`, `$XSPCT_SCAN_CLIENT_CONFIG`,
+  `~/.config/xspct_scan/client.yml`, `/etc/xspct_scan/client.yml` (first
+  match wins). CLI flags always take precedence over the config file, which
+  takes precedence over the built-in defaults; unknown config keys produce a
+  warning (with a typo suggestion) rather than being silently ignored, and
+  values are type-checked against the same rules as their CLI equivalents
+  (e.g. a non-integer `timeout` is rejected). All flags also gained short
+  aliases (e.g. `-u`/`--url`, `-a`/`--api-key`, `-t`/`--timeout`) for
+  brevity.
+
 ### Fixed
 - **ZIP fallback password handling** — the optional stdlib ZIP fallback now
   continues trying configured passwords when a ZipCrypto candidate passes its
