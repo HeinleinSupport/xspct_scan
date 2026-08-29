@@ -9,42 +9,71 @@ Usage::
 
 Options::
 
-    --url URL           Base URL of the daemon (default: http://localhost:8080)
-    --api-key KEY       X-Api-Key header value for authenticated daemons
-    --timeout SECS      Analysis timeout in seconds passed to the daemon (default: 30)
-    --passwords LIST    Comma-separated passwords to try for encrypted files
-    --invalidate-cache  Delete the daemon's cached report and force a full rescan
-    --poll              Poll /v1/query after a 202 response until the result is ready
-    --poll-interval N   Seconds between poll attempts (default: 2)
-    --query HASH        Look up a report by SHA-256 hash via GET /v1/query instead
-                         of submitting a file (no re-upload needed for a scan
-                         that is still processing in the background)
-    --json              Output raw JSON instead of a human-readable summary
-    --output FILE       Write JSON result(s) to FILE (single result or JSON array)
-    --no-color          Disable rich/colour output
-    --insecure          Skip TLS certificate verification
-    --legacy-multipart  Use the legacy "doc" multipart field instead of the
-                         structured "metadata" + "file" shape (default)
-    --rspamd-uid ID     rspamd_uid to place in the metadata part (correlation)
-    --queue-id ID       queue_id to place in the metadata part
-    --message-id ID     message_id to place in the metadata part
+    -C, --capabilities        Fetch GET /v1/capabilities and show the active
+                              analyzer/MIME overview
+    -c, --config PATH         YAML config file providing defaults for the
+                              options below (default: $XSPCT_SCAN_CLIENT_CONFIG,
+                              ~/.config/xspct_scan/client.yml, or
+                              /etc/xspct_scan/client.yml, first match wins)
+    -u, --url URL             Base URL of the daemon (default:
+                              http://localhost:8080)
+    -a, --api-key KEY         X-Api-Key header value for authenticated daemons
+    -t, --timeout SECS        Analysis timeout in seconds passed to the daemon
+                              (default: 30)
+    -p, --passwords LIST      Comma-separated passwords to try for encrypted files
+    -f, --force-analyzers LIST  Comma-separated analyzer paths to bypass
+                              exclusion gates for this request (e.g. image.ocr)
+    -F, --force-ocr           Shortcut for --force-analyzers image.ocr
+    -R, --invalidate-cache    Delete the daemon's cached report and force a
+                              full rescan
+    -L, --legacy-multipart    Use the legacy "doc" multipart field instead of
+                              the structured "metadata" + "file" shape (default)
+    -r, --rspamd-uid ID       rspamd_uid to place in the metadata part
+    -Q, --queue-id ID         queue_id to place in the metadata part
+    -m, --message-id ID       message_id to place in the metadata part
+    -P, --poll                Poll /v1/query after a 202 response until the
+                              result is ready
+    -I, --poll-interval SECS  Seconds between poll attempts (default: 2)
+    -q, --query HASH          Look up a report by SHA-256 hash via GET /v1/query
+                              instead of submitting a file (no re-upload needed
+                              for a scan still processing in the background)
+    -j, --json                Output raw JSON instead of a human-readable summary
+    -o, --output FILE         Write JSON result(s) to FILE (single result or
+                              JSON array)
+    -n, --no-color            Disable rich/colour output
+    -i, --insecure            Skip TLS certificate verification
+
+Each boolean above has a counterpart that overrides a config-file default for
+a single invocation: --use-cache, --structured-multipart, --no-poll, --no-json,
+--color, and --secure.
+
+Config-file keys match the long flag names with dashes replaced by
+underscores (url, api_key, timeout, ...). Unknown keys are ignored with a
+warning. The mode selectors --capabilities, --query and FILE arguments are
+command-line only.
 
 By default the client uploads via the structured "metadata" + "file"
 multipart shape (see docs/guide/api-http.md); --legacy-multipart switches
 back to the plain "doc" field for talking to older daemons.
+
+CLI flags always take precedence over the config file, which in turn
+takes precedence over built-in defaults.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import difflib
 import json
+import os
 import ssl
 import sys
 from pathlib import Path
 from typing import Any
 
 import aiohttp
+import yaml
 
 try:
     from rich import box
@@ -422,6 +451,13 @@ def _print_error(msg: str) -> None:
         print(f"Error: {msg}", file=sys.stderr)
 
 
+def _print_warning(msg: str) -> None:
+    if HAS_RICH and _err_console is not None:
+        _err_console.print(f"[bold yellow]Warning:[/bold yellow] {msg}")
+    else:
+        print(f"Warning: {msg}", file=sys.stderr)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -657,7 +693,186 @@ async def _run(args: argparse.Namespace) -> int:
     return 0
 
 
-def main() -> None:
+_DEFAULT_URL = "http://localhost:8080"
+_DEFAULT_TIMEOUT = 30
+_DEFAULT_POLL_INTERVAL = 2.0
+
+_CONFIG_ENV_VAR = "XSPCT_SCAN_CLIENT_CONFIG"
+_CONFIG_SEARCH_PATHS = (
+    Path.home() / ".config" / "xspct_scan" / "client.yml",
+    Path("/etc/xspct_scan/client.yml"),
+)
+
+# Config keys applied as defaults when the matching CLI flag was not given,
+# mapped to the type the rest of the client expects. CLI flags are coerced by
+# argparse's ``type=``; the config file has no equivalent, so values are
+# validated here rather than failing deep inside the request path.
+_CONFIG_SPEC: "dict[str, str]" = {
+    "url": "str",
+    "api_key": "str",
+    "timeout": "int",
+    "passwords": "csv",
+    "force_analyzers": "csv",
+    "invalidate_cache": "bool",
+    "legacy_multipart": "bool",
+    "rspamd_uid": "str",
+    "queue_id": "str",
+    "message_id": "str",
+    "poll": "bool",
+    "poll_interval": "float",
+    "json": "bool",
+    "output": "str",
+    "no_color": "bool",
+    "insecure": "bool",
+}
+
+
+def _find_config_path(explicit: "str | None") -> "Path | None":
+    """Resolve the config file to load, or None if none applies.
+
+    A path named explicitly — via --config or $XSPCT_SCAN_CLIENT_CONFIG — must
+    exist; naming one that does not is an error rather than a silent fallback
+    to the built-in defaults, which would quietly redirect scans at the wrong
+    daemon. The unnamed default locations are skipped when absent.
+    """
+    if explicit:
+        path = Path(explicit)
+        if not path.is_file():
+            _print_error(f"Config file not found: {path}")
+            sys.exit(1)
+        return path
+    env_path = os.environ.get(_CONFIG_ENV_VAR)
+    if env_path:
+        path = Path(env_path)
+        if not path.is_file():
+            _print_error(f"Config file not found: {path} (${_CONFIG_ENV_VAR})")
+            sys.exit(1)
+        return path
+    for candidate in _CONFIG_SEARCH_PATHS:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _coerce_config_value(path: Path, key: str, value: Any, kind: str) -> Any:
+    """Return *value* as *kind*, or exit 1 explaining what the key expects."""
+
+    def _reject(expected: str) -> None:
+        _print_error(
+            f"Config file {path}: '{key}' must be {expected}, got "
+            f"{type(value).__name__} ({value!r})"
+        )
+        sys.exit(1)
+
+    if kind == "bool":
+        # Deliberately strict: a quoted "false" is a non-empty string and so
+        # truthy, which would silently flip flags like insecure to on.
+        if not isinstance(value, bool):
+            _reject("a boolean")
+        return value
+    if kind in ("int", "float"):
+        expected = "an integer" if kind == "int" else "a number"
+        convert = int if kind == "int" else float
+        # bool is an int subclass; not a meaningful timeout or interval.
+        if isinstance(value, bool):
+            _reject(expected)
+        if isinstance(value, (int, float)):
+            if kind == "int" and isinstance(value, float):
+                _reject(expected)
+            return convert(value)
+        if isinstance(value, str):
+            try:
+                return convert(value.strip())
+            except ValueError:
+                _reject(expected)
+        _reject(expected)
+    if kind == "csv":
+        # Accept the CLI's comma-separated form or the YAML-native list.
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list) and all(isinstance(item, str) for item in value):
+            return ",".join(value)
+        _reject("a string or a list of strings")
+    if not isinstance(value, str):
+        _reject("a string")
+    return value
+
+
+def _warn_unknown_config_keys(path: Path, cfg: "dict[str, Any]") -> None:
+    """Warn about keys that will be ignored, suggesting the nearest real one.
+
+    Silence here is dangerous: a mistyped api_key drops authentication and the
+    only symptom is an opaque 401 from the daemon.
+    """
+    for key in sorted(str(k) for k in cfg if k not in _CONFIG_SPEC):
+        close = difflib.get_close_matches(key.replace("-", "_"), _CONFIG_SPEC, n=1)
+        hint = f" (did you mean '{close[0]}'?)" if close else ""
+        _print_warning(f"Config file {path}: ignoring unknown key '{key}'{hint}")
+
+
+def _load_client_config(path: "Path | None") -> "dict[str, Any]":
+    if path is None:
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+    except yaml.YAMLError as exc:
+        _print_error(f"YAML error in {path}: {exc}")
+        sys.exit(1)
+    except UnicodeDecodeError as exc:
+        _print_error(f"Config file {path} is not UTF-8 text: {exc}")
+        sys.exit(1)
+    except OSError as exc:
+        _print_error(f"Cannot read {path}: {exc}")
+        sys.exit(1)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        _print_error(f"Config file {path} must contain a YAML mapping")
+        sys.exit(1)
+    _warn_unknown_config_keys(path, data)
+    return {
+        key: _coerce_config_value(path, key, value, _CONFIG_SPEC[key])
+        for key, value in data.items()
+        if key in _CONFIG_SPEC
+    }
+
+
+def _apply_config_defaults(args: argparse.Namespace, cfg: "dict[str, Any]") -> None:
+    """Fill in unset CLI options from *cfg*, then apply built-in defaults."""
+    for key in _CONFIG_SPEC:
+        if key in cfg and not hasattr(args, key):
+            setattr(args, key, cfg[key])
+    defaults = {
+        "url": _DEFAULT_URL,
+        "api_key": None,
+        "timeout": _DEFAULT_TIMEOUT,
+        "passwords": None,
+        "force_analyzers": None,
+        "invalidate_cache": False,
+        "legacy_multipart": False,
+        "rspamd_uid": None,
+        "queue_id": None,
+        "message_id": None,
+        "poll": False,
+        "poll_interval": _DEFAULT_POLL_INTERVAL,
+        "json": False,
+        "output": None,
+        "no_color": False,
+        "insecure": False,
+    }
+    for key, value in defaults.items():
+        if not hasattr(args, key):
+            setattr(args, key, value)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Construct the CLI parser.
+
+    Split out of main() so the option set can be introspected — see the test
+    that keeps the module docstring (published as docs/reference/client.md) in
+    sync with the flags actually offered.
+    """
     parser = argparse.ArgumentParser(
         prog="xspct_scan_client",
         description="Submit files to an xspct_scan daemon for analysis.",
@@ -665,39 +880,57 @@ def main() -> None:
     )
     parser.add_argument("files", nargs="*", metavar="FILE", help="Files to scan")
     parser.add_argument(
+        "-C",
         "--capabilities",
         action="store_true",
         help="Fetch GET /v1/capabilities and display the active analyzer/MIME overview",
     )
     parser.add_argument(
-        "--url",
-        default="http://localhost:8080",
-        metavar="URL",
-        help="Daemon base URL (default: http://localhost:8080)",
+        "-c",
+        "--config",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Path to a YAML config file providing defaults for the other "
+            "options (default: $XSPCT_SCAN_CLIENT_CONFIG, "
+            "~/.config/xspct_scan/client.yml, or /etc/xspct_scan/client.yml, "
+            "first match wins)"
+        ),
     )
     parser.add_argument(
+        "-u",
+        "--url",
+        default=argparse.SUPPRESS,
+        metavar="URL",
+        help="Daemon base URL (default: http://localhost:8080, or the config file)",
+    )
+    parser.add_argument(
+        "-a",
         "--api-key",
         metavar="KEY",
-        default=None,
+        default=argparse.SUPPRESS,
         help="X-Api-Key header value",
     )
     parser.add_argument(
+        "-t",
         "--timeout",
         type=int,
-        default=30,
+        default=argparse.SUPPRESS,
         metavar="SECS",
-        help="Analysis timeout in seconds sent to the daemon (default: 30)",
+        help="Analysis timeout in seconds sent to the daemon (default: 30, or the config file)",
     )
     parser.add_argument(
+        "-p",
         "--passwords",
         metavar="LIST",
-        default=None,
+        default=argparse.SUPPRESS,
         help="Comma-separated passwords to try for encrypted files",
     )
     parser.add_argument(
+        "-f",
         "--force-analyzers",
         metavar="LIST",
-        default=None,
+        default=argparse.SUPPRESS,
         dest="force_analyzers",
         help=(
             "Comma-separated analyzer paths to bypass exclusion gates for this request.\n"
@@ -706,14 +939,18 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "-F",
         "--force-ocr",
+        default=argparse.SUPPRESS,
         action="store_const",
         const="image.ocr",
         dest="force_analyzers",
         help="Force OCR even when the camera-photo/size exclusion gate would skip it",
     )
     parser.add_argument(
+        "-R",
         "--invalidate-cache",
+        default=argparse.SUPPRESS,
         action="store_true",
         dest="invalidate_cache",
         help=(
@@ -724,7 +961,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--use-cache",
+        default=argparse.SUPPRESS,
+        action="store_false",
+        dest="invalidate_cache",
+        help="Use cached reports when available",
+    )
+    parser.add_argument(
+        "-L",
         "--legacy-multipart",
+        default=argparse.SUPPRESS,
         action="store_true",
         help=(
             "Use the legacy 'doc' multipart field instead of the structured "
@@ -732,29 +978,49 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--structured-multipart",
+        default=argparse.SUPPRESS,
+        action="store_false",
+        dest="legacy_multipart",
+        help="Use the structured metadata and file multipart shape",
+    )
+    parser.add_argument(
+        "-r",
         "--rspamd-uid",
         metavar="ID",
-        default=None,
+        default=argparse.SUPPRESS,
         help="rspamd_uid to place in the metadata part (correlation)",
     )
     parser.add_argument(
+        "-Q",
         "--queue-id",
         metavar="ID",
-        default=None,
+        default=argparse.SUPPRESS,
         help="queue_id to place in the metadata part",
     )
     parser.add_argument(
+        "-m",
         "--message-id",
         metavar="ID",
-        default=None,
+        default=argparse.SUPPRESS,
         help="message_id to place in the metadata part",
     )
     parser.add_argument(
+        "-P",
         "--poll",
+        default=argparse.SUPPRESS,
         action="store_true",
         help="Poll /v1/query until the result is ready when a 202 is returned",
     )
     parser.add_argument(
+        "--no-poll",
+        default=argparse.SUPPRESS,
+        action="store_false",
+        dest="poll",
+        help="Return immediately when a scan is still processing",
+    )
+    parser.add_argument(
+        "-q",
         "--query",
         metavar="HASH",
         default=None,
@@ -765,32 +1031,61 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "-I",
         "--poll-interval",
         type=float,
-        default=2.0,
+        default=argparse.SUPPRESS,
         metavar="SECS",
-        help="Seconds between poll attempts (default: 2)",
+        help="Seconds between poll attempts (default: 2, or the config file)",
     )
     parser.add_argument(
+        "-j",
         "--json",
+        default=argparse.SUPPRESS,
         action="store_true",
         help="Output raw JSON instead of a formatted summary",
     )
     parser.add_argument(
+        "--no-json",
+        default=argparse.SUPPRESS,
+        action="store_false",
+        dest="json",
+        help="Output a formatted summary instead of raw JSON",
+    )
+    parser.add_argument(
+        "-o",
         "--output",
         metavar="FILE",
-        default=None,
+        default=argparse.SUPPRESS,
         help="Write JSON result(s) to FILE",
     )
     parser.add_argument(
+        "-n",
         "--no-color",
+        default=argparse.SUPPRESS,
         action="store_true",
         help="Disable coloured rich output",
     )
     parser.add_argument(
+        "--color",
+        default=argparse.SUPPRESS,
+        action="store_false",
+        dest="no_color",
+        help="Enable coloured rich output",
+    )
+    parser.add_argument(
+        "-i",
         "--insecure",
+        default=argparse.SUPPRESS,
         action="store_true",
         help="Skip TLS certificate verification",
+    )
+    parser.add_argument(
+        "--secure",
+        default=argparse.SUPPRESS,
+        action="store_false",
+        dest="insecure",
+        help="Verify TLS certificates",
     )
 
     parser.epilog = (
@@ -802,8 +1097,16 @@ def main() -> None:
         "  xspct_scan_client --capabilities --url http://scan.internal:8080\n"
         "  xspct_scan_client --query <sha256>\n"
     )
+    return parser
 
+
+def main() -> None:
+    parser = _build_parser()
     args = parser.parse_args()
+
+    config_path = _find_config_path(args.config)
+    _apply_config_defaults(args, _load_client_config(config_path))
+
     if sum(bool(x) for x in (args.capabilities, args.query, args.files)) > 1:
         parser.error(
             "--capabilities, --query, and FILE arguments are mutually exclusive"
