@@ -54,14 +54,17 @@ Useful flags:
 Examples:
 
 ```bash
-# Run only the HTTP endpoint tests
-pytest -v -k "TestScan or TestQuery or TestAdmin"
+# Run one area (tests are split one module per analyzer / concern)
+pytest -v tests/test_http_endpoints.py
 
-# Run only unit tests (no HTTP)
-pytest -v -k "not TestScan and not TestQuery and not TestAuth and not TestMetrics and not TestHealth and not TestOpenApi"
+# Run every analyzer module
+pytest -v tests/test_analyzer_*.py
+
+# Run a single class
+pytest -v tests/test_analyzer_archive.py::TestAnalyzeArchive
 
 # Run a single test
-pytest "tests/test_xspct_scan.py::TestAnalyzeArchive::test_zip_with_pdf_extracted" -v
+pytest "tests/test_analyzer_archive.py::TestAnalyzeArchive::test_zip_with_pdf_extracted" -v
 
 # Run with oletools test data for real-file fixture tests
 pytest --oletools-testdata /path/to/oletools/tests/test-data
@@ -147,65 +150,69 @@ pip install -e ".[dev,enrichment,openapi,advanced]"
 
 ```
 tests/
-├── conftest.py          # pytest configuration, shared constants, autouse fixtures
+├── conftest.py                      # pytest configuration, shared constants,
+│                                    # autouse fixtures, byte-level document
+│                                    # fixtures and helpers
 ├── __init__.py
-├── test_xspct_scan.py   # all tests (unit + integration)
+├── create_fixtures.py               # regenerates the generated fixtures below
+├── test_analyzer_archive.py         # one module per analyzer …
+├── test_analyzer_html.py
+├── test_analyzer_image.py
+├── test_analyzer_javascript.py
+├── test_analyzer_lnk.py
+├── test_analyzer_odf.py
+├── test_analyzer_pdf.py
+├── test_analyzer_script.py
+├── test_analyzer_signature.py
+├── test_analyzer_text.py
+├── test_analyzer_yara.py
+├── test_auth.py                     # … plus one per cross-cutting area
+├── test_cache.py
+├── test_capabilities_openapi.py
+├── test_config_logging.py
+├── test_http_endpoints.py
+├── test_ioc.py
+├── test_pipeline_concurrency.py
+├── test_report_merging.py
+├── test_response_formats.py
+├── test_scan_multipart_metadata.py
 └── fixtures/
     ├── autostart-encrypt-standardpassword.xls
     ├── RTF-Spec-1.7.rtf
     └── passwords.txt
 ```
 
-`test_xspct_scan.py` is organised into test classes:
+Tests are split one module per analyzer plus one per cross-cutting area. Add
+new tests to the module matching what you touched — a new analyzer gets its own
+`test_analyzer_<type>.py`.
 
-| Class | Type | What it tests |
-|-------|------|---------------|
-| `TestSessionHelpers` | unit | Session ID generation |
-| `TestApiKeyVerification` | unit | `xspct_api_key` auth logic |
-| `TestVerifyAdminKey` | unit | `xspct_admin_api_key` admin auth |
-| `TestExtractIocs` | unit | URL / IP / domain extraction |
-| `TestAnalyzePdf` | unit | PDF analyzer (clean, markers, IOCs) |
-| `TestAnalyzePdfEncrypted` | unit | Encrypted PDF (requires PyMuPDF) |
-| `TestAnalyzeHtml` | unit | HTML analyzer |
-| `TestAnalyzeHtmlExtras` | unit | RemoteScriptInjection, inline JS, data URIs |
-| `TestAnalyzeJavascript` | unit | JS keyword detection |
-| `TestAnalyzeImage` | unit | Image analyzer (empty, invalid, PNG) |
-| `TestAnalyzeYaraNoEngine` | unit | YARA — no-engine path |
-| `TestSyncAnalyzeYara` | unit | YARA called from `sync_analyze` when rules are loaded |
-| `TestAnalyzeIocsearcher` | unit | iocsearcher integration |
-| `TestAnalyzeArchive` | unit | ZIP extraction, depth/size guards, YARA on members |
-| `TestAnalyzeArchiveSflock` | unit | sflock2 extraction path: success, empty result, password retry, size pre-check, nested tree walk, decryption password in report, exception recovery |
-| `TestGetDetectedTypeSflockFormats` | unit | New archive format detection: RAR, EML, MSG, CAB, ACE, ISO, TGZ, TBZ2 |
-| `TestPdfJavascriptFixture` | unit + integration | `pdf_javascript.pdf`: `has_javascript`, `has_openaction`, JS analyses, eval/launchURL detection, IOC URL, `/scan` endpoint |
-| `TestPdfEmbeddedFileFixture` | unit | `pdf_embedded.pdf`: `has_embedded_files`, analyses mention filename |
-| `TestPdfUriFixture` | unit | `pdf_uri.pdf`: URI extracted into `iocs.urls` |
-| `TestHtmlPhishingFixture` | unit + integration | `html_phishing.html`: form, iframe, meta-refresh, eval, CSS hiding, base64 smuggling blob, `/scan` endpoint |
-| `TestArchiveMixedFixture` | unit + integration | `archive_mixed.zip`: members extracted, IOCs from text member, nested PDF present, `/scan` endpoint |
-| `TestEmlFixture` | unit | `email_with_attachment.eml`: EML/MSG → archive routing; sflock2 attachment extraction (skipped without sflock2) |
-| `TestQrCodeFixture` | unit | `qr_code.png`: image detection, QR decode + IOC URL (skipped without pyzbar/qrcode) |
-| `TestAnalyzeText` | unit | `analyze_text()` — decode, preview, IOCs, limits |
-| `TestExtractTextPreview` | unit | Text extraction strategies |
-| `TestGetDetectedType` | unit | MIME / extension / magic-byte detection |
-| `TestGetDetectedTypeExtended` | unit | Image / archive / text types |
-| `TestMakeBaseReport` | unit | Report skeleton fields |
-| `TestMergeReports` | unit | Classic merge fields |
-| `TestMergeReportsNewFields` | unit | `yara_matches`, `iocs_extended`, `archive_files`, `exif`, `text_full` |
-| `TestPartialReport` | unit | `PartialReport` snapshot + merge |
-| `TestTextFull` | unit | `text_full` presence / absence |
-| `TestTextTypePipeline` | integration | `text` detected type flows through `/scan` |
-| `TestEvictTasks` | unit | In-memory task eviction |
-| `TestSyncAnalyze` | unit | Full sync pipeline |
-| `TestTextExtractorRtf` | unit | RTF text extractor |
-| `TestLoadConfig` | unit | YAML config loading |
-| `TestConfigureLogging` | unit | Logger setup |
-| `TestHealthPingRoot` | integration | `GET /health`, `/ping`, `/` |
-| `TestMetricsEndpoint` | integration | `GET /metrics` |
-| `TestScanEndpoint` | integration | `POST /scan` (multipart) |
-| `TestScanOctetStream` | integration | `POST /scan` (octet-stream, 415) |
-| `TestQueryEndpoint` | integration | `GET|POST /query` |
-| `TestAuthentication` | integration | API key enforcement |
-| `TestAdminReload` | integration | `POST /admin/reload` |
-| `TestOpenApiEndpoints` | integration | `GET /openapi.json`, `/apidoc/redoc` |
+| Module | What it covers |
+|--------|----------------|
+| `test_analyzer_archive.py` | ZIP extraction, depth/size guards, YARA on members, sflock2 path, RAR/EML/MSG/CAB/ACE/ISO/TGZ format detection, `archive_mixed.zip` and `email_with_attachment.eml` fixtures |
+| `test_analyzer_html.py` | HTML analyzer, RemoteScriptInjection, inline JS, data URIs, HTA-in-HTML, `html_phishing.html` fixture |
+| `test_analyzer_image.py` | Image analyzer, OCR gating, per-document image cap, `qr_code.png` QR decode |
+| `test_analyzer_javascript.py` | JS keyword detection and emulation |
+| `test_analyzer_lnk.py` | `.lnk` parsing and its pipeline routing |
+| `test_analyzer_odf.py` | OpenDocument analyzer |
+| `test_analyzer_pdf.py` | PDF analyzer (clean, markers, IOCs), encrypted PDFs, `pdf_javascript.pdf` / `pdf_embedded.pdf` / `pdf_uri.pdf` fixtures |
+| `test_analyzer_script.py` | VBS/VBE/JSE/WSF/PowerShell analyzer and its pipeline routing |
+| `test_analyzer_signature.py` | VBA, OOXML and PDF signature validation (requires pyhanko) |
+| `test_analyzer_text.py` | `analyze_text()`, text preview strategies, `text_full`, RTF extractor |
+| `test_analyzer_yara.py` | YARA no-engine path and `sync_analyze` integration |
+| `test_auth.py` | `xspct_api_key` / `xspct_admin_api_key` logic, endpoint enforcement, `POST /admin/reload` |
+| `test_cache.py` | Rspamd digest, Redis cache, cache invalidation (requires fakeredis) |
+| `test_capabilities_openapi.py` | `GET /v1/capabilities`, `/openapi.json`, `/apidoc/redoc` |
+| `test_config_logging.py` | Session IDs, YAML config loading, logger setup |
+| `test_http_endpoints.py` | `/health`, `/ping`, `/`, `/metrics`, `POST /scan`, octet-stream rejection, client polling and multipart shape |
+| `test_ioc.py` | URL / IP / domain extraction, exclusion rules, iocsearcher integration |
+| `test_pipeline_concurrency.py` | Task eviction, full sync pipeline, `PartialReport`, two-tier fg/bg concurrency |
+| `test_report_merging.py` | MIME / extension / magic-byte detection, report skeleton, merge semantics |
+| `test_response_formats.py` | msgpack and CBOR serialization, zstd compression |
+| `test_scan_multipart_metadata.py` | Multipart `metadata` part parsing and correlation IDs |
+
+Some fixtures under `fixtures/` are generated and git-ignored — regenerate them
+with `python tests/create_fixtures.py`. Tests depending on a missing generated
+fixture skip themselves.
 
 ## Writing new tests
 
@@ -219,4 +226,19 @@ tests/
   Mutate config freely inside a test; it will be reverted automatically.
 - **Optional-library guards** — use
   `@pytest.mark.skipif(not xspct.HAS_PYDANTIC, reason='pydantic not installed')`
-  for tests that require an optional dependency.
+  for tests that require an optional dependency. When the optional import lives
+  in `conftest.py`, bind the alias to `None` in the `except ImportError` branch
+  as well — modules do `from tests.conftest import _pymupdf`, and an unbound
+  name breaks *collection* before any `skipif` can apply.
+- **Checking the degraded path** — the CI matrix installs every extra, so run
+  this locally after touching an optional import:
+
+  ```bash
+  pytest -p tests.optional_dep_blocker -q      # full suite, deps hidden
+  pytest -p tests.optional_dep_blocker -q --collect-only   # collection only
+  ```
+
+  The plugin hides every optional dependency behind a meta-path hook, which
+  reproduces a bare install without needing one. The full run must be green —
+  every test needing an absent engine skips itself rather than failing. CI runs
+  the same command in its `minimal` job.

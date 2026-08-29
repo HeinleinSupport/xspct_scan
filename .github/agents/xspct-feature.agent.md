@@ -9,8 +9,12 @@ You are a feature implementation specialist for **xspct_scan** — an async Pyth
 - `src/xspct_scan/daemon.py` — core logic: `InspectorDaemon`, route handlers, analyzers, config defaults
 - `src/xspct_scan/__main__.py` — entry point, TLS setup, uvloop
 - `config/xspct_scan.example.yml` — canonical config reference
-- `tests/test_xspct_scan.py` — pytest-asyncio test suite (unit + integration)
-- `tests/conftest.py` — shared fixtures
+- `tests/test_*.py` — pytest-asyncio test suite, split per area: `test_analyzer_<type>.py`
+  for each analyzer, plus `test_http_endpoints.py`, `test_auth.py`, `test_cache.py`,
+  `test_ioc.py`, `test_pipeline_concurrency.py`, `test_report_merging.py`,
+  `test_response_formats.py`, `test_scan_multipart_metadata.py`,
+  `test_capabilities_openapi.py`, `test_config_logging.py`
+- `tests/conftest.py` — shared fixtures, byte-level document fixtures, and helpers
 
 ## How to Implement a Feature
 
@@ -18,7 +22,7 @@ You are a feature implementation specialist for **xspct_scan** — an async Pyth
 2. **Config changes**: add defaults to the `config` dict in `daemon.py` AND document them in `config/xspct_scan.example.yml`.
 3. **New scan type**: add an `analyze_<type>(data)` method to `InspectorDaemon` and call it from `sync_analyze` based on detected MIME/magic. Follow the existing report dict schema (`{'risk': ..., 'indicators': [...], 'iocs': [...], 'meta': {...}}`).
 4. **New endpoint**: register the route in `make_app()`, respect `_verify_api_key`, increment the right `stats` counter, and follow existing error-response conventions (JSON `{'error': '...'}` with appropriate HTTP status).
-5. **Tests**: always add or update tests in `tests/test_xspct_scan.py` covering the happy path, error path, and any auth behaviour. Match the existing pytest-asyncio style.
+5. **Tests**: always add or update tests covering the happy path, error path, and any auth behaviour. Put them in the module matching the area you touched (a new analyzer gets its own `tests/test_analyzer_<type>.py`); shared fixtures and helpers belong in `tests/conftest.py`. Never reintroduce a single combined test file. Match the existing pytest-asyncio style.
 6. **No breaking changes**: preserve the existing `/scan`, `/query`, `/health`, `/ping`, `/metrics` contract.
 
 ## Constraints
