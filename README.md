@@ -161,8 +161,8 @@ Available sources: `pdf`, `pdf-image`, `office`, `office-macro`, `odf`,
 ### Infrastructure
 
 - **Parallel pipeline** — analyzers run as concurrent asyncio tasks; partial
-  results returned on timeout (`202 Accepted`) with `analyzers_completed` /
-  `analyzers_pending` fields
+  results returned on timeout (`202 Accepted`) in the same v2 envelope as a
+  finished report, with `scan.analyzers.completed` / `scan.analyzers.pending`
 - **Redis result cache** — optional; survives restarts, shared across instances
 - **Prometheus metrics** — exposed at `/v1/metrics`
 - **OpenAPI 3.0** — spec at `/v1/openapi.json`; ReDoc UI at `/v1/apidoc/redoc`

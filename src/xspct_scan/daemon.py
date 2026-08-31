@@ -330,6 +330,20 @@ def _rspamd_digest(data: bytes) -> str:
     return hashlib.blake2b(data, key=_RSPAMD_BLAKE2_KEY).hexdigest()
 
 
+def _extra_digests(data: bytes) -> "tuple[str, str]":
+    """Return ``(sha1, rspamd_digest)`` for *data*.
+
+    Both are reported in the v2 ``file`` block alongside the SHA-256 that
+    already keys the request. Over a 25 MB upload the pair costs ~34 ms of
+    event-loop time, so it is computed once per scan and threaded through
+    rather than recomputed at each site that builds a PartialReport.
+    """
+    return (
+        hashlib.sha1(data).hexdigest(),  # noqa: S324  (non-security use)
+        _rspamd_digest(data),
+    )
+
+
 def _normalize_pdf_date(date_str: str) -> "str | None":
     """Convert a PDF date string to ISO-8601.
 
@@ -371,7 +385,6 @@ try:
 except ImportError:
     _olefile = None  # type: ignore[assignment]
     HAS_OLEFILE = False
-
 try:
     import magic as _magic
 
@@ -484,7 +497,9 @@ try:
     # init, which triggers torch's deprecated quantize_per_tensor/per_channel
     # API (removal scheduled, see pytorch/pytorch#184982). Not actionable here.
     warnings.filterwarnings(
-        "ignore", message=".*quantize_per_tensor.*", category=UserWarning
+        "ignore",
+        message=".*quantize_per_(tensor|channel).*",
+        category=UserWarning,
     )
 except ImportError:
     HAS_EASYOCR = False
@@ -1337,25 +1352,47 @@ if HAS_PYDANTIC:
         report: Optional[_ScanReport] = None
         # Scan report fields are inlined at the top level for finished responses.
 
-    class _ProcessingResponse(_pydantic.BaseModel):
-        """Response body for ``POST /scan`` (202 partial / timeout)."""
+    class _ProcessingResponse(_V2ScanReport):
+        """Response body for ``POST /scan`` (202 partial / timeout).
 
-        status: str  # 'processing'
+        Same v2 envelope as the finished report (``schema_version``/``file``/
+        ``scan``), just taken mid-flight — ``scan.analyzers.pending`` is
+        non-empty and sections fed by analyzers that haven't finished yet
+        (``findings``, ``iocs``, ...) may still be empty/absent.
+        """
+
+        status: str  # 'processing' | 'dropped'
         file_hash: str
-        message: str
-        time_taken: float
-        analyzers_completed: list[str] = []
-        analyzers_pending: list[str] = []
+        message: Optional[str] = None
+        time_taken: Optional[float] = None
 
     class _QueryResponse(_pydantic.BaseModel):
-        """Response body for ``GET|POST /query``."""
+        """Terminal response body for ``GET|POST /query``."""
 
-        status: str  # 'finished' | 'processing' | 'not_found' | 'error'
-        report: Optional[_ScanReport] = None
+        status: str  # 'finished' | 'not_found' | 'error'
+        report: Optional[_V2ScanReport] = None
         error: Optional[str] = None
 
     class _ErrorResponse(_pydantic.BaseModel):
         error: str
+
+    def _schema_name(raw: str) -> str:
+        """Map a pydantic model name to its OpenAPI components name."""
+        return raw.lstrip("_")
+
+    def _rewrite_refs(node: "dict | list") -> "dict | list":
+        """Repoint pydantic's model-local $defs refs at components/schemas."""
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/$defs/"):
+                name = _schema_name(ref.rsplit("/", 1)[-1])
+                node["$ref"] = f"#/components/schemas/{name}"
+            for value in node.values():
+                _rewrite_refs(value)
+        elif isinstance(node, list):
+            for item in node:
+                _rewrite_refs(item)
+        return node
 
     def _build_openapi_spec() -> dict:
         """Build and return the OpenAPI 3.0 spec dict."""
@@ -1380,10 +1417,14 @@ if HAS_PYDANTIC:
             _ErrorResponse,
         ):
             s = model.model_json_schema()
-            # pydantic embeds $defs for nested models — hoist them
-            for k, v in s.pop("$defs", {}).items():
-                schemas[k] = v
-            schemas[model.__name__.lstrip("_")] = s
+            # pydantic emits nested models under a model-local "$defs" and
+            # points at them with "#/$defs/_Name". Hoisting the definitions
+            # without rewriting those refs leaves them unresolvable in the
+            # assembled spec, so do both — and strip the leading underscore so
+            # a nested copy and a top-level model share one schema name.
+            for raw_name, definition in s.pop("$defs", {}).items():
+                schemas.setdefault(_schema_name(raw_name), _rewrite_refs(definition))
+            schemas[_schema_name(model.__name__)] = _rewrite_refs(s)
 
         def _ref(name: str) -> dict:
             return {"$ref": f"#/components/schemas/{name}"}
@@ -1527,7 +1568,17 @@ if HAS_PYDANTIC:
                                 "description": "Query result",
                                 "content": {
                                     "application/json": {
-                                        "schema": _ref("QueryResponse")
+                                        # anyOf, not oneOf: QueryResponse
+                                        # requires only "status" and allows
+                                        # extra properties, so a processing
+                                        # body matches both branches and
+                                        # "exactly one" can never hold.
+                                        "schema": {
+                                            "anyOf": [
+                                                _ref("ProcessingResponse"),
+                                                _ref("QueryResponse"),
+                                            ]
+                                        }
                                     }
                                 },
                             },
@@ -1555,7 +1606,17 @@ if HAS_PYDANTIC:
                                 "description": "Query result",
                                 "content": {
                                     "application/json": {
-                                        "schema": _ref("QueryResponse")
+                                        # anyOf, not oneOf: QueryResponse
+                                        # requires only "status" and allows
+                                        # extra properties, so a processing
+                                        # body matches both branches and
+                                        # "exactly one" can never hold.
+                                        "schema": {
+                                            "anyOf": [
+                                                _ref("ProcessingResponse"),
+                                                _ref("QueryResponse"),
+                                            ]
+                                        }
                                     }
                                 },
                             },
@@ -1674,14 +1735,34 @@ class PartialReport:
         pending: Names of analyzers that are expected to run.
     """
 
-    __slots__ = ("_report", "_lock", "_completed", "_pending", "_successful")
+    __slots__ = (
+        "_report",
+        "_lock",
+        "_completed",
+        "_pending",
+        "_successful",
+        "filesize",
+        "sha1",
+        "rspamd_digest",
+    )
 
-    def __init__(self, base: dict, pending: "list[str]") -> None:
+    def __init__(
+        self,
+        base: dict,
+        pending: "list[str]",
+        *,
+        filesize: int = 0,
+        sha1: str = "",
+        rspamd_digest: str = "",
+    ) -> None:
         self._report: dict = base
         self._lock: asyncio.Lock = asyncio.Lock()
         self._completed: list[str] = []
         self._pending: list[str] = list(pending)
         self._successful: list[str] = []  # analyzers that returned non-None
+        self.filesize = filesize
+        self.sha1 = sha1
+        self.rspamd_digest = rspamd_digest
         self._report["analyzers_completed"] = self._completed
         self._report["analyzers_pending"] = self._pending
 
@@ -2359,6 +2440,10 @@ class InspectorDaemon:
         # In-flight PartialReport objects keyed by file_hash.
         # Populated by analyze_pipeline(); removed when the scan finishes.
         self._partials: dict = {}
+        # A hash identifies file content, not a scan request. When a request
+        # explicitly starts a fresh same-hash scan, query state follows only
+        # this latest token.
+        self._scan_owners: dict[str, str] = {}
         # Two-tier concurrency semaphores.
         # Initialised in setup() so they are bound to the running event loop.
         self._fg_sem: "asyncio.Semaphore | None" = None
@@ -2541,6 +2626,7 @@ class InspectorDaemon:
         self.tasks.pop(file_hash, None)
         self._redis_authoritative_hashes.discard(file_hash)
         self._partials.pop(file_hash, None)
+        self._scan_owners.pop(file_hash, None)
         if not self._redis_enabled(s):
             return
         try:
@@ -2564,6 +2650,7 @@ class InspectorDaemon:
         file_hash: str,
         report: dict,
         cache_generation: "int | None" = None,
+        scan_owner: "str | None" = None,
     ) -> None:
         """Store a finished report in the in-memory LRU cache and Redis.
 
@@ -2585,13 +2672,16 @@ class InspectorDaemon:
                 invalidation from a peer daemon process sharing the same
                 cache) before the Redis write itself.
         """
+        if scan_owner is not None and self._scan_owners.get(file_hash) != scan_owner:
+            logger.info("%s - not publishing superseded scan for %s", s, file_hash)
+            return
         if cache_generation is not None and (
             cache_generation < self._cache_generations.get(file_hash, 0)
         ):
             logger.info("%s - not caching invalidated report for %s", s, file_hash)
             return
         if not self._redis_enabled(s):
-            self._store_terminal_result(file_hash, report)
+            self._store_terminal_result(file_hash, report, scan_owner=scan_owner)
             return
         key = config["xspct_redis_cache"]["prefix"] + file_hash
         expire = int(config["xspct_redis_cache"]["expire"])
@@ -2617,18 +2707,23 @@ class InspectorDaemon:
                     return
             self._redis_reset_errors(s)
             self._redis_authoritative_hashes.add(file_hash)
-            self._store_terminal_result(file_hash, report)
+            self._store_terminal_result(file_hash, report, scan_owner=scan_owner)
             logger.info("%s - cached report for %s (TTL %ds)", s, file_hash, expire)
         except Exception as exc:
             self._redis_record_error(s, exc)
-            self._store_terminal_result(file_hash, report)
+            self._store_terminal_result(file_hash, report, scan_owner=scan_owner)
 
-    def _store_terminal_result(self, file_hash: str, result: dict) -> None:
+    def _store_terminal_result(
+        self, file_hash: str, result: dict, *, scan_owner: "str | None" = None
+    ) -> None:
         """Persist a terminal in-memory result for subsequent /query lookups."""
+        if scan_owner is not None and self._scan_owners.get(file_hash) != scan_owner:
+            return
         self.tasks[file_hash] = result
         self.tasks.move_to_end(file_hash)
         self._evict_tasks()
         self._partials.pop(file_hash, None)  # partial no longer needed
+        self._scan_owners.pop(file_hash, None)
 
     def _make_terminal_error_result(
         self, file_hash: str, message: str = "Internal server error"
@@ -2640,10 +2735,35 @@ class InspectorDaemon:
             "error": message,
         }
 
+    def _release_scan_state(self, file_hash: str, scan_owner: "str | None") -> None:
+        """Drop the progress state of a scan that will never produce a report.
+
+        Normally :meth:`_store_terminal_result` clears these, but a scan that
+        is cancelled before it finishes never gets there. ``_partials`` holds
+        whatever the analyzers accumulated, so leaving entries behind leaks
+        memory that :meth:`_evict_tasks` does not bound.
+
+        A ``scan_owner`` that no longer matches means a newer same-hash scan
+        has taken over; its state must survive, so this is then a no-op.
+        """
+        if scan_owner is not None and self._scan_owners.get(file_hash) != scan_owner:
+            return
+        self._partials.pop(file_hash, None)
+        self._scan_owners.pop(file_hash, None)
+
     def _evict_tasks(self) -> None:
         while len(self.tasks) > self._TASKS_MAX_SIZE:
-            file_hash, _ = self.tasks.popitem(last=False)
+            file_hash, entry = self.tasks.popitem(last=False)
             self._redis_authoritative_hashes.discard(file_hash)
+            if isinstance(entry, asyncio.Task) and not entry.done():
+                # Still running: it will publish through the scan_owner check
+                # in cache_report()/_store_terminal_result() and clear its own
+                # state there. Dropping the owner token now would make the
+                # scan look superseded, so its report would be discarded.
+                continue
+            # Terminal or cancelled — nothing will ever read this progress.
+            self._partials.pop(file_hash, None)
+            self._scan_owners.pop(file_hash, None)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -8500,6 +8620,50 @@ class InspectorDaemon:
 
         return v2
 
+    def _to_v2_partial_report(
+        self,
+        partial: PartialReport,
+        status: str,
+        time_taken: "float | None" = None,
+        message: "str | None" = None,
+    ) -> dict:
+        """Wrap a still-running/aborted scan's v1-internal snapshot in the v2 schema.
+
+        Used by the ``202`` (``processing``/``dropped``) responses and the
+        ``/v1/query`` still-running poll — the only response paths that
+        serialize a report before :meth:`analyze_task` has run it through
+        :meth:`_to_v2_report`.
+
+        Args:
+            partial:     In-flight partial report with source-file metadata.
+            status:      ``'processing'`` or ``'dropped'``.
+            time_taken:  Elapsed seconds for this request so far, if meaningful
+                (omitted for a bare ``/v1/query`` poll, which has none).
+            message:     Optional human-readable status message.
+
+        Returns:
+            A v2-schema dict with top-level ``status``/``file_hash``/``time_taken``
+            kept for backward-compatible client polling.
+        """
+        snap = partial.snapshot()
+        snap["status"] = status
+        if time_taken is not None:
+            snap["time_taken"] = time_taken
+        v2 = self._to_v2_report(
+            snap,
+            snap.get("filename", ""),
+            partial.filesize,
+            sha1=partial.sha1,
+            rspamd_digest=partial.rspamd_digest,
+        )
+        v2["status"] = status
+        v2["file_hash"] = snap.get("file_hash", "")
+        if time_taken is not None:
+            v2["time_taken"] = time_taken
+        if message:
+            v2["message"] = message
+        return v2
+
     async def analyze_pipeline(
         self,
         s: str,
@@ -8510,6 +8674,9 @@ class InspectorDaemon:
         custom_passwords: "list | None" = None,
         types_to_run: "list | None" = None,
         force_analyzers: "frozenset | None" = None,
+        *,
+        digests: "tuple[str, str] | None" = None,
+        partial: "PartialReport | None" = None,
     ) -> PartialReport:
         """Run analyzers in parallel and return a populated :class:`PartialReport`.
 
@@ -8586,13 +8753,23 @@ class InspectorDaemon:
         if signature_enabled:
             pending.append("signature")
 
-        base = self._make_base_report(filename, file_hash, file_mime, file_desc)
-        base["analyzers_completed"] = []
-        base["analyzers_pending"] = list(pending)
-        partial = PartialReport(base, pending)
-
-        # Register so handle_scan() can read the partial on timeout.
-        self._partials[file_hash] = partial
+        if partial is None:
+            base = self._make_base_report(filename, file_hash, file_mime, file_desc)
+            base["analyzers_completed"] = []
+            base["analyzers_pending"] = list(pending)
+            _sha1, _rspamd = digests if digests is not None else _extra_digests(data)
+            partial = PartialReport(
+                base,
+                pending,
+                filesize=len(data),
+                sha1=_sha1,
+                rspamd_digest=_rspamd,
+            )
+            # Direct callers do not supply an initial progress report.
+            self._partials[file_hash] = partial
+        else:
+            partial._pending[:] = pending
+            partial._report["analyzers_pending"] = list(pending)
 
         loop = asyncio.get_running_loop()
 
@@ -8871,6 +9048,9 @@ class InspectorDaemon:
         types_to_run: "list | None" = None,
         force_analyzers: "frozenset | None" = None,
         *,
+        digests: "tuple[str, str] | None" = None,
+        partial: "PartialReport | None" = None,
+        scan_owner: "str | None" = None,
         cache_generation: int = 0,
     ) -> dict:
         """Run :meth:`analyze_pipeline` and cache the final report.
@@ -8903,6 +9083,8 @@ class InspectorDaemon:
             custom_passwords,
             types_to_run,
             force_analyzers,
+            digests=digests,
+            partial=partial,
         )
         report = partial.report
         _elapsed = time.monotonic() - _t0
@@ -8959,13 +9141,17 @@ class InspectorDaemon:
         )
 
         # Transform v1 internal report → v2 output schema before caching.
-        _sha1 = hashlib.sha1(data).hexdigest()  # noqa: S324  (non-security use)
-        _rdigest = _rspamd_digest(data)
         v2_report = self._to_v2_report(
-            report, filename, len(data), sha1=_sha1, rspamd_digest=_rdigest
+            report,
+            filename,
+            partial.filesize,
+            sha1=partial.sha1,
+            rspamd_digest=partial.rspamd_digest,
         )
         v2_report["status"] = "finished"
-        await self.cache_report(s, file_hash, v2_report, cache_generation)
+        await self.cache_report(
+            s, file_hash, v2_report, cache_generation, scan_owner=scan_owner
+        )
         return v2_report
 
     # ------------------------------------------------------------------
@@ -8997,10 +9183,12 @@ class InspectorDaemon:
             logger.debug("%s - background scan cancelled for %s", s, file_hash)
         except Exception as exc:
             stats["background_errors"] += 1
-            self._store_terminal_result(
-                file_hash,
-                self._make_terminal_error_result(file_hash),
-            )
+            scan_owner = getattr(scan_task, "_xspct_scan_owner", None)
+            if scan_owner is None or self._scan_owners.get(file_hash) == scan_owner:
+                self._store_terminal_result(
+                    file_hash,
+                    self._make_terminal_error_result(file_hash),
+                )
             logger.exception(
                 "%s - background scan raised for %s: %s", s, file_hash, exc
             )
@@ -9707,7 +9895,23 @@ class InspectorDaemon:
                     )
                     stats["requests_deduped"] += 1
                     task = existing_task
+                    partial = self._partials.get(file_hash)
                 else:
+                    file_digests = _extra_digests(filedata)
+                    scan_owner = secrets.token_hex(16)
+                    # Query has only a content hash, so a deliberately fresh
+                    # same-hash scan becomes the latest public owner.
+                    partial = PartialReport(
+                        self._make_base_report(
+                            filename, file_hash, file_mime, file_desc
+                        ),
+                        [],
+                        filesize=len(filedata),
+                        sha1=file_digests[0],
+                        rspamd_digest=file_digests[1],
+                    )
+                    self._scan_owners[file_hash] = scan_owner
+                    self._partials[file_hash] = partial
                     task = asyncio.create_task(
                         self.analyze_task(
                             s,
@@ -9719,9 +9923,13 @@ class InspectorDaemon:
                             custom_passwords,
                             list(types_to_run),
                             force_analyzers,
+                            digests=file_digests,
+                            partial=partial,
+                            scan_owner=scan_owner,
                             cache_generation=cache_generation,
                         )
                     )
+                    task._xspct_scan_owner = scan_owner
                     self.tasks[file_hash] = task
                     self.tasks.move_to_end(file_hash)
                     self._evict_tasks()
@@ -9761,21 +9969,29 @@ class InspectorDaemon:
                             s,
                             filename,
                         )
-                        partial = self._partials.get(file_hash)
-                        resp: dict = {
-                            "status": "dropped",
-                            "file_hash": file_hash,
-                            "message": "Analysis dropped: background queue full",
-                            "time_taken": round(time.monotonic() - start_time, 4),
-                        }
-                        if partial:
-                            snap = partial.snapshot()
-                            snap.update(resp)
-                            return self._build_response(
-                                _attach_correlation(snap), request, status=202
+                        _dropped_msg = "Analysis dropped: background queue full"
+                        _time_taken = round(time.monotonic() - start_time, 4)
+                        if partial is None:
+                            _dropped_digests = _extra_digests(filedata)
+                            partial = PartialReport(
+                                self._make_base_report(
+                                    filename, file_hash, file_mime, file_desc
+                                ),
+                                [],
+                                filesize=len(filedata),
+                                sha1=_dropped_digests[0],
+                                rspamd_digest=_dropped_digests[1],
                             )
+                        v2 = self._to_v2_partial_report(
+                            partial, "dropped", _time_taken, message=_dropped_msg
+                        )
+                        # The task was just cancelled, so it will never reach
+                        # _store_terminal_result to clear its own state.
+                        self._release_scan_state(
+                            file_hash, getattr(task, "_xspct_scan_owner", None)
+                        )
                         return self._build_response(
-                            _attach_correlation(resp), request, status=202
+                            _attach_correlation(v2), request, status=202
                         )
 
                     # Background slot acquired — release foreground slot now.
@@ -9787,21 +10003,24 @@ class InspectorDaemon:
                     asyncio.create_task(self._finalize_background(s, file_hash, task))
                     bg_acquired = False  # ownership transferred
 
-                    partial = self._partials.get(file_hash)
-                    snap_resp: dict = {
-                        "status": "processing",
-                        "file_hash": file_hash,
-                        "message": "Analysis is continuing in background",
-                        "time_taken": round(time.monotonic() - start_time, 4),
-                    }
-                    if partial:
-                        snap = partial.snapshot()
-                        snap.update(snap_resp)
-                        return self._build_response(
-                            _attach_correlation(snap), request, status=202
+                    _processing_msg = "Analysis is continuing in background"
+                    _time_taken = round(time.monotonic() - start_time, 4)
+                    if partial is None:
+                        _timeout_digests = _extra_digests(filedata)
+                        partial = PartialReport(
+                            self._make_base_report(
+                                filename, file_hash, file_mime, file_desc
+                            ),
+                            [],
+                            filesize=len(filedata),
+                            sha1=_timeout_digests[0],
+                            rspamd_digest=_timeout_digests[1],
                         )
+                    v2 = self._to_v2_partial_report(
+                        partial, "processing", _time_taken, message=_processing_msg
+                    )
                     return self._build_response(
-                        _attach_correlation(snap_resp), request, status=202
+                        _attach_correlation(v2), request, status=202
                     )
 
             finally:
@@ -9895,10 +10114,14 @@ class InspectorDaemon:
                     # Task still running — return partial report if available.
                     partial = self._partials.get(file_hash)
                     if partial:
-                        snap = partial.snapshot()
-                        snap["status"] = "processing"
-                        return self._build_response(snap, request)
-                    return self._build_response({"status": "processing"}, request)
+                        v2 = self._to_v2_partial_report(partial, "processing")
+                        return self._build_response(v2, request)
+                    partial = PartialReport(
+                        self._make_base_report("", file_hash, None, None), []
+                    )
+                    return self._build_response(
+                        self._to_v2_partial_report(partial, "processing"), request
+                    )
             if isinstance(result, dict) and result.get("status") == "error":
                 return self._build_response(result, request)
             if file_hash in self._redis_authoritative_hashes:

@@ -303,11 +303,27 @@ async def _poll_result(
             ) as resp:
                 if resp.status == 200:
                     body = await resp.json(content_type=None)
-                    return _normalize_result_payload(body)
-                # 404 → still processing; keep polling
+                    if not isinstance(body, dict):
+                        _print_error(
+                            f"{base_url}/v1/query returned a "
+                            f"{type(body).__name__}, expected a JSON object"
+                        )
+                        return None
+                    # /v1/query answers 200 for an in-flight scan too, with
+                    # status "processing" and a partial report. Only a
+                    # terminal status ends the loop — returning on the bare
+                    # 200 would hand back an unfinished report as the result.
+                    if body.get("status") != "processing":
+                        return _normalize_result_payload(body)
+                # 404 → not found yet; keep polling
         except aiohttp.ClientError:
             pass
-    _print_error(f"Polling timed out for hash {file_hash}")
+    # Deliberately no partial result here: an unfinished report must not be
+    # mistaken for a verdict, so the caller reports failure instead.
+    _print_error(
+        f"Polling timed out for hash {file_hash} — the scan is still running. "
+        "Query the hash again later, or raise --poll-interval."
+    )
     return None
 
 

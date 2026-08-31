@@ -8,6 +8,7 @@ import hashlib
 import os
 
 import pytest
+from aiohttp import FormData
 
 import xspct_scan.daemon as xspct
 from tests.conftest import (
@@ -285,12 +286,133 @@ class TestTwoTierConcurrency:
             assert r.status == 202
             body = await r.json()
             assert body.get("status") == "dropped"
+            assert body["schema_version"] == xspct._REPORT_SCHEMA_VERSION
+            assert body["file"]["sha256"] == hashlib.sha256(PDF_CLEAN).hexdigest()
+            assert body["file"]["size"] == len(PDF_CLEAN)
+            assert body["scan"]["status"] == "dropped"
         finally:
             for _ in range(n_bg):
                 daemon._bg_sem.release()
             xspct.config["xspct_foreground_slots"] = 16
             xspct.config["xspct_background_slots"] = 4
         assert xspct.stats["background_rejected"] > before
+
+    async def test_dropped_scans_do_not_leak_progress_state(
+        self, aiohttp_client, monkeypatch
+    ):
+        """A dropped scan is cancelled, so it never clears its own state.
+
+        _partials holds whatever the analyzers accumulated and _evict_tasks
+        bounds only self.tasks, so leaving entries behind grows without limit
+        under exactly the overload the drop path exists to handle.
+        """
+        xspct.config["xspct_foreground_slots"] = 2
+        xspct.config["xspct_background_slots"] = 1
+        app = await xspct.make_app()
+        client = await aiohttp_client(app)
+        daemon = app["daemon"]
+
+        n_bg = daemon._bg_sem._value
+        for _ in range(n_bg):
+            await daemon._bg_sem.acquire()
+
+        async def _slow(*args, **kwargs):
+            await asyncio.sleep(60)
+            return {}
+
+        monkeypatch.setattr(daemon, "analyze_task", _slow)
+        try:
+            for i in range(5):
+                payload = b"%PDF-1.4\n" + bytes([i]) * 64 + b"\n%%EOF\n"
+                r = await client.post(
+                    "/v1/scan?timeout=0.1", data=_form(payload, f"drop{i}.pdf")
+                )
+                assert r.status == 202
+                assert (await r.json())["status"] == "dropped"
+
+            assert daemon._partials == {}
+            assert daemon._scan_owners == {}
+        finally:
+            for _ in range(n_bg):
+                daemon._bg_sem.release()
+            xspct.config["xspct_foreground_slots"] = 16
+            xspct.config["xspct_background_slots"] = 4
+
+    async def test_evict_tasks_drops_orphaned_progress_state(self):
+        """Evicting a terminal entry must not strand its partial in _partials."""
+        daemon = xspct.InspectorDaemon()
+        max_tasks = daemon._TASKS_MAX_SIZE
+        for i in range(max_tasks + 3):
+            file_hash = f"{i:064x}"
+            daemon.tasks[file_hash] = {"status": "finished"}
+            daemon._partials[file_hash] = object()
+            daemon._scan_owners[file_hash] = f"owner-{i}"
+        daemon._evict_tasks()
+
+        assert len(daemon.tasks) == max_tasks
+        # Every hash that fell out of tasks took its progress state with it.
+        assert set(daemon._partials) == set(daemon.tasks)
+        assert set(daemon._scan_owners) == set(daemon.tasks)
+
+    async def test_evict_tasks_keeps_owner_of_a_still_running_scan(self):
+        """An evicted live task must still be able to publish its report.
+
+        Eviction only means the LRU forgot the entry — the coroutine keeps
+        running. Dropping its owner token would make the scan_owner check in
+        cache_report()/_store_terminal_result() read as "superseded", so a
+        completed analysis would be silently discarded and /v1/query would
+        answer 404 for a scan the caller already got a 202 for.
+        """
+        daemon = xspct.InspectorDaemon()
+        live_hash = "a" * 64
+        owner = "owner-live"
+
+        async def _never():
+            await asyncio.sleep(60)
+
+        live = asyncio.ensure_future(_never())
+        try:
+            daemon.tasks[live_hash] = live
+            daemon._scan_owners[live_hash] = owner
+            daemon._partials[live_hash] = object()
+
+            for i in range(daemon._TASKS_MAX_SIZE + 1):
+                daemon.tasks[f"{i:064x}"] = {"status": "finished"}
+            daemon._evict_tasks()
+
+            assert live_hash not in daemon.tasks  # evicted from the LRU
+            assert daemon._scan_owners.get(live_hash) == owner  # but still owns it
+
+            report = {"status": "finished", "file_hash": live_hash}
+            daemon._store_terminal_result(live_hash, report, scan_owner=owner)
+            assert daemon.tasks.get(live_hash) == report
+            # Publishing clears the state it was holding.
+            assert live_hash not in daemon._partials
+            assert live_hash not in daemon._scan_owners
+        finally:
+            live.cancel()
+
+    async def test_evict_tasks_drops_state_of_a_finished_task(self):
+        """A task that already completed holds nothing worth keeping."""
+        daemon = xspct.InspectorDaemon()
+        done_hash = "b" * 64
+
+        async def _done():
+            return None
+
+        finished = asyncio.ensure_future(_done())
+        await finished
+
+        daemon.tasks[done_hash] = finished
+        daemon._scan_owners[done_hash] = "owner-done"
+        daemon._partials[done_hash] = object()
+
+        for i in range(daemon._TASKS_MAX_SIZE + 1):
+            daemon.tasks[f"{i:064x}"] = {"status": "finished"}
+        daemon._evict_tasks()
+
+        assert done_hash not in daemon._partials
+        assert done_hash not in daemon._scan_owners
 
     async def test_timeout_promotes_to_background_when_slot_available(
         self, aiohttp_client, monkeypatch
@@ -327,11 +449,110 @@ class TestTwoTierConcurrency:
             assert r.status == 202
             body = await r.json()
             assert body.get("status") == "processing"
+            assert body["schema_version"] == xspct._REPORT_SCHEMA_VERSION
+            assert body["file"]["sha256"] == hashlib.sha256(PDF_CLEAN).hexdigest()
+            assert body["file"]["size"] == len(PDF_CLEAN)
+            assert body["scan"]["status"] == "processing"
             await asyncio.wait_for(finalized.wait(), timeout=1)
             assert daemon._bg_sem._value == 1
         finally:
             xspct.config["xspct_foreground_slots"] = 16
             xspct.config["xspct_background_slots"] = 4
+
+    async def test_timeout_with_real_partial_returns_v2_shape(
+        self, aiohttp_client, monkeypatch
+    ):
+        """202/processing for a genuinely in-flight scan must be v2, not the raw
+        v1-internal partial report (regression test)."""
+        xspct.config["xspct_foreground_slots"] = 1
+        xspct.config["xspct_background_slots"] = 1
+        app = await xspct.make_app()
+        client = await aiohttp_client(app)
+        daemon = app["daemon"]
+        finalize = asyncio.Event()
+
+        async def _slow_pipeline(
+            s,
+            filename,
+            data,
+            file_mime,
+            file_desc=None,
+            custom_passwords=None,
+            types_to_run=None,
+            force_analyzers=None,
+            **kwargs,
+        ):
+            partial = kwargs["partial"]
+            partial._pending[:] = ["clamav"]
+            partial.report["analyzers_pending"] = ["clamav"]
+            await asyncio.Event().wait()
+            return partial
+
+        async def _finalize_background(s, file_hash, task):
+            await finalize.wait()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            daemon._bg_sem.release()
+
+        monkeypatch.setattr(daemon, "analyze_pipeline", _slow_pipeline)
+        monkeypatch.setattr(daemon, "_finalize_background", _finalize_background)
+        try:
+            r = await client.post(
+                "/v1/scan?timeout=0.1",
+                data=_form(PDF_CLEAN, "slow.pdf"),
+            )
+            assert r.status == 202
+            body = await r.json()
+            assert body.get("status") == "processing"
+            assert body.get("schema_version") == xspct._REPORT_SCHEMA_VERSION
+            assert body.get("file", {}).get("sha256")
+            assert body["file"]["size"] == len(PDF_CLEAN)
+            assert body["scan"]["analyzers"]["pending"] == ["clamav"]
+            # v1-internal keys must never leak into the v2 response
+            assert "analyzer_timings" not in body
+            assert "text_segments" not in body
+
+            query = await client.get(f"/v1/query?hash={body['file_hash']}")
+            assert query.status == 200
+            query_body = await query.json()
+            assert query_body["schema_version"] == xspct._REPORT_SCHEMA_VERSION
+            assert query_body["file"]["size"] == len(PDF_CLEAN)
+            assert query_body["file"]["sha256"] == body["file_hash"]
+            assert query_body["file"]["sha1"] == hashlib.sha1(PDF_CLEAN).hexdigest()
+            assert query_body["file"]["rspamd_digest"]
+            assert query_body["scan"]["status"] == "processing"
+        finally:
+            finalize.set()
+            xspct.config["xspct_foreground_slots"] = 16
+            xspct.config["xspct_background_slots"] = 4
+
+    async def test_query_in_flight_without_partial_returns_v2(self, aiohttp_client):
+        """A defensive in-flight query fallback must still use the v2 envelope."""
+        app = await xspct.make_app()
+        client = await aiohttp_client(app)
+        daemon = app["daemon"]
+        file_hash = hashlib.sha256(PDF_CLEAN).hexdigest()
+        wait = asyncio.Event()
+
+        async def _slow() -> None:
+            await wait.wait()
+
+        task = asyncio.create_task(_slow())
+        daemon.tasks[file_hash] = task
+        try:
+            response = await client.get(f"/v1/query?hash={file_hash}")
+            assert response.status == 200
+            body = await response.json()
+            assert body["schema_version"] == xspct._REPORT_SCHEMA_VERSION
+            assert body["status"] == "processing"
+            assert body["file"]["sha256"] == file_hash
+            assert body["scan"]["status"] == "processing"
+        finally:
+            wait.set()
+            await task
 
     async def test_duplicate_scan_attaches_to_in_flight_task(
         self, aiohttp_client, monkeypatch
@@ -374,6 +595,82 @@ class TestTwoTierConcurrency:
         finally:
             release.set()
             await asyncio.sleep(0.05)
+
+    async def test_fresh_same_hash_scan_keeps_latest_query_owner(
+        self, aiohttp_client, monkeypatch
+    ):
+        """A fresh scan must not let an older same-hash task replace /query."""
+        xspct.config["xspct_foreground_slots"] = 2
+        xspct.config["xspct_background_slots"] = 2
+        app = await xspct.make_app()
+        client = await aiohttp_client(app)
+        daemon = app["daemon"]
+        first_started = asyncio.Event()
+        first_release = asyncio.Event()
+        second_started = asyncio.Event()
+        second_release = asyncio.Event()
+
+        async def _controlled_pipeline(*args, **kwargs):
+            partial = kwargs["partial"]
+            passwords = args[5]
+            if passwords == ["first"]:
+                first_started.set()
+                await first_release.wait()
+            else:
+                second_started.set()
+                await second_release.wait()
+            return partial
+
+        def _upload(filename, password):
+            form = FormData()
+            form.add_field("doc", PDF_CLEAN, filename=filename)
+            form.add_field("passwords", password)
+            return form
+
+        def _terminal_report(payload):
+            return payload.get("result") or payload.get("report") or payload
+
+        monkeypatch.setattr(daemon, "analyze_pipeline", _controlled_pipeline)
+        file_hash = hashlib.sha256(PDF_CLEAN).hexdigest()
+        try:
+            first_request = asyncio.create_task(
+                client.post("/v1/scan?timeout=0.01", data=_upload("first.pdf", "first"))
+            )
+            await asyncio.wait_for(first_started.wait(), timeout=1)
+            first_task = daemon.tasks[file_hash]
+            first_response = await first_request
+            assert first_response.status == 202
+
+            second_response = await client.post(
+                "/v1/scan?timeout=0.01", data=_upload("second.pdf", "second")
+            )
+            assert second_response.status == 202
+            await asyncio.wait_for(second_started.wait(), timeout=1)
+            second_task = daemon.tasks[file_hash]
+            assert second_task is not first_task
+
+            second_release.set()
+            await second_task
+            latest_query = await client.get(f"/v1/query?hash={file_hash}")
+            assert (
+                _terminal_report(await latest_query.json())["file"]["name"]
+                == "second.pdf"
+            )
+
+            first_release.set()
+            await first_task
+            query_after_old_completion = await client.get(f"/v1/query?hash={file_hash}")
+            assert (
+                _terminal_report(await query_after_old_completion.json())["file"][
+                    "name"
+                ]
+                == "second.pdf"
+            )
+        finally:
+            first_release.set()
+            second_release.set()
+            xspct.config["xspct_foreground_slots"] = 16
+            xspct.config["xspct_background_slots"] = 4
 
     async def test_background_failure_becomes_stable_query_error(
         self, aiohttp_client, monkeypatch

@@ -3,6 +3,9 @@
 
 """/v1/capabilities and OpenAPI endpoint tests."""
 
+import json
+import re
+
 import pytest
 
 import xspct_scan.daemon as xspct
@@ -335,7 +338,45 @@ class TestOpenApiEndpoints:
         r = await client.get("/v1/openapi.json")
         assert r.status in (200, 501, 503)  # 503 when pydantic not installed
 
+    async def test_openapi_every_ref_resolves(self, client):
+        """A $ref that points nowhere breaks validators, codegen and ReDoc.
 
-# ===========================================================================
-# UNIT TESTS — verify_admin_key
-# ===========================================================================
+        pydantic emits nested models under a model-local "$defs"; the spec
+        builder has to hoist those definitions *and* repoint their refs.
+        """
+        if not xspct.HAS_PYDANTIC:
+            pytest.skip("pydantic not installed")
+        r = await client.get("/v1/openapi.json")
+        spec = await r.json()
+
+        schemas = spec["components"]["schemas"]
+        refs = set(re.findall(r'"\$ref":\s*"([^"]+)"', json.dumps(spec)))
+        assert refs, "spec has no $refs — the check would be vacuous"
+
+        unresolvable = sorted(
+            ref
+            for ref in refs
+            if not ref.startswith("#/components/schemas/")
+            or ref.rsplit("/", 1)[-1] not in schemas
+        )
+        assert not unresolvable, f"unresolvable $refs: {unresolvable}"
+
+    async def test_openapi_query_response_is_not_ambiguous_oneof(self, client):
+        """A processing body matches both branches, so oneOf can never hold.
+
+        QueryResponse requires only "status" and allows extra properties.
+        """
+        if not xspct.HAS_PYDANTIC:
+            pytest.skip("pydantic not installed")
+        r = await client.get("/v1/openapi.json")
+        spec = await r.json()
+
+        for method in ("get", "post"):
+            schema = spec["paths"]["/v1/query"][method]["responses"]["200"]["content"][
+                "application/json"
+            ]["schema"]
+            assert "oneOf" not in schema, f"/v1/query {method} uses ambiguous oneOf"
+            assert [ref["$ref"].rsplit("/", 1)[-1] for ref in schema["anyOf"]] == [
+                "ProcessingResponse",
+                "QueryResponse",
+            ]

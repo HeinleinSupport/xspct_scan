@@ -50,6 +50,30 @@
   `quantize_per_tensor`/`quantize_per_channel` API, triggered by EasyOCR's
   quantized recognition network at reader init (once per process, not
   per-scan; not actionable on our side).
+- The `202 Accepted` responses for a scan that timed out and moved to
+  background (`status: "processing"`), a scan dropped due to a full
+  background queue (`status: "dropped"`), and the still-running case of
+  `GET|POST /v1/query` were returning the raw v1-internal partial report
+  instead of the v2 schema. All three now go through the same
+  `schema_version`/`file`/`scan` v2 shape as the finished report, keeping
+  top-level `status`/`file_hash`/`message`/`time_taken` for
+  backward-compatible client polling. The flat `analyzers_completed` /
+  `analyzers_pending` fields of the old `202` body are now
+  `scan.analyzers.completed` / `scan.analyzers.pending`.
+- `xspct_scan_client --poll` returned as soon as `/v1/query` answered
+  `200`, but that status is also used for a still-running scan, so the
+  first poll handed back an unfinished report as the result. It now
+  keeps polling until `status` is no longer `processing`.
+- A scan dropped because the background queue was full left its
+  `PartialReport` and owner token behind: the task is cancelled, so it
+  never reaches the terminal-result path that clears them, and task
+  eviction bounded only the task map. Both are now released on the drop
+  path, and when a task is evicted after it has finished or been cancelled.
+  A still-running scan keeps its owner token through eviction so it can
+  still publish its report.
+- `/v1/openapi.json` emitted unresolvable `#/$defs/...` references for
+  every nested model; they now point into `components/schemas`, which
+  also collapses the duplicate `_Name`/`Name` schema entries.
 
 ## 0.7.1 — 2026-08-28
 

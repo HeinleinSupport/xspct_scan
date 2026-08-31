@@ -236,3 +236,101 @@ def test_short_option_aliases_are_unique_and_stable() -> None:
         if len(option) == 2
     ]
     assert len(shorts) == len(set(shorts))
+
+
+class _PollResponse:
+    """Minimal aiohttp response stub for _poll_result."""
+
+    def __init__(self, status: int, body: object) -> None:
+        self.status = status
+        self._body = body
+
+    async def json(self, content_type: object = None) -> object:
+        return self._body
+
+    async def __aenter__(self) -> "_PollResponse":
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+class _PollSession:
+    """Serves a scripted sequence of /v1/query responses."""
+
+    def __init__(self, responses: list) -> None:
+        self._responses = list(responses)
+        self.calls = 0
+
+    def get(self, *args: object, **kwargs: object) -> _PollResponse:
+        self.calls += 1
+        status, body = self._responses.pop(0)
+        return _PollResponse(status, body)
+
+
+async def test_poll_result_keeps_polling_while_processing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """/v1/query answers 200 for an in-flight scan, not 404.
+
+    Returning on the first 200 handed back an unfinished report as if it were
+    the final result.
+    """
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(xspct_client.asyncio, "sleep", no_sleep)
+
+    finished = {"status": "finished", "report": {"verdict": {"score": 7}}}
+    session = _PollSession(
+        [
+            (200, {"status": "processing", "file_hash": "a" * 64}),
+            (404, {"status": "not_found"}),
+            (200, {"status": "processing", "file_hash": "a" * 64}),
+            (200, finished),
+        ]
+    )
+
+    result = await xspct_client._poll_result(session, "http://d", "a" * 64, {}, 0.0)
+
+    assert session.calls == 4
+    assert result == {"verdict": {"score": 7}, "status": "finished"}
+
+
+async def test_poll_result_returns_none_when_never_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout must not pass a partial report off as the verdict."""
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(xspct_client.asyncio, "sleep", no_sleep)
+
+    processing = (200, {"status": "processing", "file_hash": "b" * 64})
+    session = _PollSession([processing] * 3)
+
+    result = await xspct_client._poll_result(
+        session, "http://d", "b" * 64, {}, 0.0, max_attempts=3
+    )
+
+    assert result is None
+    assert session.calls == 3
+
+
+async def test_poll_result_rejects_non_object_body(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A 200 carrying a JSON array must not reach the dict-only normalizer."""
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(xspct_client.asyncio, "sleep", no_sleep)
+    session = _PollSession([(200, ["unexpected"])])
+
+    result = await xspct_client._poll_result(session, "http://d", "c" * 64, {}, 0.0)
+
+    assert result is None
+    assert "expected a JSON object" in capsys.readouterr().err

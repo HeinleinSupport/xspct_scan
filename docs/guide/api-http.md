@@ -339,19 +339,47 @@ PDF/PAdES). Pure detection: never affects `verdict.score`/`severity`.
 | `timestamp` | string | ISO-8601 UTC signing time, when available (otherwise omitted) |
 
 **Response `202 Accepted`** — analysis still running (timeout exceeded).
-The partial report snapshot is returned alongside bookkeeping fields.
-Poll `/v1/query?hash=<sha256>` for the finished v2 report.
+The partial snapshot uses the same v2 envelope as a finished report, so the
+same parser handles both. `scan.analyzers.pending` is non-empty and sections
+fed by unfinished analyzers (`findings`, `iocs`, `verdict`) are empty or
+absent — treat it as progress, never as a verdict. The top-level `status`,
+`file_hash`, `message` and `time_taken` fields are kept for polling clients.
+Poll `/v1/query?hash=<sha256>` until `status` is no longer `"processing"`.
 
 ```json
 {
+  "schema_version": "2.0",
+  "engine": { "name": "xspct_scan", "version": "0.7.1" },
+  "file": {
+    "name": "invoice.docx",
+    "sha256": "sha256hex...",
+    "size": 20480,
+    "type": "office"
+  },
+  "scan": {
+    "status": "processing",
+    "duration_s": 10.0,
+    "cache_hit": false,
+    "analyzers": {
+      "completed": ["office"],
+      "pending": ["iocs", "yara"],
+      "timings_s": {}
+    }
+  },
+  "verdict": { "score": null, "severity": "unknown", "labels": [] },
   "status": "processing",
   "file_hash": "sha256hex...",
-  "message": "Analysis is continuing in background",
   "time_taken": 10.0,
-  "analyzers_completed": ["office"],
-  "analyzers_pending": ["iocs", "yara"]
+  "message": "Analysis is continuing in background"
 }
 ```
+
+A scan rejected because the background queue was full uses the same envelope
+with `status` and `scan.status` set to `"dropped"`.
+
+> **Changed in 0.7.2** — this body previously carried the raw v1-internal
+> partial report with flat `analyzers_completed` / `analyzers_pending` keys.
+> Those now live at `scan.analyzers.completed` / `scan.analyzers.pending`.
 
 **Response `400 Bad Request`** — no `doc` field in the request.
 
@@ -395,7 +423,25 @@ xspct_scan_client --query sha256hex...
 }
 ```
 
-When the scan is still running: `{"status": "processing"}` (partial fields included).
+**Response `200 OK`, scan still running** — *not* wrapped in `{status, report}`.
+The partial snapshot is returned directly, in the same v2 envelope as the
+`202` above, with top-level `status: "processing"`:
+
+```json
+{
+  "schema_version": "2.0",
+  "file": { "sha256": "sha256hex...", "size": 20480, "type": "office" },
+  "scan": {
+    "status": "processing",
+    "analyzers": { "completed": ["office"], "pending": ["iocs", "yara"] }
+  },
+  "status": "processing"
+}
+```
+
+Polling clients must therefore check `status` rather than the HTTP code — a
+`200` alone does not mean the scan finished. `404` means the hash is not known
+(yet); keep polling if a `202` was just received for it.
 
 **Response `404 Not Found`** — hash not in cache or in-memory results.
 
