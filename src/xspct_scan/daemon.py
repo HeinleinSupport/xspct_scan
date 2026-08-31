@@ -875,7 +875,7 @@ stats: dict = {
     "clamav_errors": 0,
     "clamav_timeouts": 0,
     # Per-analyzer timing/hit stats — populated lazily on first call.
-    # Each entry: {calls, hits, ms_total, ms_min, ms_max}
+    # Each entry: {calls, hits, ms_total, ms_min, ms_max, ms_min_window, ms_max_window}
     "analyzer_stats": {},
 }
 """Module-level runtime counters.
@@ -917,6 +917,10 @@ def _record_analyzer_stats(name: str, elapsed_ms: int, result: "dict | None") ->
             "ms_total": 0,
             "ms_min": None,
             "ms_max": 0,
+            # Reset every stats interval so the periodic log's min/max cover
+            # the same window as its avg, instead of the lifetime extremes.
+            "ms_min_window": None,
+            "ms_max_window": 0,
         },
     )
     entry["calls"] += 1
@@ -925,6 +929,12 @@ def _record_analyzer_stats(name: str, elapsed_ms: int, result: "dict | None") ->
         elapsed_ms if entry["ms_min"] is None else min(entry["ms_min"], elapsed_ms)
     )
     entry["ms_max"] = max(entry["ms_max"], elapsed_ms)
+    entry["ms_min_window"] = (
+        elapsed_ms
+        if entry["ms_min_window"] is None
+        else min(entry["ms_min_window"], elapsed_ms)
+    )
+    entry["ms_max_window"] = max(entry["ms_max_window"], elapsed_ms)
     if _is_analyzer_hit(name, result):
         entry["hits"] += 1
 
@@ -10722,25 +10732,34 @@ async def _log_stats_periodically(daemon: InspectorDaemon) -> None:
             d_hits = hits - prev["hits"]
             d_ms = ms_total - prev["ms_total"]
 
-            # Average over the new calls in this window only.
-            avg = d_ms / d_calls if d_calls else 0.0
+            # avg/min/max all cover only the new calls in this window, so
+            # they stay comparable instead of mixing a windowed avg with
+            # lifetime extremes; "-" marks an analyzer idle this interval.
+            if d_calls:
+                avg_str = f"{d_ms / d_calls:.0f}ms"
+                min_str = f"{e['ms_min_window']}ms"
+                max_str = f"{e['ms_max_window']}ms"
+            else:
+                avg_str = min_str = max_str = "-"
             pct = d_hits / d_calls * 100 if d_calls else 0.0
 
             logger.info(
                 "ANALYZER %-12s calls=%d(+%d) hits=%d(+%d)(%.0f%%) "
-                "time avg=%.0fms min=%dms max=%dms",
+                "time avg=%s min=%s max=%s",
                 name,
                 calls,
                 d_calls,
                 hits,
                 d_hits,
                 pct,
-                avg,
-                e["ms_min"] or 0,
-                e["ms_max"],
+                avg_str,
+                min_str,
+                max_str,
             )
 
             _prev_az[name] = {"calls": calls, "hits": hits, "ms_total": ms_total}
+            e["ms_min_window"] = None
+            e["ms_max_window"] = 0
 
 
 # ---------------------------------------------------------------------------

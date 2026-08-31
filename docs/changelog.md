@@ -74,6 +74,12 @@
 - `/v1/openapi.json` emitted unresolvable `#/$defs/...` references for
   every nested model; they now point into `components/schemas`, which
   also collapses the duplicate `_Name`/`Name` schema entries.
+- The periodic `ANALYZER` stats log paired an average computed over only
+  the new calls since the last interval with `min`/`max` taken over the
+  analyzer's entire lifetime, so a quiet interval could show an average
+  far outside the printed min/max range. `min`/`max` are now windowed the
+  same way as the average, and all three print `-` when an analyzer had
+  no calls in the interval.
 
 ## 0.7.1 — 2026-08-28
 
