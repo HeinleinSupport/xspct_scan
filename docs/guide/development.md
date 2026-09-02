@@ -234,9 +234,14 @@ fixture skip themselves.
   this locally after touching an optional import:
 
   ```bash
-  pytest -p tests.optional_dep_blocker -q      # full suite, deps hidden
-  pytest -p tests.optional_dep_blocker -q --collect-only   # collection only
+  python -m pytest -p tests.optional_dep_blocker -q      # full suite, deps hidden
+  python -m pytest -p tests.optional_dep_blocker -q --collect-only   # collection only
   ```
+
+  Use `python -m pytest`, not the bare `pytest` console script: the `-p`
+  flag imports the plugin during argument preparsing, before pytest has
+  added the repo root to `sys.path`, and only `python -m` puts it there in
+  time for `tests.optional_dep_blocker` to resolve.
 
   The plugin hides every optional dependency behind a meta-path hook, which
   reproduces a bare install without needing one. The full run must be green —

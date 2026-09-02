@@ -4,9 +4,12 @@
 
 Not loaded automatically — activate it explicitly for the dependency-free suite:
 
-    pytest -p tests.optional_dep_blocker -q
+    python -m pytest -p tests.optional_dep_blocker -q
 
-Use ``--collect-only`` when only collection safety needs checking.
+Use ``--collect-only`` when only collection safety needs checking. Run via
+``python -m pytest``, not the bare ``pytest`` script: ``-p`` imports the
+plugin before pytest puts the repo root on ``sys.path``, and only
+``python -m`` does that in time.
 
 xspct_scan must degrade cleanly when an optional library is absent: analyzers
 skip instead of raising, and the tests covering them skip instead of failing.

@@ -99,7 +99,7 @@ jobs:
       # collection outright, before any skipif marker can apply) nor a
       # positive-path test that silently depends on an optional engine.
       - name: Run test suite with every optional dependency hidden
-        run: pytest -p tests.optional_dep_blocker -q
+        run: python -m pytest -p tests.optional_dep_blocker -q
 
   audit:
     name: Dependency Audit
