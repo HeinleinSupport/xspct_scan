@@ -7,6 +7,8 @@
 
 ## Unreleased
 
+## 0.8.0 — 2026-09-02
+
 ### Added
 - **`xspct_analyzers.image.max_images_per_document` config option** (default
   `20`) — caps the number of embedded images (PDF pages, OOXML/ODF media
