@@ -40,6 +40,15 @@
   aliases (e.g. `-u`/`--url`, `-a`/`--api-key`, `-t`/`--timeout`) for
   brevity.
 
+### Changed
+- **The Redis report key now includes the report schema version**
+  (`<prefix><schema_version>:<sha256>`). Previously an upgrade could serve an
+  old-shape report out of a warm cache for up to `expire` seconds. Entries
+  written under a previous schema now live under their own key and expire on
+  their own. A schema-version bump therefore costs one cold cache; ordinary
+  releases are unaffected. The invalidation-generation key stays unversioned —
+  it tracks invalidation, not report shape.
+
 ### Fixed
 - **ZIP fallback password handling** — the optional stdlib ZIP fallback now
   continues trying configured passwords when a ZipCrypto candidate passes its

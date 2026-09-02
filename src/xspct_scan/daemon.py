@@ -2520,7 +2520,24 @@ class InspectorDaemon:
             logger.info("%s - Redis recovered, resetting circuit-breaker", s)
             self._redis_error_count = 0
 
+    def _redis_report_key(self, file_hash: str) -> str:
+        """Return the Redis key holding the cached report for *file_hash*.
+
+        The report schema version is part of the key so an upgrade cannot serve
+        an old-shape report out of a warm cache: entries written by the previous
+        schema live under their own key and expire on their own. A schema bump
+        therefore costs one cold cache; ordinary releases keep theirs.
+        """
+        return (
+            config["xspct_redis_cache"]["prefix"]
+            + _REPORT_SCHEMA_VERSION
+            + ":"
+            + file_hash
+        )
+
     def _redis_gen_key(self, file_hash: str) -> str:
+        # Deliberately unversioned: generation counters track invalidation, not
+        # report shape, and must stay comparable across a schema change.
         return config["xspct_redis_cache"]["prefix"] + "gen:" + file_hash
 
     async def _redis_script_load(self, script: str) -> "str | None":
@@ -2577,7 +2594,7 @@ class InspectorDaemon:
         if not self._redis_enabled(s):
             stats["redis_misses"] += 1
             return None, False
-        key = config["xspct_redis_cache"]["prefix"] + file_hash
+        key = self._redis_report_key(file_hash)
         try:
             raw = await self.redis_pool.get(key)
             self._redis_reset_errors(s)
@@ -2645,7 +2662,7 @@ class InspectorDaemon:
                 "_invalidate_script_sha",
                 [
                     self._redis_gen_key(file_hash),
-                    config["xspct_redis_cache"]["prefix"] + file_hash,
+                    self._redis_report_key(file_hash),
                 ],
                 [],
             )
@@ -2693,7 +2710,7 @@ class InspectorDaemon:
         if not self._redis_enabled(s):
             self._store_terminal_result(file_hash, report, scan_owner=scan_owner)
             return
-        key = config["xspct_redis_cache"]["prefix"] + file_hash
+        key = self._redis_report_key(file_hash)
         expire = int(config["xspct_redis_cache"]["expire"])
         try:
             if cache_generation is None:

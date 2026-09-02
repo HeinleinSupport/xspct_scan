@@ -98,7 +98,7 @@ class TestRedisCache:
     async def test_cache_report_sets_ttl(self):
         report = {"hash": "b" * 64}
         await self.daemon.cache_report("s", "b" * 64, report)
-        ttl = await self.daemon.redis_pool.ttl("xspct:" + "b" * 64)
+        ttl = await self.daemon.redis_pool.ttl(self.daemon._redis_report_key("b" * 64))
         assert 0 < ttl <= 3600
 
     async def test_cache_report_also_stored_in_tasks(self):
@@ -113,7 +113,10 @@ class TestRedisCache:
         await self.daemon.invalidate_cached_report("s", file_hash)
 
         assert file_hash not in self.daemon.tasks
-        assert await self.daemon.redis_pool.get("xspct:" + file_hash) is None
+        assert (
+            await self.daemon.redis_pool.get(self.daemon._redis_report_key(file_hash))
+            is None
+        )
 
     async def test_invalidate_removes_in_memory_report_when_redis_disabled(self):
         file_hash = "m" * 64
@@ -134,7 +137,10 @@ class TestRedisCache:
         )
 
         assert file_hash not in self.daemon.tasks
-        assert await self.daemon.redis_pool.get("xspct:" + file_hash) is None
+        assert (
+            await self.daemon.redis_pool.get(self.daemon._redis_report_key(file_hash))
+            is None
+        )
         assert await self.daemon.redis_pool.ttl("xspct:gen:" + file_hash) == -1
 
     async def test_cache_miss_increments_stat(self):
@@ -158,7 +164,7 @@ class TestRedisCache:
         xspct.config["xspct_redis_cache"]["enabled"] = False
         await self.daemon.cache_report("s", "g" * 64, {"hash": "g" * 64})
         # key must not exist in fake redis
-        raw = await self.daemon.redis_pool.get("xspct:" + "g" * 64)
+        raw = await self.daemon.redis_pool.get(self.daemon._redis_report_key("g" * 64))
         assert raw is None
 
     async def test_circuit_breaker_open_returns_none(self):
@@ -219,7 +225,10 @@ class TestRedisCache:
             "s", file_hash, {"hash": file_hash}, stale_generation
         )
 
-        assert await self.daemon.redis_pool.get("xspct:" + file_hash) is None
+        assert (
+            await self.daemon.redis_pool.get(self.daemon._redis_report_key(file_hash))
+            is None
+        )
         assert file_hash not in self.daemon.tasks
 
     async def test_cross_process_fresh_write_still_cached(self):
@@ -238,7 +247,10 @@ class TestRedisCache:
             "s", file_hash, {"hash": file_hash}, fresh_generation
         )
 
-        assert await self.daemon.redis_pool.get("xspct:" + file_hash) is not None
+        assert (
+            await self.daemon.redis_pool.get(self.daemon._redis_report_key(file_hash))
+            is not None
+        )
 
     async def test_run_script_uses_evalsha_when_sha_cached(self):
         """A pre-loaded SHA is used directly, without sending the script body."""
@@ -273,7 +285,10 @@ class TestRedisCache:
         await self.daemon.cache_report("s", file_hash, {"hash": file_hash})
         await self.daemon.invalidate_cached_report("s", file_hash)
 
-        assert await self.daemon.redis_pool.get("xspct:" + file_hash) is None
+        assert (
+            await self.daemon.redis_pool.get(self.daemon._redis_report_key(file_hash))
+            is None
+        )
         assert self.daemon._invalidate_script_sha != "0" * 40
         assert self.daemon._invalidate_script_sha
         self.daemon.redis_pool.eval.assert_called_once()
