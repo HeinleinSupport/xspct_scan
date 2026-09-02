@@ -335,7 +335,7 @@ Example response (schema v2.0 — omit-empty, grouped):
   "scan":    { "status": "finished", "duration_s": 0.18, "cache_hit": false,
                "analyzers": { "completed": ["office","yara","iocs"], "pending": [],
                               "timings_s": {"office": 0.09, "yara": 0.03, "iocs": 0.01} } },
-  "verdict": { "score": null, "severity": "unknown", "labels": [], "summary": null, "contributors": {} },
+  "verdict": { "severity": "unknown", "labels": [], "contributors": {} },
   "flags":   { "macros": true },
   "iocs":    { "urls":    [{"value": "https://evil.example/payload", "source": "scanner",     "confidence": "high"}],
                "domains": [{"value": "evil.example",                 "source": "iocsearcher", "confidence": "high"}] },

@@ -1404,6 +1404,52 @@ if HAS_PYDANTIC:
                 _rewrite_refs(item)
         return node
 
+    def _strip_null_variants(node: "dict | list") -> "dict | list":
+        """Drop ``{"type": "null"}`` branches from an ``anyOf``.
+
+        ``Optional[X] = None`` is how the models express "may be absent", but
+        pydantic publishes it as ``anyOf: [X, null]`` — telling clients the
+        field may arrive as JSON null. The v2 builder never emits null: a field
+        is present with a value or omitted entirely. Publishing the weaker
+        contract is what forces consumers to null-guard every read.
+
+        Applied only to the v2 models; the legacy v1 schemas did emit nulls.
+        """
+        if isinstance(node, dict):
+            variants = node.get("anyOf")
+            if isinstance(variants, list):
+                kept = [v for v in variants if v != {"type": "null"}]
+                if len(kept) < len(variants):
+                    node.pop("anyOf")
+                    node.pop("default", None)
+                    if len(kept) == 1:
+                        node.update(kept[0])
+                    else:
+                        node["anyOf"] = kept
+            for value in node.values():
+                _strip_null_variants(value)
+        elif isinstance(node, list):
+            for item in node:
+                _strip_null_variants(item)
+        return node
+
+    # Models whose published schema must not advertise nullable fields.
+    _NON_NULLABLE_MODELS = frozenset(
+        {
+            "V2Engine",
+            "V2File",
+            "V2AnalyzerInfo",
+            "V2Scan",
+            "V2Verdict",
+            "V2IocEntry",
+            "V2Iocs",
+            "V2Finding",
+            "V2ScanReport",
+            "ProcessingResponse",
+            "QueryResponse",
+        }
+    )
+
     def _build_openapi_spec() -> dict:
         """Build and return the OpenAPI 3.0 spec dict."""
         schemas = {}
@@ -1433,8 +1479,17 @@ if HAS_PYDANTIC:
             # assembled spec, so do both — and strip the leading underscore so
             # a nested copy and a top-level model share one schema name.
             for raw_name, definition in s.pop("$defs", {}).items():
-                schemas.setdefault(_schema_name(raw_name), _rewrite_refs(definition))
-            schemas[_schema_name(model.__name__)] = _rewrite_refs(s)
+                nested = _schema_name(raw_name)
+                # Safety net only: every v2 model is listed above, so its own
+                # pass runs first and setdefault keeps that copy. This branch
+                # matters only if a model is ever reachable via $defs alone.
+                if nested in _NON_NULLABLE_MODELS:
+                    _strip_null_variants(definition)
+                schemas.setdefault(nested, _rewrite_refs(definition))
+            name = _schema_name(model.__name__)
+            if name in _NON_NULLABLE_MODELS:
+                _strip_null_variants(s)
+            schemas[name] = _rewrite_refs(s)
 
         def _ref(name: str) -> dict:
             return {"$ref": f"#/components/schemas/{name}"}
@@ -8397,10 +8452,16 @@ class InspectorDaemon:
             "sha1": sha1 or "",
             "rspamd_digest": rspamd_digest or "",
             "size": filesize,
-            "mime": v1.get("file_type") or None,
-            "magic": v1.get("file_description") or None,
-            "type": v1.get("detected_type") or "unknown",
         }
+        # Absent, never null: the response contract is that a field is either
+        # present with a meaningful value or omitted. A JSON null is hostile to
+        # consumers whose decoder turns it into a truthy sentinel (Rspamd's
+        # ucl.null, for one), forcing them to guard every read.
+        if v1.get("file_type"):
+            _file["mime"] = v1["file_type"]
+        if v1.get("file_description"):
+            _file["magic"] = v1["file_description"]
+        _file["type"] = v1.get("detected_type") or "unknown"
         # Resolution from image analysis (image_size key set by analyze_image).
         _img_size = v1.get("image_size")
         if _img_size:
@@ -8436,11 +8497,12 @@ class InspectorDaemon:
         v2["scan"] = _scan
 
         # verdict  (scoring/labels populated in a later iteration)
+        # score and summary are omitted rather than nulled until scoring exists;
+        # severity already carries "unknown", so absence is fully representable
+        # and adding real values later stays additive.
         v2["verdict"] = {
-            "score": None,
             "severity": "unknown",
             "labels": [],
-            "summary": None,
             "contributors": {},
         }
 

@@ -5,6 +5,9 @@
 
 import pytest
 
+import xspct_scan.daemon as xspct
+from tests.conftest import HTML_MALICIOUS, OOXML_DATA
+
 
 class TestGetDetectedType:
     def test_pdf_by_mime(self, daemon):
@@ -353,3 +356,246 @@ class TestMakeBaseReport:
 # ===========================================================================
 # UNIT TESTS — merge_reports (new fields)
 # ===========================================================================
+
+
+# ===========================================================================
+# CONTRACT TESTS — the v2 payload never contains a JSON null
+# ===========================================================================
+
+
+def _null_paths(node, path=""):
+    """Yield the dotted path of every ``None`` value inside *node*."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield from _null_paths(value, f"{path}.{key}" if path else str(key))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from _null_paths(value, f"{path}[{index}]")
+    elif node is None:
+        yield path or "<root>"
+
+
+def _report_matrix(daemon):
+    """Build v2 reports across the analyzer types, as ``{label: report}``.
+
+    Covers the branches of ``_to_v2_report`` that populate optional sections
+    (content, document, engines, iocs, findings) plus the paths where the
+    source values are missing entirely.
+    """
+    inputs = {
+        "pdf": (
+            b"%PDF-1.4\n/JS /JavaScript /OpenAction /Launch\n"
+            b"/URI (http://evil.example.com/stage2)\n%%EOF\n",
+            "invoice.pdf",
+            "application/pdf",
+        ),
+        "html": (HTML_MALICIOUS, "phish.html", "text/html"),
+        "office": (OOXML_DATA, "doc.docx", None),
+        "text": (
+            b"contact 10.0.0.1 or http://good.example.org/p\n",
+            "n.txt",
+            "text/plain",
+        ),
+        "script": (
+            b'Set o = CreateObject("WScript.Shell")\no.Run "calc"\n',
+            "s.vbs",
+            None,
+        ),
+        "empty": (b"", "empty.bin", None),
+        # No mime, no magic, no analyzer output — the path that used to emit
+        # file.mime = null and file.magic = null.
+        "unknown": (b"\x00\x01\x02\x03" * 32, "blob.bin", None),
+    }
+    reports = {}
+    for label, (data, filename, mime) in inputs.items():
+        v1 = daemon.sync_analyze("s", filename, data, mime)
+        reports[label] = daemon._to_v2_report(
+            v1, filename, len(data), "a" * 40, "b" * 64
+        )
+    # Same builder with the optional digests absent.
+    v1 = daemon.sync_analyze("s", "blob.bin", b"\x00" * 64, None)
+    reports["no-digests"] = daemon._to_v2_report(v1, "blob.bin", 64, None, None)
+    return reports
+
+
+class _StubPartial:
+    """Minimal PartialReport stand-in for the in-flight envelopes."""
+
+    filesize = 4096
+    sha1 = "a" * 40
+    rspamd_digest = "b" * 64
+
+    def __init__(self, daemon, pending):
+        self._daemon = daemon
+        self._pending = pending
+
+    def snapshot(self):
+        report = self._daemon._make_base_report(
+            "held.pdf", "application/pdf", None, None
+        )
+        report["file_hash"] = "c" * 64
+        report["analyzers_completed"] = []
+        report["analyzers_pending"] = list(self._pending)
+        return report
+
+    def successful(self):
+        return []
+
+
+class TestV2NullContract:
+    """Consumers must never have to guard a field against JSON null.
+
+    A null decodes to a truthy sentinel in some clients (Rspamd's ucl.null),
+    so ``if report.field then`` silently takes the wrong branch. The contract
+    is therefore: present with a meaningful value, or absent.
+    """
+
+    @pytest.mark.parametrize(
+        "label",
+        [
+            "pdf",
+            "html",
+            "office",
+            "text",
+            "script",
+            "empty",
+            "unknown",
+            "no-digests",
+        ],
+    )
+    def test_finished_report_has_no_nulls(self, daemon, label):
+        report = _report_matrix(daemon)[label]
+        nulls = sorted(_null_paths(report))
+        assert not nulls, f"{label}: null-valued fields {nulls}"
+
+    @pytest.mark.parametrize("status", ["processing", "dropped"])
+    def test_in_flight_envelope_has_no_nulls(self, daemon, status):
+        """The 202 and /v1/query still-running bodies share the same builder."""
+        partial = _StubPartial(daemon, ["clamav", "yara"])
+        envelope = daemon._to_v2_partial_report(partial, status)
+        nulls = sorted(_null_paths(envelope))
+        assert not nulls, f"{status}: null-valued fields {nulls}"
+
+    def test_in_flight_envelope_with_message_has_no_nulls(self, daemon):
+        partial = _StubPartial(daemon, ["yara"])
+        envelope = daemon._to_v2_partial_report(
+            partial, "processing", 1.5, message="still going"
+        )
+        assert not sorted(_null_paths(envelope))
+
+    def test_capabilities_has_no_nulls(self, daemon):
+        nulls = sorted(_null_paths(daemon.build_capabilities()))
+        assert not nulls, f"capabilities: null-valued fields {nulls}"
+
+    def test_flags_are_present_and_true_never_false(self, daemon):
+        """Clients read flags with plain truthiness; a false would be a trap."""
+        for label, report in _report_matrix(daemon).items():
+            for key, value in report.get("flags", {}).items():
+                if key == "decryption_password":
+                    assert isinstance(value, str) and value, f"{label}.{key}"
+                else:
+                    assert value is True, f"{label}: flags.{key} is {value!r}"
+
+    def test_verdict_severity_always_present(self, daemon):
+        """score/summary are omitted until scoring exists; severity carries it."""
+        for label, report in _report_matrix(daemon).items():
+            verdict = report["verdict"]
+            assert verdict["severity"], label
+            assert "score" not in verdict, label
+            assert "summary" not in verdict, label
+
+
+class TestV2ModelContract:
+    """The pydantic models are the published contract — keep them true.
+
+    Nothing validates the hand-built dicts at runtime, so without these the
+    models are documentation with no mechanism to stay correct.
+    """
+
+    @pytest.mark.parametrize(
+        "label",
+        ["pdf", "html", "office", "text", "script", "empty", "unknown"],
+    )
+    def test_report_validates_against_model(self, daemon, label):
+        if not xspct.HAS_PYDANTIC:
+            pytest.skip("pydantic not installed")
+        xspct._V2ScanReport.model_validate(_report_matrix(daemon)[label])
+
+    @pytest.mark.parametrize(
+        "label",
+        ["pdf", "html", "office", "text", "script", "empty", "unknown"],
+    )
+    def test_report_emits_no_undeclared_keys(self, daemon, label):
+        """model_validate ignores extras, so check the key sets directly.
+
+        A builder key the model never declared is a field clients cannot
+        discover from the OpenAPI spec.
+        """
+        if not xspct.HAS_PYDANTIC:
+            pytest.skip("pydantic not installed")
+
+        undeclared = []
+
+        def _check(payload, model, path):
+            for key, value in payload.items():
+                field = model.model_fields.get(key)
+                if field is None:
+                    undeclared.append(f"{path}.{key}" if path else key)
+                    continue
+                nested = _nested_model(field.annotation)
+                if nested is not None and isinstance(value, dict):
+                    _check(value, nested, f"{path}.{key}" if path else key)
+                elif nested is not None and isinstance(value, list):
+                    for i, item in enumerate(value):
+                        if isinstance(item, dict):
+                            _check(item, nested, f"{path}.{key}[{i}]")
+
+        def _nested_model(annotation):
+            """Return the BaseModel behind a (possibly Optional/list) annotation."""
+            import typing
+
+            if isinstance(annotation, type) and issubclass(
+                annotation, xspct._pydantic.BaseModel
+            ):
+                return annotation
+            for arg in typing.get_args(annotation) or ():
+                found = _nested_model(arg)
+                if found is not None:
+                    return found
+            return None
+
+        _check(_report_matrix(daemon)[label], xspct._V2ScanReport, "")
+        assert not undeclared, f"{label}: keys absent from the models: {undeclared}"
+
+    # Named here rather than read from daemon._NON_NULLABLE_MODELS: the test
+    # must not share its oracle with the code under test, or emptying that
+    # constant would silently disable this check.
+    V2_SCHEMA_NAMES = (
+        "V2Engine",
+        "V2File",
+        "V2AnalyzerInfo",
+        "V2Scan",
+        "V2Verdict",
+        "V2IocEntry",
+        "V2Iocs",
+        "V2Finding",
+        "V2ScanReport",
+        "ProcessingResponse",
+        "QueryResponse",
+    )
+
+    def test_published_v2_schema_declares_no_nullable(self, daemon):
+        """anyOf: [T, null] would tell clients to guard a null we never send."""
+        if not xspct.HAS_PYDANTIC:
+            pytest.skip("pydantic not installed")
+        import json
+
+        schemas = xspct._get_openapi_spec()["components"]["schemas"]
+        missing = [n for n in self.V2_SCHEMA_NAMES if n not in schemas]
+        assert not missing, f"v2 schemas absent from the spec: {missing}"
+        offenders = [
+            name
+            for name in self.V2_SCHEMA_NAMES
+            if '"type": "null"' in json.dumps(schemas[name])
+        ]
+        assert not offenders, f"v2 schemas still declare null: {sorted(offenders)}"

@@ -41,6 +41,20 @@
   brevity.
 
 ### Changed
+- **The v2 response schema never emits JSON `null`.** Every field is now either
+  present with a meaningful value or absent. `file.mime`, `file.magic`,
+  `verdict.score` and `verdict.summary` were the only fields that could come
+  back as `null`; the first two are now omitted when undetermined, and the
+  latter two are omitted until scoring is implemented (`verdict.severity`
+  already carries `"unknown"`). Clients whose JSON decoder maps `null` to a
+  truthy sentinel — Rspamd's `ucl.null` — no longer need to guard every field
+  read. The invariant is enforced by tests across the finished report, the
+  `202` processing/dropped envelopes, and `/v1/capabilities`.
+- **The OpenAPI spec no longer marks v2 fields nullable.** `Optional[...]` on
+  the schema models published as `anyOf: [T, null]`, telling clients to expect
+  a null the builder cannot produce. v2 schemas now publish optional fields as
+  plain typed properties absent from `required`. The legacy v1 schemas are
+  unchanged — those shapes genuinely did emit nulls.
 - **The Redis report key now includes the report schema version**
   (`<prefix><schema_version>:<sha256>`). Previously an upgrade could serve an
   old-shape report out of a warm cache for up to `expire` seconds. Entries

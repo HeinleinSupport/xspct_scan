@@ -132,10 +132,8 @@ Sections are **omitted when empty** (no null/empty noise).
   },
 
   "verdict": {
-    "score": null,
     "severity": "unknown",
     "labels": [],
-    "summary": null,
     "contributors": {}
   },
 
@@ -178,6 +176,33 @@ Sections are **omitted when empty** (no null/empty noise).
 
 ### Response schema reference
 
+#### The null contract
+
+**Every field is either present with a meaningful value, or absent. The API
+never emits JSON `null`.** This holds for `/v1/scan` (200 and 202), `/v1/query`,
+and `/v1/capabilities`, and is enforced by tests rather than convention.
+
+Consumers can therefore use plain presence and truthiness checks. That matters
+for clients whose JSON decoder turns `null` into a truthy sentinel rather than a
+nil value — Rspamd's `ucl.null` being the case this contract was written for,
+where `if report.field then` would otherwise take the wrong branch.
+
+Two consequences worth stating explicitly:
+
+- **`flags` keys are present-and-`true` or absent — never `false`.** Test them
+  with plain truthiness; there is no tri-state.
+- **Empty collections are omitted, not emitted as `[]`/`{}`/`null`.** `findings`,
+  the `iocs` buckets, `content`, `document` and `engines` simply do not appear
+  when there is nothing to report.
+
+`verdict.score` and `verdict.summary` are not currently emitted — scoring is not
+implemented, and `verdict.severity` (`"unknown"` by default) is always present.
+They will appear as ordinary optional fields once scoring lands.
+
+> **Changed in 0.7.2** — `file.mime`, `file.magic`, `verdict.score` and
+> `verdict.summary` previously came back as `null` when unset; they are now
+> omitted. The OpenAPI spec no longer marks v2 fields `nullable`.
+
 #### Always-present top-level keys
 
 | Key | Type | Description |
@@ -201,8 +226,8 @@ Sections are **omitted when empty** (no null/empty noise).
 | `sha1` | string | SHA-1 hex digest |
 | `rspamd_digest` | string | Rspamd-compatible keyed BLAKE2b-512 digest (128 hex chars) — matches `part->digest` in Rspamd's MIME parser |
 | `size` | int | File size in bytes |
-| `mime` | string/null | libmagic MIME type |
-| `magic` | string/null | libmagic description |
+| `mime` | string | libmagic MIME type; absent when undetermined |
+| `magic` | string | libmagic description; absent when undetermined |
 | `type` | string | `pdf`\|`html`\|`office`\|`odf`\|`image`\|`archive`\|`script`\|`lnk`\|`text`\|`unknown` |
 | `resolution` | string | `WxH` pixel dimensions for image files (e.g. `2096x4608`); absent for non-image files |
 
@@ -228,10 +253,10 @@ Sections are **omitted when empty** (no null/empty noise).
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `score` | int/null | 0–100 risk score; `null` until scoring is configured |
+| `score` | int | 0–100 risk score; absent until scoring is implemented |
 | `severity` | string | `unknown`\|`clean`\|`low`\|`medium`\|`high`\|`critical` |
 | `labels` | list | Taxonomy labels (e.g. `phishing`, `macro`, `redirect`) |
-| `summary` | string/null | Human-readable one-liner |
+| `summary` | string | Human-readable one-liner; absent until scoring is implemented |
 | `contributors` | object | Signal-to-weight breakdown of the score |
 
 #### `flags`
@@ -366,7 +391,7 @@ Poll `/v1/query?hash=<sha256>` until `status` is no longer `"processing"`.
       "timings_s": {}
     }
   },
-  "verdict": { "score": null, "severity": "unknown", "labels": [] },
+  "verdict": { "severity": "unknown", "labels": [] },
   "status": "processing",
   "file_hash": "sha256hex...",
   "time_taken": 10.0,
