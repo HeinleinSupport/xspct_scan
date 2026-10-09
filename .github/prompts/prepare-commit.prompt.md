@@ -15,6 +15,10 @@ Run the complete pre-commit workflow for xspct_scan and suggest a commit message
 ```
 Report any files reformatted.
 
+### 1.5 Remove AI code slop
+
+Check the diff against main, and remove all AI generated slop introduced in this branch.
+
 ### 2. Lint
 ```bash
 .venv/bin/ruff check src/ tests/
