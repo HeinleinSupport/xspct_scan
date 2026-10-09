@@ -7,6 +7,8 @@
 
 ## Unreleased
 
+## 0.8.1 — 2026-10-09
+
 ### Fixed
 - **`analyze_javascript` QuickJS emulation never produced output** — the
   setup referenced `print` before it existed, and the `quickjs` binding
