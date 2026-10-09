@@ -34,6 +34,13 @@ path = [
 SPDX-FileCopyrightText = "2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>"
 SPDX-License-Identifier = "EUPL-1.2"
 
+# ── Logos (may be shared, but not modified) ────────────────────────────────
+[[annotations]]
+path = "docs/_static/xspct_scan*.svg"
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>"
+SPDX-License-Identifier = "CC-BY-ND-4.0"
+
 # ── Prompt workflows ───────────────────────────────────────────────────────
 [[annotations]]
 path = ".github/prompts/**"

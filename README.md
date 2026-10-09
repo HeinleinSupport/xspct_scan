@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/_static/xspct_scan-dark.svg">
+    <img src="docs/_static/xspct_scan.svg" alt="xspct_scan" width="400">
+  </picture>
+</p>
+
 # xspct_scan
 
 **xspct_scan** is a second-stage scanner for email content: attachments,
@@ -897,3 +904,7 @@ See [CHANGELOG.md](CHANGELOG.md).
 ## Licence
 
 [EUPL-1.2](LICENSE) — © 2026 Carsten Rosenberg, Heinlein Support GmbH
+
+The xspct_scan logo (`docs/_static/xspct_scan*.svg`) is licensed under
+[CC BY-ND 4.0](LICENSES/CC-BY-ND-4.0.txt): it may be shared, but only
+unmodified.
