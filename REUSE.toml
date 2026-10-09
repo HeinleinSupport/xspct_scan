@@ -38,7 +38,7 @@ SPDX-License-Identifier = "EUPL-1.2"
 [[annotations]]
 path = "docs/_static/xspct_scan*.svg"
 precedence = "override"
-SPDX-FileCopyrightText = "2026 Carsten Rosenberg <c.rosenberg@heinlein-support.de>"
+SPDX-FileCopyrightText = "2026 Heinlein Support GmbH"
 SPDX-License-Identifier = "CC-BY-ND-4.0"
 
 # ── Prompt workflows ───────────────────────────────────────────────────────
