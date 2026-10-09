@@ -1,6 +1,6 @@
 <!--
   xspct_scan (dark)
-  Async scanner for Office/PDF/archive attachments (YARA, ClamAV, OCR)
+  Second-stage scanner for email attachments, HTML/text parts and images (YARA, ClamAV, OCR)
   
   Author:  Carsten Rosenberg
   Company: Heinlein Support GmbH
@@ -11,14 +11,14 @@
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 566 110" width="566" height="110">
   <title>xspct_scan (dark)</title>
-  <desc>Async scanner for Office/PDF/archive attachments (YARA, ClamAV, OCR)</desc>
+  <desc>Second-stage scanner for email attachments, HTML/text parts and images (YARA, ClamAV, OCR)</desc>
   <metadata>
     <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
              xmlns:dc="http://purl.org/dc/elements/1.1/"
              xmlns:cc="http://creativecommons.org/ns#">
       <cc:Work rdf:about="">
         <dc:title>xspct_scan (dark)</dc:title>
-        <dc:description>Async scanner for Office/PDF/archive attachments (YARA, ClamAV, OCR)</dc:description>
+        <dc:description>Second-stage scanner for email attachments, HTML/text parts and images (YARA, ClamAV, OCR)</dc:description>
         <dc:creator><cc:Agent><dc:title>Carsten Rosenberg</dc:title></cc:Agent></dc:creator>
         <dc:publisher><cc:Agent><dc:title>Heinlein Support GmbH</dc:title></cc:Agent></dc:publisher>
         <dc:rights><cc:Agent><dc:title>(c) 2026 Heinlein Support GmbH</dc:title></cc:Agent></dc:rights>
