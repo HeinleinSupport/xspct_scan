@@ -1,26 +1,109 @@
 # xspct_scan
 
-**xspct_scan** is an async HTTP daemon that analyses Office, PDF, HTML, ODF,
-image, archive, and standalone-script files for malware indicators. It
-combines static structural analysis (VBA/OLE parsing, PDF object trees,
-archive extraction), signature-based scanning (YARA, ClamAV), and IOC/text
-extraction (URLs, IPs, domains, hashes, and more, including from OCR and
-decoded macros) into a single concurrent analysis pipeline, returning a
-unified JSON (or msgpack/CBOR) report per file.
+**xspct_scan** is a second-stage scanner for email content: attachments,
+but also HTML and plain-text parts and images. The mail filter does its fast
+checks first, then hands the parts it wants a closer look at to xspct_scan,
+together with a time limit. xspct_scan returns one structured report per
+part: what it is, what it contains, which IOCs it carries, and how
+suspicious it looks.
 
-It is designed to sit alongside a mail-filtering stack —
-built primarily to integrate with [Rspamd](https://rspamd.com/) as an
-attachment-scanning backend, but usable standalone via its HTTP API or the
-bundled `xspct_scan_client` CLI for on-demand or scripted scanning. Analysis
-is parallelised across per-file-type analyzers with a two-tier
-foreground/background concurrency model, so slow scans degrade gracefully
-(`202 Accepted` + polling) instead of blocking the caller, and results can be
-cached in Redis (or served from an in-memory LRU) to avoid re-analysing the
-same file hash.
+## Introduction
+
+xspct_scan goes back to the Emotet waves of 2019. Emotet was spread through
+Office documents with obfuscated VBA macros. The documents were often unique
+per campaign, so hash- and signature-based scanning missed them, and the
+only reliable signal was the content of the document itself.
+[Emotet mit Rspamd und oletools bekämpfen](https://www.heinlein-support.de/blog/news/emotet-mit-rspamd-und-oletools-bekaempfen)
+(Heinlein Support, 2019, German) describes the answer at the time: a small
+daemon, [olefy](https://github.com/HeinleinSupport/olefy), that runs
+[oletools](https://github.com/decalage2/oletools) on Office attachments and
+lets [Rspamd](https://rspamd.com/) score the result, for example flagging a
+macro that both runs automatically and calls suspicious functions.
+
+olefy worked, but it showed where the approach ends. Every new format or
+feature, such as RTF or a password list for encrypted files, meant an
+architecture change. Deeper analysis did not fit at all: deobfuscation, PDF
+analysis, OCR or password cracking take seconds to minutes, while Rspamd
+works in milliseconds per rule.
+
+The talk
+[Beyond Emotet – Next Generation Open Source E-Mail Analysis](https://www.heinlein-support.de/sites/default/files/media/documents/2022-03/CLT2021-Beyond-Emotet.pdf)
+(Chemnitzer Linux-Tage 2021) proposed a way around that: a separate
+inspector that runs *pre-queue*, next to Rspamd, as a second stage.
+
+1. Rspamd does its fast analysis and rejects known viruses and obvious spam
+   right away.
+2. For selected or suspicious attachments and mail parts, Rspamd sends the
+   content, its metadata and a time limit to the inspector.
+3. The inspector runs its analyzers in parallel and, when the time limit is
+   reached, returns everything that has finished. The rest keeps running in
+   the background.
+4. If the report is conclusive, Rspamd accepts or rejects the mail. If not,
+   it soft-rejects it. The sender retries after a few minutes, and by then
+   the full report is waiting in the cache.
+
+Because the decision happens while the mail is still being accepted, there
+is no quarantine and no risk of backscatter, and Rspamd itself stays fast.
+
+xspct_scan is that inspector. It carries the olefy idea, analyse the content
+and not just the hash, over to today's mail content: Office files, but also
+PDFs, HTML and SVG pages, plain text, LNK shortcuts, standalone scripts,
+ISO/VHD and other archives, and images with text or QR codes. That covers
+the attachments as well as the mail's own HTML and text parts and inline
+images.
+
+## Overview
+
+```text
+                        ┌──── reject: known virus / obvious spam
+                        │
+ MTA ──▶ Rspamd (stage 1, ms) ──(file, metadata, time limit)──▶ xspct_scan (stage 2)
+          ▲    │                                                     │
+          │    └──── accept / reject / soft-reject ◀──(report)───────┤
+          │                                                          │
+          └── sender retries ── cached full report ◀── background ───┘
+```
+
+Each file type has its own analyzer, and all analyzers for a file run
+concurrently. They fall into five groups:
+
+| Group | Examples |
+| --- | --- |
+| Structure | VBA/OLE via oletools, PDF objects via PyMuPDF, ODF, LNK |
+| Signatures | YARA, ClamAV |
+| Content | OCR, QR codes, JavaScript emulation, text |
+| IOCs | URLs, IPs, domains, hashes |
+| Sub-files | archive members, embedded objects, analysed recursively |
+
+- **One HTTP call per part.** `POST /v1/scan` takes an attachment or mail
+  part and returns a unified JSON (or msgpack/CBOR) report. Rspamd is the
+  primary client, but the API and the bundled `xspct_scan_client` CLI work
+  standalone for on-demand or scripted scanning.
+- **Time-boxed, not blocking.** The caller sets the time limit per request
+  (`timeout` query parameter or `timeout_s` in the metadata part). When it
+  runs out, xspct_scan returns `202 Accepted` with the partial report and
+  lists the analyzers still running under `scan.analyzers.pending`. The scan
+  continues in the background, and the caller can poll
+  `/v1/query?hash=...` or simply resend the file later.
+- **Structured result, not just a verdict.** The report groups file
+  metadata, findings, IOCs, extracted text and engine results, and adds a
+  summary verdict, so the mail filter can apply its own policy.
+- **Analysed once per hash.** Reports are cached by file hash in an
+  in-memory LRU and optionally in Redis (shared across instances), and a
+  request for a hash that is already being scanned attaches to that scan.
+  A campaign's repeated attachment, or the retry after a soft reject, is
+  answered from the same analysis. Separate slot pools for foreground and
+  background scans keep long-running scans from starving new requests.
+- **Optional dependencies stay optional.** Each analyzer and enrichment is
+  enabled in the YAML config and skips cleanly when its library is not
+  installed. `/v1/capabilities` tells the client which file types the
+  running instance can handle.
 
 ## Table of Contents
 
 - [xspct\_scan](#xspct_scan)
+  - [Introduction](#introduction)
+  - [Overview](#overview)
   - [Table of Contents](#table-of-contents)
   - [Features](#features)
     - [Document analysis](#document-analysis)
