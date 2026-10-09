@@ -7,6 +7,16 @@
 
 ## Unreleased
 
+## 0.8.2 — 2026-10-09
+
+### Changed
+- **README introduction and project overview** — the README now
+  explains where xspct_scan comes from (Emotet, olefy) and the
+  second-stage, pre-queue inspector concept from the CLT 2021 talk
+  "Beyond Emotet", and gives a project overview (two-stage flow with
+  Rspamd, analyzer groups, time-boxed scans, hash-based caching)
+  before the feature list.
+
 ## 0.8.1 — 2026-10-09
 
 ### Fixed
