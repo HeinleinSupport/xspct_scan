@@ -344,6 +344,15 @@ def _extra_digests(data: bytes) -> "tuple[str, str]":
     )
 
 
+_JS_ESCAPE_RE = re.compile(r"%u([0-9A-F]{4})|%([0-9A-F]{2})")
+
+
+def _js_unescape(escaped: str) -> str:
+    """Decode JS ``escape()`` output; lone surrogates become U+FFFD."""
+    units = _JS_ESCAPE_RE.sub(lambda m: chr(int(m[1] or m[2], 16)), escaped)
+    return units.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+
+
 def _normalize_pdf_date(date_str: str) -> "str | None":
     """Convert a PDF date string to ISO-8601.
 
@@ -4010,60 +4019,104 @@ class InspectorDaemon:
         if HAS_QUICKJS and _quickjs_enabled and len(js_src) <= _JS_EMULATE_LIMIT:
             try:
                 ctx = _quickjs.Context()
-
-                # Stub out browser/PDF globals that the sandbox doesn't have
-                ctx.eval("""
-                    var document = {write: function(s){ print(s); }, cookie: '', location: {href:''}};
-                    var window = {location: {href:''}, navigator: {}};
-                    var app = {launchURL: print, openDoc: print};
-                    var console = {log: print, warn: print, error: print};
-                """)
-
-                # Capture print() output
                 ctx.set_memory_limit(32 * 1024 * 1024)  # 32 MB heap cap
                 ctx.set_max_stack_size(
                     256 * 1024
                 )  # 256 KB stack — limits deep recursion
                 ctx.set_time_limit(2)  # 2-second CPU hard limit
-                # Replace print with a collector
-                # Caps: max 500 individual calls and 64 KB of total text so that a
-                # tight print-loop cannot grow the Python-side list unboundedly
-                # (QuickJS heap is capped separately via set_memory_limit/set_time_limit,
-                # but that does not constrain the host-Python memory used here).
-                _COLLECT_MAX_CALLS = 500
-                _COLLECT_MAX_BYTES = 64 * 1024
-                collected: list[str] = []
-                _collect_bytes = 0
+
+                # The binding rejects Python callbacks while a time limit is set.
+                combined_output = ""
                 _collect_truncated = False
-
-                def _collect(s=""):
-                    nonlocal _collect_bytes, _collect_truncated
-                    if _collect_truncated:
-                        return
-                    chunk = str(s)
-                    _collect_bytes += len(chunk)
-                    if (
-                        len(collected) >= _COLLECT_MAX_CALLS
-                        or _collect_bytes > _COLLECT_MAX_BYTES
-                    ):
-                        _collect_truncated = True
-                        return
-                    collected.append(chunk)
-
-                ctx.add_callable("print", _collect)
-                _js_runtime_error = False
                 try:
-                    ctx.eval(js_src)
+                    ctx.eval("""
+                        const __xspct_sandbox = Object.freeze((function() {
+                            // Primitive state and captured natives: prototypes are payload-controlled.
+                            var native_string = String;
+                            var native_apply = Reflect.apply;
+                            var native_slice = String.prototype.slice;
+                            var native_escape = escape;
+                            var output = '';
+                            var output_calls = 0;
+                            var output_truncated = false;
+                            // Caps: 500 calls and 65536 UTF-16 code units, separators included.
+                            function emit(args, joiner) {
+                                if (output_truncated) return;
+                                // toString() may print reentrantly; check caps after converting.
+                                var value = '';
+                                for (var i = 0; i < args.length; i++) {
+                                    value = i ? value + joiner + native_string(args[i])
+                                              : native_string(args[i]);
+                                }
+                                if (output_truncated) return;
+                                if (output_calls >= 500) {
+                                    output_truncated = true;
+                                    return;
+                                }
+                                var sep = output_calls ? ' ' : '';
+                                var remaining = 65536 - output.length - sep.length;
+                                if (value.length > remaining) {
+                                    output_truncated = true;
+                                    if (remaining <= 0) return;
+                                    value = native_apply(native_slice, value, [0, remaining]);
+                                }
+                                output = output + sep + value;
+                                output_calls += 1;
+                            }
+                            function print() { emit(arguments, ' '); }
+                            return Object.freeze({
+                                document: {write: function() { emit(arguments, ''); }, cookie: '', location: {href:''}},
+                                window: {location: {href:''}, navigator: {}},
+                                app: {launchURL: print, openDoc: print},
+                                console: {log: print, warn: print, error: print},
+                                print: print,
+                                // Lone surrogates can't cross the binding; escape to ASCII.
+                                get_output: function() { return native_escape(output); },
+                                get_truncated: function() { return output_truncated; }
+                            });
+                        })());
+                        // Configurable (unlike `var`) so a payload's top-level
+                        // `let console = ...` is not a redeclaration SyntaxError.
+                        ['document', 'window', 'app', 'console', 'print'].forEach(function(name) {
+                            Object.defineProperty(globalThis, name, {
+                                value: __xspct_sandbox[name],
+                                writable: true,
+                                configurable: true,
+                            });
+                        });
+                    """)
+                    # Global scope keeps top-level vars visible to Function()/indirect eval.
+                    try:
+                        ctx.eval(js_src)
+                    except Exception as exc:
+                        logger.debug(
+                            "QuickJS payload error (%s): %s", source_label, exc
+                        )
+                    # Jobs can re-queue themselves, so cap both count and wall time.
+                    _jobs_deadline = time.monotonic() + 2
+                    try:
+                        for _ in range(10_000):
+                            if (
+                                time.monotonic() > _jobs_deadline
+                                or not ctx.execute_pending_job()
+                            ):
+                                break
+                    except Exception as exc:
+                        logger.debug(
+                            "QuickJS pending job error (%s): %s", source_label, exc
+                        )
+                    combined_output = _js_unescape(
+                        ctx.eval("__xspct_sandbox.get_output()")
+                    )
+                    _collect_truncated = ctx.eval("__xspct_sandbox.get_truncated()")
                 except _quickjs.JSException as exc:
-                    _js_runtime_error = True
                     logger.debug("QuickJS JSException (%s): %s", source_label, exc)
                     # JSException is expected when stubs are incomplete; suppress the hit
                     # to avoid false positives on clean scripts that reference browser APIs.
                 except Exception:
                     pass
 
-                if collected:
-                    combined_output = " ".join(collected)
+                if combined_output:
                     logger.debug(
                         "QuickJS output from %s (%s): %r",
                         source_label,

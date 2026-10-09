@@ -7,6 +7,31 @@
 
 ## Unreleased
 
+### Fixed
+- **`analyze_javascript` QuickJS emulation never produced output** — the
+  setup referenced `print` before it existed, and the `quickjs` binding
+  rejects Python callbacks while a time limit is set. Output is now
+  collected in pure JS, restoring the `DynamicJS`/`emulated-url` and
+  `DynamicJS`/`emulated-obfuscation` hits.
+- **QuickJS emulation coverage** — the script runs at global scope, so
+  top-level variables stay visible to nested `Function()` / indirect `eval`
+  code. The `document`, `window`, `app`, `console` and `print` shims are
+  writable, configurable globals, so scripts can reach them via `globalThis`
+  or shadow them with their own top-level `let`. All arguments of
+  `console.log()` / `document.write()` are captured, not just the first.
+  Queued Promise jobs (`.then()`, `async` functions) are run after the
+  script, capped at 10,000 jobs and a 2-second drain deadline.
+- **QuickJS output collector hardening** — because the collector never
+  passes its buffer to array, JSON or other prototype methods, overriding
+  built-ins such as `Array.prototype.push` or `toJSON` cannot expose the
+  buffer, forge findings, or exceed the output cap of 500 calls and 65,536
+  UTF-16 code units (separators and reentrant prints from `toString()`
+  included). A print that would overflow the cap is truncated to fit instead
+  of dropped, so a single large `document.write` still yields the IOCs at
+  its start. Lone UTF-16 surrogates — printed by the script, left by
+  truncation, or in the script's completion value — no longer make the
+  Python-side conversion fail and discard all captured output.
+
 ## 0.8.0 — 2026-09-02
 
 ### Added
